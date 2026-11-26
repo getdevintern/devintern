@@ -18,9 +18,9 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern worker` surface
 - Status: `live`
-- Evidence: GitLab worker suite
-- Missing: GitHub worker path (Jira, Trello, Azure DevOps, Linear, and Asana: see the tracker files).
-- Last reviewed: 2026-11-17
+- Evidence: GitLab worker suite; `tests/code/github-tracker-worker.test.ts` (`test:e2e:tracker`) for GitHub Issues
+- Missing: Jira, Trello, Azure DevOps, Linear, and Asana: see the tracker files.
+- Last reviewed: 2026-11-26
 
 ### Scheduled `[[automations]]`: schedule, no-op, branch/push policy, hot reload
 
@@ -73,10 +73,10 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 ### Native service install/uninstall
 
 - Surface: `devintern worker` surface
-- Status: `gap`
-- Evidence: —
-- Missing: systemd/launchd path without touching the host service manager.
-- Last reviewed: 2026-11-17
+- Status: `partial`
+- Evidence: `tests/service/systemd-service.test.ts` (`bun run --filter @devintern/e2e test:e2e:service`; needs Docker). The `worker init` wizard's service step, driven through a PTY in a systemd container, installs an enabled, running user unit with an absolute Bun runtime and bundle path, the recorded `PATH`, and `WorkingDirectory=~/.devintern`; the service reads the workspace `.env` and pushes a markdown task branch; `worker status` and `/api/worker` report the service pid; `kill -9` is restarted by systemd; a second wizard run updates the unit in place.
+- Missing: launchd (macOS); uninstall (no command exists); license-denied start (the unit crash-loops every 30 s while the wizard reports it running); `loginctl enable-linger` (the container has no polkit, so the wizard's linger step fails there and the suite enables lingering as root).
+- Last reviewed: 2026-11-26
 
 ### Auto-update
 
@@ -100,7 +100,7 @@ Priority numbers are the global ranking from the
 [index](../coverage-matrix.md#priority-backlog); lower runs first.
 
 - Priority 13: Quiet hours, concurrency, and orphan recovery on a deterministic local workspace. Scheduled automations are implemented by `tests/local/worker-automations.test.ts`. Scheduled estimations are implemented by `tests/local/worker-scheduled-estimation.test.ts`.
-- Priority 18: Native service install and auto-update in a sandboxed user-scope fixture.
+- Priority 18: Native service install and auto-update in a sandboxed user-scope fixture. The systemd install is covered by `tests/service/systemd-service.test.ts`; launchd and auto-update remain.
 
 ## Test notes
 
@@ -187,3 +187,10 @@ bun run --filter @devintern/e2e test
 ### Multi-repo team routing
 
 `tests/local/worker-team-routing.test.ts` verifies team routing, ambiguous and unrouted task skips, and layered repo and team environment settings with local bare remotes.
+
+### Native systemd service
+
+- Proves: the wizard's service step on a blank Debian box with systemd as PID 1 (unit contents, enabled and active), that the service loads `~/.devintern/.env` (license skip, agent path, `MARKDOWN_TASKS_DIR`) and pushes a task branch to a local bare remote, that `worker status` and the dashboard see the service pid, restart after `kill -9`, and an in-place update on a second wizard run.
+- How: `scripts/service.ts` packs the built CLI with `bun pm pack`; `helpers/systemd-container.ts` builds `infrastructure/service/Dockerfile`, which installs the tarball with `bun add -g` for a non-root user, starts a privileged container (never `--network host`), and enables lingering as root. `worker init --non-interactive` writes the markdown workspace, then `expect` drives the interactive wizard. The workspace `.env` sets `TASK_TRACKER=markdown`, because the wizard reads the tracker from there and not from `[defaults].tracker`.
+- Run: `bun run --filter @devintern/e2e test:e2e:service`.
+- Prerequisites: the built CLI and a Docker daemon your user can access. No network credentials. The first run builds the image (about a minute); the suite then takes about 40 s, most of it the unit's `RestartSec=30`. The container is removed afterwards; the `devintern-e2e-systemd:local` image stays cached.

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import definition from "../plugin";
 import { createTestContext, makeTempDir, removeTempDir, runDefinition } from "../../shared/harness";
@@ -100,8 +100,60 @@ describe("pr-explainer-image", () => {
     });
   }
 
+  describe("promptFile resolution", () => {
+    let pipelineDir: string;
+    beforeEach(() => {
+      pipelineDir = makeTempDir("pr-explainer-image-pipeline-");
+      for (const root of [dir, pipelineDir]) mkdirSync(join(root, "prompts"), { recursive: true });
+      writeFileSync(join(pipelineDir, "prompts", "image.md"), "PIPELINE PROMPT");
+      writeFileSync(join(dir, "prompts", "image.md"), "CHECKOUT PROMPT");
+    });
+    afterEach(() => {
+      removeTempDir(pipelineDir);
+    });
+
+    async function run(pipelineDirValue: string | null, promptFile: string) {
+      let captured = "";
+      const context = createTestContext({
+        workingDir: dir,
+        pipelineDir: pipelineDirValue,
+        diff,
+        agentOutput: (prompt) => {
+          captured = prompt;
+          writeFileSync(outputPath(prompt), png);
+          return "done";
+        },
+      });
+      await runDefinition(definition, context, { config: { promptFile } });
+      return { captured, warnings: context.warnings };
+    }
+
+    test("reads a relative promptFile from pipelineDir", async () => {
+      const { captured } = await run(pipelineDir, "./prompts/image.md");
+      expect(captured).toContain("PIPELINE PROMPT");
+      expect(captured).not.toContain("CHECKOUT PROMPT");
+    });
+
+    test("reads a relative promptFile from workingDir when pipelineDir is null", async () => {
+      const { captured } = await run(null, "./prompts/image.md");
+      expect(captured).toContain("CHECKOUT PROMPT");
+    });
+
+    test("reads an absolute promptFile as written", async () => {
+      const { captured } = await run(pipelineDir, join(dir, "prompts", "image.md"));
+      expect(captured).toContain("CHECKOUT PROMPT");
+    });
+
+    test("warns with the absolute path tried when missing under pipelineDir", async () => {
+      writeFileSync(join(dir, "prompts", "only-in-checkout.md"), "CHECKOUT ONLY");
+      const { captured, warnings } = await run(pipelineDir, "./prompts/only-in-checkout.md");
+      expect(captured).toBe("");
+      expect(warnings.join("\n")).toContain(join(pipelineDir, "prompts", "only-in-checkout.md"));
+    });
+  });
+
   test("rejects missing or malformed configuration before running", () => {
-    for (const promptFile of [undefined, "", 123]) {
+    for (const promptFile of [undefined, "", "   ", 123]) {
       expect(() => definition.create({ promptFile })).toThrow("promptFile");
     }
   });

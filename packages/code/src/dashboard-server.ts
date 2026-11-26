@@ -34,6 +34,7 @@ import { handleOverview } from "./lib/observability/dashboard-overview";
 import { handleSources } from "./lib/observability/dashboard-sources";
 import { handleQueuedWork } from "./lib/observability/queued-work";
 import { handleCancelTask, handleCreateTask } from "./lib/observability/dashboard-tasks";
+import { VERSION } from "./lib/cli/bootstrap";
 import { DashboardReports } from "./lib/observability/dashboard-report";
 import type { DashboardReportDeps } from "./lib/observability/dashboard-report";
 import { handleWorkspace } from "./lib/observability/dashboard-workspace";
@@ -386,6 +387,9 @@ export function startDashboardServer(
     if (reportPreview) {
       return reports.preview(reportPreview[1], await readJsonBody(request));
     }
+    if (pathname === "/api/reports/preview") {
+      return reports.previewGeneral(await readJsonBody(request));
+    }
     if (pathname === "/api/reports") {
       return reports.submit(await readJsonBody(request));
     }
@@ -415,7 +419,7 @@ export function startDashboardServer(
           return json(await routeWrite(request, pathname));
         }
         if (pathname === "/api/health") {
-          return json({ status: 200, body: { status: "ok" } });
+          return json({ status: 200, body: { status: "ok", version: VERSION } });
         }
         if (pathname === "/api/automations") {
           return json(handleAutomations(data));
@@ -458,7 +462,7 @@ export function startDashboardServer(
           return json(handleStats(data, url.searchParams));
         }
         if (pathname === "/api/worker") {
-          return json(handleWorkerStatus(data));
+          return json(handleWorkerStatus(data, process.pid));
         }
         if (pathname === "/api/sources") {
           return json(handleSources(data));

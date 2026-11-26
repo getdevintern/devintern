@@ -38,3 +38,9 @@ jobs:
         run: bun run turbo run test --filter=@devintern/e2e
         env:
           AGENT_CLI_PATH: bun
+
+      # Blank-machine smoke: packs the CLI built above, installs it in a clean
+      # oven/bun Debian container (--network none), and runs the
+      # `worker init --non-interactive` scenarios with no TTY. ~1 minute.
+      - name: worker init blank-machine smoke (Docker)
+        run: bun run --filter @devintern/e2e test:docker

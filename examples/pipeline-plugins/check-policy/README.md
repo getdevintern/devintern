@@ -15,22 +15,25 @@ files it contains.
 | File                            | Purpose                                             |
 | ------------------------------- | --------------------------------------------------- |
 | `plugin.ts`                     | The step definition and diff parser.                |
-| `settings.json`                 | Pipeline registration.                              |
+| `pipeline.json`                 | Workspace pipeline file. |
 | `fixtures/sample.diff`          | A fixture diff that adds `secrets/prod.key`.        |
 | `tests/check-policy.test.ts`    | Automated validation of the parser and both results.|
 
 ## Setup
 
-1. Copy the plugin into your repository:
+1. Copy the plugin and its pipeline file into your workspace:
 
    ```bash
-   mkdir -p .devintern-code/steps
-   cp examples/pipeline-plugins/check-policy/plugin.ts .devintern-code/steps/check-policy.ts
-   bun add -d @getdevintern/code
+   mkdir -p ~/.devintern/pipelines/steps
+   cp examples/pipeline-plugins/check-policy/plugin.ts ~/.devintern/pipelines/steps/check-policy.ts
+   cp examples/pipeline-plugins/check-policy/pipeline.json ~/.devintern/pipelines/backend.json
+   cd ~/.devintern/pipelines && bun add @getdevintern/code
    ```
 
-2. Merge the `pipeline` block from `settings.json` into
-   `.devintern-code/settings.json` and adjust `forbiddenPaths`.
+2. Set `pipeline_file = "pipelines/backend.json"` on the repository's
+   `[[repos]]` entry in `~/.devintern/workspace.toml` (see
+   [Install and copy a plugin](../README.md#install-and-copy-a-plugin)). Adjust
+   `forbiddenPaths` in the copied pipeline file.
 
 ## Options
 

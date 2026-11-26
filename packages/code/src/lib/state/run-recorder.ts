@@ -2,7 +2,7 @@
  * Run Records
  *
  * Structured, queryable record of how each ticket (or PR mention) was
- * handled, persisted in the shared `.devintern-code/queue.db`. One `runs`
+ * handled, persisted in the shared workspace `queue.db`. One `runs`
  * row per attempt; one `run_stages` row per pipeline stage. Captured from
  * day one because run history cannot be backfilled — today's artifacts are
  * loose files under the output directory.
@@ -14,10 +14,22 @@
 
 import { redactText } from "@devintern/utils";
 import { Database } from "bun:sqlite";
+import { mkdirSync, readdirSync } from "fs";
+import { dirname, join } from "path";
 import { computeRunActivity, hostTimeZone } from "./run-activity";
 import type { RunActivity } from "./run-activity";
 import { configureSqliteConnection } from "./sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
+import { runOutputsDir, runOutputsPath } from "../workspace/paths";
+import {
+  ingestRunOutputsFile,
+  initRunOutputsSchema,
+  insertRunOutputs,
+  listRunOutputs,
+  RUN_ID_ENV,
+  RUN_OUTPUTS_ENV,
+} from "./run-outputs";
+import type { RunOutputRecord, StoredRunOutput } from "./run-outputs";
 
 export type RunOrigin =
   | "task"
@@ -143,8 +155,19 @@ export interface RunStatsWeek {
   count: number;
 }
 
+/** Terminal-status counts for one run origin. */
+export type RunStatsOutcomeCounts = Record<TerminalRunStatus, number>;
+
+/**
+ * Run origin left out of the headline rates and the per-harness table. An
+ * `auto_merge` run records the merge gate's verdict (escalated = PR left open
+ * for a human), not agent quality; see `byOriginStatus.auto_merge`.
+ */
+export const STATS_EXCLUDED_ORIGIN: RunOrigin = "auto_merge";
+
 export interface RunStatsHarness {
   harness: string;
+  /** Runs of every origin except `auto_merge`. */
   runs: number;
   succeeded: number;
   failed: number;
@@ -155,21 +178,37 @@ export interface RunStatsHarness {
 
 export interface RunStats {
   totals: { runs: number; byStatus: Record<RunStatus, number> };
-  /** Fraction of terminal runs that succeeded; null when no terminal runs. */
+  /**
+   * Fraction of terminal runs that succeeded, counting every origin except
+   * `auto_merge` (gate verdicts, reported in `byOriginStatus.auto_merge`);
+   * null when there are no such terminal runs.
+   */
   successRate: number | null;
-  /** Fraction of terminal runs that escalated; null when no terminal runs. */
+  /**
+   * Fraction of terminal runs that escalated, counting every origin except
+   * `auto_merge`; null when there are no such terminal runs.
+   */
   escalationRate: number | null;
+  /** Counts behind `successRate` and `escalationRate` (terminal, non-`auto_merge` runs). */
+  rateBasis: { terminal: number; succeeded: number; escalated: number };
   runsPerWeek: RunStatsWeek[];
-  /** Median duration of succeeded runs with a PR; null when none. */
+  /** Median duration of succeeded non-`auto_merge` runs with a PR; null when none. */
   medianDurationMs: number | null;
   byHarness: RunStatsHarness[];
   byOrigin: Record<RunOrigin, number>;
+  /** Terminal-status counts per origin (all origins, including `auto_merge`). */
+  byOriginStatus: Record<RunOrigin, RunStatsOutcomeCounts>;
   /** When runs happen: local weekday × hour buckets (starts and busy time) per origin. */
   activity: RunActivity<RunOrigin>;
 }
 
 /** Statuses that no longer change (excluded: in_progress and deferred-for-retry). */
-const TERMINAL_STATUSES: RunStatus[] = ["succeeded", "failed", "escalated", "abandoned"];
+const TERMINAL_STATUSES = ["succeeded", "failed", "escalated", "abandoned"] as const;
+type TerminalRunStatus = (typeof TERMINAL_STATUSES)[number];
+
+function isTerminalStatus(status: RunStatus): status is TerminalRunStatus {
+  return (TERMINAL_STATUSES as readonly RunStatus[]).includes(status);
+}
 
 /** ISO date (UTC) of the Monday starting the week that contains `epochMs`. */
 function weekStartIso(epochMs: number): string {
@@ -310,6 +349,17 @@ export class RunStore {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_run_stages_run_id ON run_stages(run_id)
     `);
+    initRunOutputsSchema(this.db);
+  }
+
+  /** Store a run's outputs records (see `run-outputs.ts`); duplicates are ignored. */
+  addRunOutputs(runId: number, records: readonly RunOutputRecord[]): number {
+    return insertRunOutputs(this.db, runId, records);
+  }
+
+  /** Outputs records stored for a run, oldest first. */
+  listRunOutputs(runId: number): StoredRunOutput[] {
+    return listRunOutputs(this.db, runId);
   }
 
   /**
@@ -657,7 +707,7 @@ export class RunStore {
   reapOrphanedRuns(): number {
     const reason = "orphaned: worker exited before the run finished";
     const now = Date.now();
-    return this.db
+    const reaped = this.db
       .transaction(() => {
         // Select inside the immediate transaction and update per id so a
         // concurrent writer (an outlived subprocess committing `finishRun`)
@@ -689,6 +739,44 @@ export class RunStore {
         return reaped;
       })
       .immediate();
+    // Reaped runs never reached `endRun`, so their outputs files are still on disk.
+    this.ingestSettledRunOutputs();
+    return reaped;
+  }
+
+  /**
+   * Ingest outputs files left in `run-outputs/` by runs that settled without
+   * `endRun` (a crashed or killed process, a reaped orphan, or a path that
+   * calls {@link finishRun} directly). Files of runs still `in_progress`, and
+   * of ids this database does not know, are left alone. Never throws.
+   *
+   * @param dir - Outputs directory (defaults to the workspace's)
+   * @returns Number of records stored
+   */
+  ingestSettledRunOutputs(dir: string = runOutputsDir()): number {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return 0;
+    }
+    let stored = 0;
+    for (const name of names) {
+      const match = /^(\d+)\.jsonl$/.exec(name);
+      if (!match) continue;
+      const runId = Number(match[1]);
+      try {
+        const row = this.db.query(`SELECT status FROM runs WHERE id = ?`).get(runId) as {
+          status: string;
+        } | null;
+        if (!row || row.status === "in_progress") continue;
+      } catch (error) {
+        warnOnce("outputs-sweep", error);
+        return stored;
+      }
+      stored += ingestRunOutputsFile(this, runId, join(dir, name));
+    }
+    return stored;
   }
 
   /**
@@ -847,6 +935,13 @@ export class RunStore {
       manual: 0,
       local: 0,
     };
+    const byOriginStatus = Object.fromEntries(
+      Object.keys(byOrigin).map((origin) => [
+        origin,
+        { succeeded: 0, failed: 0, escalated: 0, abandoned: 0 },
+      ]),
+    ) as Record<RunOrigin, RunStatsOutcomeCounts>;
+    const rateBasis = { terminal: 0, succeeded: 0, escalated: 0 };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<
       string,
@@ -861,6 +956,25 @@ export class RunStore {
       const week = weekStartIso(row.started_at);
       weekCounts.set(week, (weekCounts.get(week) ?? 0) + 1);
 
+      const counted = row.origin !== STATS_EXCLUDED_ORIGIN;
+      if (isTerminalStatus(row.status)) {
+        byOriginStatus[row.origin] ??= { succeeded: 0, failed: 0, escalated: 0, abandoned: 0 };
+        byOriginStatus[row.origin][row.status] += 1;
+        if (counted) {
+          rateBasis.terminal += 1;
+          if (row.status === "succeeded") rateBasis.succeeded += 1;
+          if (row.status === "escalated") rateBasis.escalated += 1;
+        }
+      }
+
+      // Median duration and per-harness rows describe agent work, so they skip
+      // auto-merge gate verdicts (which always carry the PR they checked).
+      if (!counted) continue;
+
+      if (row.status === "succeeded" && row.finished_at !== null && row.pr_url) {
+        durations.push(row.finished_at - row.started_at);
+      }
+
       const harnessKey = row.harness ?? "unknown";
       let harness = harnesses.get(harnessKey);
       if (!harness) {
@@ -871,20 +985,17 @@ export class RunStore {
       harness.byStatus.set(row.status, (harness.byStatus.get(row.status) ?? 0) + 1);
 
       if (row.status === "succeeded" && row.finished_at !== null) {
-        const duration = row.finished_at - row.started_at;
-        harness.durations.push(duration);
-        if (row.pr_url) {
-          durations.push(duration);
-        }
+        harness.durations.push(row.finished_at - row.started_at);
       }
     }
 
-    const terminal = TERMINAL_STATUSES.reduce((sum, status) => sum + byStatus[status], 0);
+    const { terminal } = rateBasis;
 
     return {
       totals: { runs: rows.length, byStatus },
-      successRate: terminal > 0 ? byStatus.succeeded / terminal : null,
-      escalationRate: terminal > 0 ? byStatus.escalated / terminal : null,
+      successRate: terminal > 0 ? rateBasis.succeeded / terminal : null,
+      escalationRate: terminal > 0 ? rateBasis.escalated / terminal : null,
+      rateBasis,
       runsPerWeek: [...weekCounts.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([weekStart, count]) => ({ weekStart, count })),
@@ -900,6 +1011,7 @@ export class RunStore {
           medianDurationMs: median(data.durations),
         })),
       byOrigin,
+      byOriginStatus,
       activity: computeRunActivity(rows, timeZone, since, now),
     };
   }
@@ -1017,11 +1129,50 @@ export function beginRun(meta: RunMeta): void {
     currentStore ??= new RunStore();
     currentRunId = currentStore.createRun(meta);
     currentRunMeta = meta;
+    exportRunIdentity(currentRunId);
   } catch (error) {
     currentRunId = null;
     currentRunMeta = null;
+    restoreRunIdentity();
     warnOnce("begin", error);
   }
+}
+
+/** Identity env values present before this process exported its own run's. */
+let inheritedIdentity: { runId?: string; outputs?: string } | null = null;
+
+/**
+ * Export the active run's id and outputs file into `process.env`, so every
+ * harness spawned while the run is active (they all inherit or spread
+ * `process.env`) sees `DEVINTERN_RUN_ID` / `DEVINTERN_RUN_OUTPUTS`.
+ */
+function exportRunIdentity(runId: number): void {
+  inheritedIdentity ??= {
+    runId: process.env[RUN_ID_ENV],
+    outputs: process.env[RUN_OUTPUTS_ENV],
+  };
+  const outputs = runOutputsPath(runId);
+  process.env[RUN_ID_ENV] = String(runId);
+  process.env[RUN_OUTPUTS_ENV] = outputs;
+  try {
+    // Tools may append with plain shell redirection, so the directory must exist.
+    mkdirSync(dirname(outputs), { recursive: true, mode: 0o700 });
+  } catch (error) {
+    warnOnce("outputs-dir", error);
+  }
+}
+
+/** Put back whatever identity env this process inherited from its parent. */
+function restoreRunIdentity(): void {
+  if (!inheritedIdentity) return;
+  for (const [key, value] of [
+    [RUN_ID_ENV, inheritedIdentity.runId],
+    [RUN_OUTPUTS_ENV, inheritedIdentity.outputs],
+  ] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  inheritedIdentity = null;
 }
 
 /** Track step execution without allowing observability failures to stop work. */
@@ -1305,11 +1456,13 @@ export function endRun(status: Exclude<RunStatus, "in_progress">, reason?: strin
     return;
   }
   try {
+    ingestRunOutputsFile(currentStore, currentRunId, runOutputsPath(currentRunId));
     currentStore.finishRun(currentRunId, status, reason);
   } catch (error) {
     warnOnce("end", error);
   } finally {
     currentRunId = null;
     currentRunMeta = null;
+    restoreRunIdentity();
   }
 }

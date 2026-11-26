@@ -46,6 +46,22 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: Live Linear estimation (team estimate scales, real `IssueFilter` and `IssueUpdateInput.estimate` validation); cron-expression schedules for a Linear entry (interval only).
 - Last reviewed: 2026-11-20
 
+### Linear worker dependency gate: "blocks" relations hold a polled issue until the blocker is completed or canceled (gap `e2e-tracker-linear-dependency-gate`)
+
+- Surface: External dependency: Linear dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-linear-dependencies.test.ts`, `bun run --filter @devintern/e2e test`
+- Missing: Live Linear relation payloads (the fake models `inverseRelations` as `LinearClient.getIssueBlockers` selects it); a blocker the worker implemented itself (merged/stacked rules); the `blocked` verdict; re-check backoff timing (every release is followed by an edit); more than 100 relations (the client reads `first: 100`).
+- Last reviewed: 2026-11-21
+
+### Linear blocker read failure fails closed (gap `e2e-tracker-linear-blocker-read-fail-closed`)
+
+- Surface: External dependency: Linear dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-linear-dependencies.test.ts`, `bun run --filter @devintern/e2e test`
+- Missing: Network-level failures (connection refused, timeouts); a failing gate state DB (the "could not evaluate" path).
+- Last reviewed: 2026-11-21
+
 ## Tracker plan status
 
 ### Linear
@@ -80,6 +96,11 @@ Operations covered:
   conditions, `state.name`/`team.key` equality, `updatedAt`
   `gt`/`gte`/`lt`/`lte` date bounds, and `and`/`or`, plus plain-text title
   contains); every request is recorded in `searchRequests`
+- `IssueById` selecting `inverseRelations(first: 100) { nodes { type issue
+{ identifier state { name type } } } }` (the `getIssueBlockers` query,
+  matched exactly): answers from relation fixtures (`addRelation`), records
+  every read in `blockerRequests`, and can fail on demand
+  (`setBlockerFailure("graphql-error" | "http-500")`)
 
 `tests/local/worker-linear-polling.test.ts` drives the worker daemon against
 the same fake (with `clock: "wall"` so `updatedAt` falls inside the detector's
@@ -220,3 +241,31 @@ No prerequisites beyond the built CLI; the test skips only when
 `packages/code/dist/index.js` is absent. Run it alone with
 `bun test tests/local/worker-linear-scheduled-estimation.test.ts` from
 `packages/e2e`.
+
+### Linear worker dependency gate
+
+`tests/local/worker-linear-dependencies.test.ts` runs the built
+`devintern worker` daemon with `tracker = "linear"`, a status-based
+`task_query` (team key plus `Todo`), `poll_interval = 1`, tracker writes on,
+the deterministic agent, and a local bare remote, against the in-process
+Linear fake with relation fixtures. Held-back issues are read through
+`devintern worker queue --json --workspace <path>`. It proves:
+
+- an issue with a `blocks` relation from an `In Progress` (`started`) issue is
+  held across several gate evaluations: no run record, agent call, state
+  change, comment, branch, or `updatedAt` change, and the queue lists it as a
+  `tracker` item with `dependencyState: "waiting"`, `dependsOn` equal to the
+  blocker alone, and the reason `<blocker> not done (In Progress)`;
+- open `related` and `duplicate` relations on the same issue are not
+  dependencies: they are absent from `dependsOn` and do not hold the issue;
+- moving the blocker to a `completed` state, or (second scenario) a
+  `canceled` state, then editing the dependent runs it exactly once and
+  removes it from the queue;
+- a blocker read answered with a GraphQL error (HTTP 200 with `errors`) or
+  HTTP 500 keeps the issue waiting with `could not read <key>'s blockers from
+linear: …` and never starts it; once the fake recovers, an edit runs it once.
+
+No prerequisites beyond the built CLI; the test skips only when
+`packages/code/dist/index.js` is absent. Run it with
+`bun run --filter @devintern/e2e test`, or alone with
+`bun test tests/local/worker-linear-dependencies.test.ts` from `packages/e2e`.

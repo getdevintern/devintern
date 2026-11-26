@@ -4,7 +4,7 @@ import type { AutomationConfig, CronOrIntervalSchedule } from "../automation/con
 import type { WorkerScheduleConfig } from "../worker/schedule";
 import type { EstimationConfig } from "../automation/estimation-config";
 import type { AgentSelection } from "../agent/selection";
-import type { AutoMergeMethod } from "../review/merge-gate";
+import type { AutoMergeMethod, MergeSafetyPolicy } from "../review/merge-gate";
 import type { DashboardAllowedOrigin } from "../observability/dashboard-origins";
 import type { DependencyMode } from "../dependencies/gate";
 
@@ -80,10 +80,29 @@ export interface AutoMergeSettings {
   /** Globs that block auto-merge entirely (`auto_merge_deny_paths`). */
   denyPaths: string[];
   /**
+   * Globs whose changes always go to the agent review, even when they also
+   * match a safe glob (`auto_merge_review_paths`).
+   */
+  reviewPaths: string[];
+  /**
    * Label for PRs left open for a human, removed on merge
    * (`auto_merge_review_label`, default `needs-human-review`; `""` disables).
    */
   reviewLabel: string;
+  /** Merge-safety review strictness (`auto_merge_policy`, default `strict`). */
+  policy: MergeSafetyPolicy;
+  /**
+   * Operator rules appended to the merge-safety prompt
+   * (`auto_merge_review_instructions`). Omitted when unset or empty.
+   */
+  reviewInstructions?: string;
+  /** `custom` policy rubric text (`auto_merge_rules`). */
+  rules?: string;
+  /**
+   * `custom` policy rubric file (`auto_merge_rules_file`) as written:
+   * relative to the workspace home, `~` allowed. Read on every review.
+   */
+  rulesFile?: string;
   /** Agent for the merge-safety review (`auto_merge_harness` / `_model` / `_effort`). */
   agent?: AgentSelection;
 }
@@ -145,8 +164,17 @@ export interface TeamConfig {
 export interface RepoConfig {
   /** Unique name; also the directory name under `repos/` and `worktrees/`. */
   name: string;
-  /** Git remote URL the bare clone tracks. */
+  /**
+   * Git remote URL the bare clone tracks. Empty for a `manual_only` repo
+   * registered by {@link RepoConfig.path} instead.
+   */
   remote: string;
+  /**
+   * Absolute local checkout directory of a `manual_only` repo without a
+   * recognised remote (for example a fresh `git init`). Manual runs started
+   * in this directory, or below it, use this entry.
+   */
+  path?: string;
   /** Default branch task worktrees start from; falls back to `origin/HEAD`. */
   defaultBranch?: string;
   /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
@@ -161,6 +189,22 @@ export interface RepoConfig {
   autoMergeSafePaths?: string[];
   /** Per-repo `auto_merge_deny_paths`; replaces the workspace list when set. */
   autoMergeDenyPaths?: string[];
+  /** Per-repo `auto_merge_review_paths`; replaces the workspace list when set. */
+  autoMergeReviewPaths?: string[];
+  /** Per-repo `auto_merge_policy`; replaces the workspace policy when set. */
+  autoMergePolicy?: MergeSafetyPolicy;
+  /**
+   * Per-repo `auto_merge_review_instructions`; replaces the workspace text
+   * when set (`""` clears it for this repo).
+   */
+  autoMergeReviewInstructions?: string;
+  /**
+   * Per-repo `auto_merge_rules`; with `autoMergeRulesFile`, the repo's rules
+   * source replaces the workspace's when either is set.
+   */
+  autoMergeRules?: string;
+  /** Per-repo `auto_merge_rules_file` (unresolved, like the workspace key). */
+  autoMergeRulesFile?: string;
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /**

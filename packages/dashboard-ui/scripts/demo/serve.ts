@@ -23,7 +23,10 @@ if (!workspaceDir || !portArg) {
 
 writeFileSync(
   join(workspaceDir, ".worker.lock"),
-  JSON.stringify({ pid: process.pid, timestamp: new Date(Date.now() - 3 * 86_400_000 - 5 * 3_600_000).toISOString() }),
+  JSON.stringify({
+    pid: process.pid,
+    timestamp: new Date(Date.now() - 3 * 86_400_000 - 5 * 3_600_000).toISOString(),
+  }),
 );
 
 // The worker "started" 3 days ago and applied the config then: mark it in sync.

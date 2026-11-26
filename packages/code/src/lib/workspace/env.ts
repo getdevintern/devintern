@@ -11,7 +11,11 @@
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
-import { gitHubSlugFromRemote, resolveFleetEventTeam } from "./config";
+import {
+  gitHubSlugFromRemote,
+  resolveFleetEventTeam,
+  resolveWorkspacePipelinePath,
+} from "./config";
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 import { applyAgentSelectionEnv } from "../agent/selection";
@@ -53,16 +57,21 @@ export const ACTIONED_SOURCE_ENV = "DEVINTERN_ACTIONED_SOURCE";
 
 /**
  * Parse a dotenv-style file into a record (same semantics as the tracker
- * config loader: `KEY=value`, `#` comments, optional single/double quotes).
- * Missing files yield an empty record.
+ * config loader: `KEY=value`, `#` comments, optional single/double quotes,
+ * and an optional shell `export ` prefix). Missing files yield an empty record.
  */
 export function parseEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) {
     return {};
   }
+  return parseEnvFileContent(readFileSync(path, "utf8"));
+}
+
+/** {@link parseEnvFile} over already-read text. */
+export function parseEnvFileContent(content: string): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const trimmed = line.trim();
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim().replace(/^export\s+/, "");
     if (!trimmed || trimmed.startsWith("#")) {
       continue;
     }
@@ -354,9 +363,10 @@ function pinPipelineEnv(
   delete env[WORKSPACE_PIPELINE_REPO_ENV];
   delete env[WORKSPACE_PIPELINE_DEFAULT_ENV];
   if (repo.pipelineFile) {
-    env[WORKSPACE_PIPELINE_REPO_ENV] = isAbsolute(repo.pipelineFile)
-      ? repo.pipelineFile
-      : join(workspaceDir, repo.pipelineFile);
+    env[WORKSPACE_PIPELINE_REPO_ENV] = resolveWorkspacePipelinePath(
+      workspaceDir,
+      repo.pipelineFile,
+    );
   }
   if (options.pipelineDefaultFile) {
     env[WORKSPACE_PIPELINE_DEFAULT_ENV] = options.pipelineDefaultFile;

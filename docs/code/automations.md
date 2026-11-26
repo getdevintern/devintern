@@ -4,7 +4,7 @@ sidebarLabel: "Automations"
 description: "Use when the worker should run a prompt on a schedule: [[automations]] entries, prompt writing, opt-in PRs, no-op and blocked runs, and per-schedule agents."
 section: "Automation"
 order: 2.1
-dateModified: 2026-11-18
+dateModified: 2026-11-24
 ---
 
 # Recurring Automations
@@ -12,6 +12,8 @@ dateModified: 2026-11-18
 An automation is a prompt the [worker](./worker.md) runs on a schedule. The prompt is the task: nothing is created in your tracker, so an automation-only worker needs no tracker credentials. Each occurrence goes through the normal task pipeline and is recorded in the [dashboard](./dashboard.md) with the `scheduled` origin.
 
 To configure automations through a coding agent, use the [devintern-workspace skill](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-workspace). For example: "Add a weekly dependency-health automation for web-app, Mondays at 09:00, opening a PR for at most one verified upgrade."
+
+To start from a ready-made recipe instead of writing a prompt, install a bundled [automation pack](./automation-packs.md): `devintern automations add dependency-security --repo web-app`.
 
 ## Defining an automation
 
@@ -101,7 +103,7 @@ An agent that stops cleanly has not necessarily succeeded. Every implementation 
 | `noop` or `done` | Nothing to do, or the goal was met.                                    | `succeeded`                          |
 | no marker        | —                                                                      | `succeeded`                          |
 
-"Nothing to do" is not blocked: a `main-red-fixer` that finds main green should omit the marker or use `status=noop`. Prompts can rely on the built-in instruction or name which failures count as blocked ("if the test gate fails, report the run as blocked").
+"Nothing to do" is not blocked: a `main-red-fixer` that finds main green should omit the marker or use `status=noop`. A gate that already fails the same way on the base commit, in a way the change did not cause, is reported as `partial` unless making that gate pass is the task's goal. The agent confirms this by re-running the gate on the base revision. The run is recorded `succeeded` with a reason starting `partial: pre-existing on base:`, so you can find and review these runs. Prompts can rely on the built-in instruction or name which failures count as blocked ("if the test gate fails, report the run as blocked").
 
 Escalated runs appear in the dashboard, the stats escalation rate, and `devintern report --last`. The next attempt is the next occurrence, **Run now**, or a dashboard retry. For tracker tasks, a blocked outcome changes only the run record: a PR the run already opened stays open, and a markdown task is not marked `Done`. Only a whole line in the final report counts; the reason is truncated to 300 characters.
 

@@ -23,6 +23,7 @@ import { existsSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { parseFrontmatter } from "./frontmatter";
+import type { FrontmatterAttributes } from "./frontmatter";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { resolveWorkspaceDir } from "../workspace/paths";
@@ -52,6 +53,8 @@ export interface PromptTemplate {
   body: string;
   /** Absolute path the template was loaded from. */
   sourcePath: string;
+  /** Every frontmatter attribute, including prompt-specific extra keys. */
+  attributes?: FrontmatterAttributes;
 }
 
 /** Options controlling prompt lookup. */
@@ -212,6 +215,7 @@ export function loadPromptTemplate(name: string, options: LoadPromptOptions = {}
     requiredSections: toStringList(attributes.requiredSections),
     body,
     sourcePath,
+    attributes,
   };
 }
 

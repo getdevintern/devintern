@@ -48,6 +48,33 @@ interface FakeLinearIssue {
   comments: FakeLinearComment[];
 }
 
+/**
+ * One directed issue relation, as Linear stores it: `issue` (the source)
+ * `type`s `relatedIssue`. A `blocks` relation from BLK to DEP shows up in
+ * DEP's `inverseRelations` with `issue` = BLK.
+ */
+export interface FakeLinearRelation {
+  /** Linear `IssueRelationType`. */
+  type: "blocks" | "related" | "duplicate" | "similar";
+  /** Identifier of the source issue (the blocker for `blocks`). */
+  issue: string;
+  /** Identifier of the target issue (the blocked issue for `blocks`). */
+  relatedIssue: string;
+}
+
+/** One blocker (`inverseRelations`) read the fake received. */
+export interface FakeLinearBlockerRequest {
+  /** The `id` variable (identifier or UUID) exactly as received. */
+  id: string;
+  /** Wall-clock receipt time (epoch ms). */
+  receivedAt: number;
+  /** How the fake answered: relations, a GraphQL error, or HTTP 500. */
+  outcome: "ok" | "graphql-error" | "http-500";
+}
+
+/** Failure mode injected into blocker reads; `undefined` answers normally. */
+export type FakeLinearBlockerFailure = "graphql-error" | "http-500" | undefined;
+
 interface FakeLinearState {
   id: string;
   name: string;
@@ -80,6 +107,8 @@ export interface FakeLinearOptions {
    * outside a status-based task query and are moved into it later.
    */
   extraStates?: string[];
+  /** Additional workflow states of Linear type `canceled` (e.g. `Canceled`). */
+  canceledStates?: string[];
   /**
    * Timestamp source for `createdAt`/`updatedAt`.
    *
@@ -136,6 +165,13 @@ export class FakeLinearTracker implements TrackerFixture {
    */
   readonly operations: string[] = [];
 
+  /** Every blocker (`inverseRelations`) read, oldest first. */
+  readonly blockerRequests: FakeLinearBlockerRequest[] = [];
+
+  /** Failure injected into blocker reads; see {@link setBlockerFailure}. */
+  private blockerFailure: FakeLinearBlockerFailure;
+  private readonly relations: FakeLinearRelation[] = [];
+
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
   private readonly states: FakeLinearState[];
@@ -145,6 +181,7 @@ export class FakeLinearTracker implements TrackerFixture {
   private now = Date.parse("2026-01-01T00:00:00.000Z");
   private readonly clock: "fixed" | "wall";
   private readonly extraStates: string[];
+  private readonly canceledStates: string[];
 
   constructor(options: FakeLinearOptions = {}) {
     this.teamKeyValue = options.teamKey ?? "ENG";
@@ -152,6 +189,7 @@ export class FakeLinearTracker implements TrackerFixture {
     this.openState = this.statuses.todo;
     this.clock = options.clock ?? "fixed";
     this.extraStates = options.extraStates ?? [];
+    this.canceledStates = options.canceledStates ?? [];
     this.states = this.buildStates();
 
     this.server = Bun.serve({
@@ -259,6 +297,32 @@ export class FakeLinearTracker implements TrackerFixture {
     const issue = this.requireIssue(ticketKey);
     issue.stateId = this.stateId(stateName);
     issue.updatedAt = this.timestamp();
+  }
+
+  /**
+   * Add an issue relation (`issue` `type`s `relatedIssue`), as a human would
+   * from the Linear issue sidebar. Both issues must exist. Like Linear, this
+   * does not bump either issue's `updatedAt`.
+   */
+  addRelation(issue: string, type: FakeLinearRelation["type"], relatedIssue: string): void {
+    const source = this.requireIssue(issue);
+    const target = this.requireIssue(relatedIssue);
+    this.relations.push({ type, issue: source.identifier, relatedIssue: target.identifier });
+  }
+
+  /**
+   * Make blocker reads fail (`graphql-error`: HTTP 200 with `errors`;
+   * `http-500`: an internal server error) or, with `undefined`, recover.
+   * Other operations keep working.
+   */
+  setBlockerFailure(failure: FakeLinearBlockerFailure): void {
+    this.blockerFailure = failure;
+  }
+
+  /** Blocker reads received for one issue identifier, oldest first. */
+  blockerRequestsFor(ticketKey: string): FakeLinearBlockerRequest[] {
+    const issue = this.requireIssue(ticketKey);
+    return this.blockerRequests.filter((request) => this.findIssue(request.id) === issue);
   }
 
   /** Native `estimate` field value, or `undefined` while it is unset. */
@@ -374,7 +438,10 @@ export class FakeLinearTracker implements TrackerFixture {
     }
     const variables = asRecord(body?.variables) ?? {};
     const operation = operationName(query);
-    const response = this.route(operation, variables);
+    const response =
+      operation === "IssueById" && /\binverseRelations\b/.test(query)
+        ? this.issueBlockers(query, variables)
+        : this.route(operation, variables);
     this.operations.push(operation ?? "<anonymous>");
     return response;
   }
@@ -410,6 +477,80 @@ export class FakeLinearTracker implements TrackerFixture {
       return json({ data: { issue: null } });
     }
     return json({ data: { issue: this.issuePayload(issue) } });
+  }
+
+  /**
+   * `IssueById` selecting the issue's inverse relations, the query
+   * `LinearClient.getIssueBlockers` (packages/task-trackers/src/clients/linear.ts)
+   * sends:
+   * `inverseRelations(first: 100) { nodes { type issue { identifier state { name type } } } }`.
+   *
+   * The selection must match exactly (whitespace-insensitive) so a client
+   * change to the query fails here instead of silently reading nothing. The
+   * response carries only the selected fields, shaped as Linear's
+   * `IssueRelationConnection`: each node is a relation whose `issue` is the
+   * source issue (the blocker for `blocks`), with every relation type
+   * included so the client's `type === "blocks"` filter is exercised.
+   */
+  private issueBlockers(query: string, variables: Record<string, unknown>): Response {
+    const id = variables.id;
+    if (typeof id !== "string" || !id.trim()) {
+      return this.unexpected("IssueById (blockers) requires a non-empty string `id` variable");
+    }
+    const request: FakeLinearBlockerRequest = { id, receivedAt: Date.now(), outcome: "ok" };
+    this.blockerRequests.push(request);
+
+    const selection = query.replace(/\s+/g, " ");
+    const expected =
+      "issue(id: $id) { inverseRelations(first: 100) { nodes { type issue { identifier state { name type } } } } }";
+    if (!selection.includes(expected)) {
+      return this.unexpected(
+        `IssueById: unsupported inverseRelations selection: ${selection.trim()}`,
+      );
+    }
+
+    if (this.blockerFailure === "http-500") {
+      request.outcome = "http-500";
+      return new Response("fake Linear internal error", {
+        status: 500,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
+    if (this.blockerFailure === "graphql-error") {
+      request.outcome = "graphql-error";
+      // Linear's shape for a failed resolver: HTTP 200, `data: null`, `errors`.
+      return json({
+        data: null,
+        errors: [
+          {
+            message: "fake Linear relations resolver unavailable",
+            extensions: { code: "INTERNAL_SERVER_ERROR" },
+          },
+        ],
+      });
+    }
+
+    const issue = this.findIssue(id);
+    if (!issue) {
+      return json({
+        data: null,
+        errors: [{ message: "Entity not found: Issue", extensions: { code: "NOT_FOUND" } }],
+      });
+    }
+    const nodes = this.relations
+      .filter((relation) => relation.relatedIssue === issue.identifier)
+      .map((relation) => {
+        const source = this.requireIssue(relation.issue);
+        const state = this.states.find((candidate) => candidate.id === source.stateId);
+        return {
+          type: relation.type,
+          issue: {
+            identifier: source.identifier,
+            state: state ? { name: state.name, type: state.type } : null,
+          },
+        };
+      });
+    return json({ data: { issue: { inverseRelations: { nodes } } } });
   }
 
   private issueComments(variables: Record<string, unknown>): Response {
@@ -633,7 +774,7 @@ export class FakeLinearTracker implements TrackerFixture {
   }
 
   private buildStates(): FakeLinearState[] {
-    const names = [...Object.values(this.statuses), ...this.extraStates];
+    const names = [...Object.values(this.statuses), ...this.extraStates, ...this.canceledStates];
     return [...new Set(names)].map((name, index) => ({
       id: `state-${index + 1}`,
       name,
@@ -642,6 +783,9 @@ export class FakeLinearTracker implements TrackerFixture {
   }
 
   private stateType(name: string): string {
+    if (this.canceledStates.includes(name) && !Object.values(this.statuses).includes(name)) {
+      return "canceled";
+    }
     if (this.extraStates.includes(name) && !Object.values(this.statuses).includes(name)) {
       return "backlog";
     }

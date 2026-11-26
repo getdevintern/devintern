@@ -16,7 +16,7 @@ import {
   pickAgentSelection,
   pinnedHarnessChildEnv,
 } from "../agent/selection";
-import { resolveProjectConfigDir } from "../config/config-dir";
+import { automationsDir } from "../workspace/paths";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import type { RunOrigin } from "../state/run-recorder";
 import { readRunOutcomeHint, RUN_OUTCOME_FILE_ENV } from "../worker/run-outcome-protocol";
@@ -49,8 +49,8 @@ export interface AutomationRunContext {
   env: Record<string, string | undefined>;
   repo?: string;
   /**
-   * Explicit directory for occurrence task files. When omitted, files go
-   * under the nearest `.devintern-code` found above {@linkcode cwd}.
+   * Explicit directory for occurrence task files. When omitted, files go to
+   * the workspace `automations/` directory.
    */
   taskFileDir?: string;
   release(): void | Promise<void>;
@@ -734,17 +734,11 @@ export class AutomationAcquirer implements Acquirer {
 }
 
 /**
- * Directory that receives one markdown task file per occurrence.
- *
- * When the context does not pin an explicit directory, resolved like every
- * other durable-state location: the nearest existing `.devintern-code` found
- * by walking up from the run cwd, so a worker launched from a subfolder
- * reuses the project's config directory instead of creating a stray one
- * beside the cwd. Falls back to `<cwd>/.devintern-code` (e.g. inside
- * disposable worktrees where no parent config exists).
+ * Directory that receives one markdown task file per occurrence: the
+ * context's explicit directory, else the workspace `automations/` directory.
  */
 export function automationTaskDir(context: AutomationRunContext): string {
-  return context.taskFileDir ?? join(resolveProjectConfigDir(context.cwd), "automations");
+  return context.taskFileDir ?? automationsDir();
 }
 
 /**

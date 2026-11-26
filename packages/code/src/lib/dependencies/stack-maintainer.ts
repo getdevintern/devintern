@@ -169,6 +169,16 @@ function prNumberOf(facts: DependencyFacts | undefined): number | undefined {
   return facts?.pr?.number ?? facts?.latestRun?.prNumber;
 }
 
+/**
+ * What a person can do when the PR a stack builds on closed without merging.
+ * Shared by the closed-base PR notice and a stacked run's escalation.
+ *
+ * @param pr - The base PR, as Markdown (`[PR #12](url)` or `PR #12`)
+ */
+export function stackBaseRecoveryHint(baseTaskKey: string, pr: string): string {
+  return `Reopen and merge ${pr}, or re-queue ${baseTaskKey} (\`devintern worker add --resume ${baseTaskKey}\`)`;
+}
+
 /** Render the comment posted when a stacked PR's base closed without merging. */
 export function renderStackBlockedNotice(input: {
   baseTaskKey: string;
@@ -184,7 +194,7 @@ export function renderStackBlockedNotice(input: {
     `⛔ This PR is blocked: it is stacked on ${input.baseTaskKey} (${pr}), which was closed without merging.`,
     "",
     `It still targets \`${input.baseBranch}\` and contains that PR's commits, so DevIntern will not retarget or restack it.`,
-    `Reopen and merge ${pr}, or re-queue ${input.baseTaskKey} (\`devintern worker add --resume ${input.baseTaskKey}\`), or retarget this PR by hand.`,
+    `${stackBaseRecoveryHint(input.baseTaskKey, pr)}, or retarget this PR by hand.`,
   ].join("\n");
 }
 

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { WORKER_SUBPROCESS_ENV } from "../src/lib/config/config-dir";
+import { WORKER_SUBPROCESS_ENV, setManualWorkspaceStateDir } from "../src/lib/config/config-dir";
 import {
   acquireTicketLocks,
   checkoutLockFileName,
@@ -73,6 +73,8 @@ describe("manual runs in a workspace checkout", () => {
   });
 
   afterEach(() => {
+    // `applyManualWorkspaceRun` pins the runtime state dir process-wide.
+    setManualWorkspaceStateDir(null);
     for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
     Object.assign(process.env, saved);
     rmSync(root, { recursive: true, force: true });
@@ -101,14 +103,30 @@ describe("manual runs in a workspace checkout", () => {
   test("applies workspace env and state without the worker marker", async () => {
     const run = await findWorkspaceRepoForCheckout({ cwd: checkout, workspaceDir: workspace });
     if (!run) throw new Error("expected a workspace repo");
+    delete process.env.WEBHOOK_QUEUE_DB;
     applyManualWorkspaceRun(run);
-    expect(process.env.WEBHOOK_QUEUE_DB).toBe(join(workspace, "state", "queue.db"));
+    // `String()`: TypeScript still narrows the env var to the deleted state.
+    expect(String(process.env.WEBHOOK_QUEUE_DB)).toBe(join(workspace, "state", "queue.db"));
     expect(process.env.DEVINTERN_WORKSPACE_DIR).toBe(workspace);
     expect(process.env.DEVINTERN_WORKSPACE_REPO).toBe("web");
     expect(process.env.TASK_TRACKER).toBe("linear");
     expect(process.env.JIRA_BASE_URL).toBe("https://example.atlassian.net");
     expect(process.env.GITHUB_REPO).toBe("Acme/Web");
     expect(process.env[WORKER_SUBPROCESS_ENV]).toBeUndefined();
+  });
+
+  test("keeps an explicit WEBHOOK_QUEUE_DB and applies only runtime keys with --env-file", async () => {
+    const run = await findWorkspaceRepoForCheckout({ cwd: checkout, workspaceDir: workspace });
+    if (!run) throw new Error("expected a workspace repo");
+    process.env.WEBHOOK_QUEUE_DB = join(root, "pinned.db");
+    delete process.env.TASK_TRACKER;
+    delete process.env.JIRA_BASE_URL;
+    applyManualWorkspaceRun(run, { runtimeOnly: true });
+    expect(process.env.WEBHOOK_QUEUE_DB).toBe(join(root, "pinned.db"));
+    expect(process.env.DEVINTERN_WORKSPACE_REPO).toBe("web");
+    // Credentials and tracker settings stay with the explicit env file.
+    expect(process.env.TASK_TRACKER).toBeUndefined();
+    expect(process.env.JIRA_BASE_URL).toBeUndefined();
   });
 });
 

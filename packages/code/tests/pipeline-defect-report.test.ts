@@ -12,7 +12,7 @@ import {
   beginRunStep,
   getActiveRunContext,
 } from "../src/lib/state/run-recorder";
-import { handleTaskFailure } from "../src/lib/task/pipeline";
+import { handleTaskFailure } from "../src/lib/task/task-failure";
 import { listSpoolEntries } from "../src/lib/report/store";
 import { WORKER_SUBPROCESS_ENV, resolveRuntimeStateDir } from "../src/lib/config/config-dir";
 

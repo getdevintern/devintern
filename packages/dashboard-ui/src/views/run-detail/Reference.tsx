@@ -9,6 +9,7 @@ import type {
   TaskArtifactContent,
   TaskArtifactFile,
 } from "@/lib/api";
+import { apiResourceUrl, isDemoMode } from "@/lib/demo";
 import { groupHarnessLogs } from "@/lib/harness-log-groups";
 import type { HarnessLogGroup } from "@/lib/harness-log-groups";
 import { Markdown } from "@/lib/markdown";
@@ -206,7 +207,7 @@ function ArtifactItem({ runId, file }: { runId: number; file: TaskArtifactFile }
   );
   const markdown = file.mediaType === "text/markdown";
   const image = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.mediaType);
-  const fileUrl = `/api/runs/${runId}/artifacts/${file.id}/file`;
+  const fileUrl = apiResourceUrl(`/api/runs/${runId}/artifacts/${file.id}/file`);
 
   return (
     <li>
@@ -224,8 +225,9 @@ function ArtifactItem({ runId, file }: { runId: number; file: TaskArtifactFile }
       </button>
       {open ? (
         <div className="space-y-2 border-t border-border bg-card px-3 py-2.5">
-          {file.available ? (
-            <a href={`${fileUrl}?download=1`} className="ref-link text-xs">
+          {/* The demo records text artifacts only as shown content, not as files. */}
+          {file.available && isDemoMode() && !image ? null : file.available ? (
+            <a href={isDemoMode() ? fileUrl : `${fileUrl}?download=1`} className="ref-link text-xs">
               <Download className="size-3" aria-hidden="true" />
               Download {file.name}
             </a>

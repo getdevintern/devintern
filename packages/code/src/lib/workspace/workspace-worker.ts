@@ -15,11 +15,7 @@ import { randomUUID } from "crypto";
 import { parseEnvInteger } from "../config/env-integer";
 import { createPickupGate } from "../worker/schedule";
 import type { PickupGate, ScheduleSnapshot } from "../worker/schedule";
-import {
-  loadProjectSettingsFrom,
-  recoverOrphanedTaskRuns,
-  resolveStatusName,
-} from "../worker/orphan-recovery";
+import { recoverOrphanedTaskRuns, resolveStatusName } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
 import { readImplementationReport } from "../state/session-pickup";
@@ -42,6 +38,8 @@ import {
 } from "./schedule-context";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
+import { migrateCommittedTrackerSettings } from "./migrate-checkout";
+import { loadWorkspaceTrackerSettings } from "./tracker-settings";
 import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildTeamEnv } from "./env";
 import {
   automationsDir,
@@ -242,16 +240,21 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       );
     }
 
-    // Fleet tasks run in per-repo worktrees, so their status names come from
-    // each repo's checked-in settings; the base worktrees hold a checked-out
-    // copy. Never triggers git work here — only existing directories are read.
+    // Status names come from workspace.toml [trackers]. Repos that still check
+    // in a settings.json are migrated from their base worktrees (no git work:
+    // only existing directories are read).
     const settingsDirs = [
       ...config.repos
         .map((repo) => join(worktreesDir(workspaceDir), repo.name, BASE_WORKTREE_NAME))
         .filter(existsSync),
       workspaceDir,
     ];
-    const settings = loadProjectSettingsFrom(settingsDirs, config.trackerSettings ?? null);
+    // One-time migration: copy committed settings.json tracker sections into
+    // workspace.toml [trackers] (new keys only), so they no longer depend on
+    // what each repo checks in.
+    for (const dir of settingsDirs) migrateCommittedTrackerSettings(workspaceDir, dir);
+
+    const settings = loadWorkspaceTrackerSettings(workspaceDir) ?? config.trackerSettings ?? null;
     const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 
@@ -881,6 +884,22 @@ async function startLoggedWorkerFailover(
   });
 }
 
+function assertWorkerHasRepos(config: WorkspaceConfig, configPath: string): void {
+  if (config.repos.length > 0) return;
+  console.error(
+    `❌ No repos configured for the worker in ${configPath}.\n` +
+      "   Add [[repos]] entries without manual_only = true " +
+      "(or run `devintern worker add-repo` inside an existing repo).",
+  );
+  process.exit(1);
+}
+
+/** Reload hooks published by buildFleetEventAcquirers into the worker loop. */
+type WorkerEventReloadHooks = {
+  hooks?: FleetEventReloadHooks;
+  verifyRelayRepos?: () => Promise<void>;
+};
+
 export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Promise<void> {
   const configPath = options.workspacePath
     ? resolve(options.workspacePath)
@@ -888,14 +907,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const workspaceDir = options.workspacePath ? dirname(configPath) : resolveWorkspaceDir();
   writeWorkerStartMarker(workspaceDir);
   const config = loadWorkerWorkspaceConfig(configPath);
-  if (config.repos.length === 0) {
-    console.error(
-      `❌ No repos configured for the worker in ${configPath}.\n` +
-        "   Add [[repos]] entries without manual_only = true " +
-        "(or run `devintern worker add-repo` inside an existing repo).",
-    );
-    process.exit(1);
-  }
+  assertWorkerHasRepos(config, configPath);
 
   const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
   const initialFleetAutomations = resolveFleetAutomations(config);
@@ -1008,7 +1020,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Cadence reconciliation: applied on successful reloads of poll_interval.
   const intervalUpdaters: Array<(seconds: number) => void> = [];
   // Reload hooks published by buildFleetEventAcquirers (mention sweeps).
-  const eventReloadHooks: { hooks?: FleetEventReloadHooks } = {};
+  const eventReloadHooks: WorkerEventReloadHooks = {};
   let pollIntervalSeconds = config.defaults.pollIntervalSeconds;
 
   // Always assemble the estimation scheduler so entries can be added to an
@@ -1199,6 +1211,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       detector: source.detector,
       searchTasks: source.searchTasks,
       isTaskActionedUnchanged: (taskKey, updated) => actionedGate(taskKey, updated),
+      // A ticket the dashboard retry drain owns is never started by the poller:
+      // the retry's own transition bumps the stamp mid-run, and the actioned
+      // marker only lands as that run finishes.
+      heldTaskKeys: () => retryQueue.activeTaskKeys(source.team?.name),
       actionedSource,
       query: source.query,
       intervalSeconds,
@@ -1249,6 +1265,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     }
     eventReloadHooks.hooks?.reconcileMentionSweeps();
     eventReloadHooks.hooks?.reconcileConflictResolution();
+    void eventReloadHooks.verifyRelayRepos?.();
   };
 
   // Live reload keeps queries, fixed team destinations, routing, repos,

@@ -11,7 +11,14 @@ if (!existsSync(cliPath)) {
 }
 
 const child = Bun.spawn(
-  [process.execPath, "test", "./tests/code/github-tracker.test.ts", "--timeout", "240000"],
+  [
+    process.execPath,
+    "test",
+    "./tests/code/github-tracker.test.ts",
+    "./tests/code/github-tracker-worker.test.ts",
+    "--timeout",
+    "240000",
+  ],
   {
     cwd: resolve(import.meta.dir, ".."),
     env: {

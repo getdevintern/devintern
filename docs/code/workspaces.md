@@ -19,13 +19,13 @@ cd ~/code/backend && devintern worker add-repo
 cd ~/code/frontend && devintern worker add-repo
 ```
 
-`worker add-repo` adds a `[[repos]]` entry from the checkout's `origin` remote, merges new keys from its `.devintern-code/.env` into the shared `.env` (conflicting values go to that repo's `[repos.env]`), and seeds a routing rule for a Jira or Linear project key. Running it again is a no-op, and comments in `workspace.toml` are preserved. The repo's `.devintern-code/settings.json` needs no changes.
+`worker add-repo` adds a `[[repos]]` entry from the checkout's `origin` remote, merges new keys from a legacy `.devintern-code/.env` (if the checkout still has one) into the shared `.env` (conflicting values go to that repo's `[repos.env]`), and seeds a routing rule for a Jira or Linear project key. Running it again is a no-op, and comments in `workspace.toml` are preserved. The repo's `.devintern-code/settings.json` needs no changes.
 
 ## How it works
 
 - The worker keeps a bare clone of each repository under `~/.devintern/repos/` and runs each task in a fresh worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched.
 - Before the agent starts, dependencies are installed by detecting the package manager from the lockfile. If that fails, the run continues with a warning.
-- Worktrees are removed after a successful run and kept after a failure for debugging, then deleted after `worktrees_ttl_days`.
+- Worktrees are removed after a successful run and kept after a failure for debugging, then deleted after `worktrees_ttl_days` (except a worktree holding [unfinished work that could not be pushed](delegation-runs.md)).
 - Runs, queue, and schedule state live in `~/.devintern/state/queue.db`. Worker sign-in and relay pairing live in `~/.devintern/state/code/`; use `devintern worker login` to sign in.
 
 ## The workspace file
@@ -65,9 +65,9 @@ repo = "frontend"
 labels = ["frontend"]
 ```
 
-Set `manual_only = true` on a `[[repos]]` entry for a repository you only run by hand from your own checkout. The worker skips it: no clone, no polling, no routing, automations, or `worker add` tasks. A workspace whose repos are all manual-only does not need `[defaults].tracker`.
+Set `manual_only = true` on a `[[repos]]` entry for a repository you only run by hand from your own checkout. The worker skips it: no clone, no polling, no routing, automations, or `worker add` tasks. A workspace whose repos are all manual-only does not need `[defaults].tracker`. A manual-only repo without a hosted remote can set `path = "/absolute/checkout/dir"` instead of `remote`; runs in that directory or below it use the entry. `devintern init` writes these entries for you.
 
-Running `devintern <TASK>` inside a checkout whose `origin` matches a `[[repos]]` entry (manual-only or not) uses that workspace: the shared `.env`, the repo's `env_file` and `[repos.env]`, `[trackers]` settings, pipelines, prompt overrides, sign-in, and run history. The checkout's own `.devintern-code/.env` is not read. A ticket being worked on by the worker cannot be started by hand at the same time (and the reverse); the worker retries its run later.
+Running `devintern <TASK>` inside a checkout whose `origin` matches a `[[repos]]` entry (manual-only or not) uses that workspace: the shared `.env`, the repo's `env_file` and `[repos.env]`, `[trackers]` settings, pipelines, prompt overrides, sign-in, and run history. A ticket being worked on by the worker cannot be started by hand at the same time (and the reverse); the worker retries its run later.
 
 Keys not shown here are documented on the page for their feature:
 
@@ -76,7 +76,7 @@ Keys not shown here are documented on the page for their feature:
 | `[[automations]]`                                                                                        | [Recurring Automations](./automations.md)                                          |
 | `[[estimations]]`                                                                                        | [Story Points Estimation](./story-points-estimation.md#scheduled-estimation-with-the-worker) |
 | `[[error_monitors]]`                                                                                     | [Sentry Auto-fixes](./sentry-integration.md)                                       |
-| `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths` | [PR Follow-up](./pr-follow-up.md)                     |
+| `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths` | [PR Follow-up](./pr-follow-up.md) |
 | `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
 | `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
 | `[defaults].dependency_mode`                                                                             | [Delegation: Dependent tasks](./delegation.md#dependent-tasks---after)             |
@@ -86,7 +86,7 @@ Keys not shown here are documented on the page for their feature:
 Notes on the keys above:
 
 - `[defaults].tracker` can be any tracker with polling support.
-- A repo's `pr_labels` replaces `[defaults].pr_labels`. Outside a workspace, set `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
+- A repo's `pr_labels` replaces `[defaults].pr_labels`. For a manual-only repo, set `PR_LABELS` (comma-separated) in its env file.
 - Repo names must be unique and filesystem-safe; they become directory names.
 
 ## Routing tasks to repositories
@@ -136,7 +136,7 @@ labels = ["web"]
 
 ## Pipelines for the fleet and per repository
 
-Set `pipeline_file` to a JSON pipeline definition (same schema as the `pipeline` block in `settings.json`) for the whole fleet in `[defaults]`, or for one repo in `[[repos]]`. Paths resolve against `~/.devintern`.
+Set `pipeline_file` to a JSON pipeline definition (`steps`, `plugins`, and `artifacts` at the top level; see [Customizing the Task Pipeline](./pipelines.md)) for the whole fleet in `[defaults]`, or for one repo in `[[repos]]`. Relative paths resolve against `~/.devintern`, and a leading `~/` expands to your home directory.
 
 ```toml
 [defaults]
@@ -148,7 +148,7 @@ remote = "git@github.com:acme/backend.git"
 pipeline_file = "pipelines/backend.json"   # this repo only
 ```
 
-Exactly one pipeline runs per task, chosen in this order: the repo's `pipeline_file`, `[defaults].pipeline_file`, then the built-in default. The worker ignores a `pipeline` block in a repository's `.devintern-code/settings.json`. Relative plugin and prompt paths in a `pipeline_file` resolve against that file's directory, so install plugin dependencies there. An invalid pipeline fails the run with the file named. See [Customizing the Task Pipeline](./pipelines.md) for steps and plugins.
+Exactly one pipeline runs per task, chosen in this order: the repo's `pipeline_file`, `[defaults].pipeline_file`, then the built-in default. A `pipeline` block in a repository's `.devintern-code/settings.json` is not read. Relative plugin and prompt paths in a `pipeline_file` resolve against that file's directory, so install plugin dependencies there. An invalid pipeline fails the run with the file named. See [Customizing the Task Pipeline](./pipelines.md) for steps and plugins.
 
 ## Bounded host concurrency
 
@@ -169,7 +169,7 @@ The worker keeps idle PR worktrees for reuse, at most `max_concurrency_per_repo`
 
 ## Environment
 
-Secrets live in one owner-only `~/.devintern/.env`: tracker credentials, `GITHUB_TOKEN`, and agent settings. The worker does not read a checkout's `.devintern-code/.env`. Each repository can layer more on top, highest last:
+Secrets live in one owner-only `~/.devintern/.env`: tracker credentials, `GITHUB_TOKEN`, and agent settings. Each repository can layer more on top, highest last:
 
 1. Shared workspace `.env`
 2. The repo's `env_file`

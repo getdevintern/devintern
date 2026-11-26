@@ -2,31 +2,24 @@ import { mkdirSync, unlinkSync } from "fs";
 import { basename, join } from "path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
-import { captureError, flushErrorTracking } from "@devintern/utils";
 import { runAnalysisWithFallback } from "../agent/analysis-mode";
-import { adoptAgentCreatedChangeRequest } from "../agent/adopt-change-request";
 import { runClarityCheck } from "../agent/clarity";
 import { resolveExecutionPreferences } from "../agent/execution-preferences";
 import type { EffectiveExecutionPreferences } from "../agent/execution-preferences";
-import { HarnessUnavailableError } from "../agent/harness-startup";
 import { readImplementationReport } from "../agent/implementation-report";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { getAgentRuntimeOverrides, setAgentRuntimeOverrides } from "../agent/runtime-overrides";
 import type { AgentRuntimeOverrides } from "../agent/runtime-overrides";
 import { runAgentHarness } from "../agent/run-harness";
-import { flushAnalyticsAndExit } from "../cli/bootstrap";
-import { isWorkerTaskProcess, runContext } from "../cli/context";
+import { runContext } from "../cli/context";
 import { GitHubAppAuth } from "../code-host/github/app-auth";
 import { resolveOutputDir } from "../config/output-dir";
 import {
-  getActiveTrackerType,
   getInProgressStatusForProject,
-  getTodoStatusForProject,
   loadProjectSettings,
   resolveProjectKey,
 } from "../config/project-settings";
 import { validateEnvironment } from "../config/validate-environment";
-import { flushAnalytics, trackInteractiveTaskRun } from "../observability/analytics";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { shouldSkipRetry } from "../state/retry-gate";
 import { clearRetryState, getRetryState } from "../state/retry-state";
@@ -40,7 +33,6 @@ import {
   getActiveRunContext,
   hasRunStage,
   latestRunStage,
-  readRunStep,
   recordRunBranch,
   recordRunHarness,
   recordRunStage,
@@ -50,15 +42,17 @@ import {
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision, SessionPickupOptions } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
-import { reportDevInternDefect } from "./defect-report";
 import { deliveryRunDisposition, outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
+import type { StackBase } from "../dependencies/gate";
 import {
   renderStackedOnSection,
+  resetStackBaseRelease,
   stackBaseFromEnv,
   takeStackBaseFromEnv,
 } from "../dependencies/stacked-base";
-import { dropUnusedStackBase, recordConfirmedStackBase } from "./stack-base-run";
+import { finishUnfinishedRun } from "./preserve-work";
+import { dropUnusedStackBase, recordConfirmedStackBase, runStackBase } from "./stack-base-run";
 import { reopenSucceededPickupOption } from "./reopen-pickup";
 import type { RetryPromptContext } from "../task/formatter";
 import { buildTicketUrl } from "../task/ticket-url";
@@ -67,16 +61,10 @@ import { TaskTrackerManager } from "../trackers/manager";
 import { isMarkdownTaskTracker } from "../trackers/markdown/markdown-task-tracker-client";
 import type { MarkdownTaskRaw } from "../trackers/markdown/markdown-task-tracker-client";
 import { Utils } from "../utils";
-import {
-  HARNESS_UNAVAILABLE_EXIT_CODE,
-  TASK_SKIP_EXIT_CODE,
-  USAGE_LIMIT_EXIT_CODE,
-  isWorkerChild,
-  writeUsageLimitHint,
-} from "../worker/usage-limit-protocol";
+import { TASK_SKIP_EXIT_CODE, isWorkerChild } from "../worker/usage-limit-protocol";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { resolveWorkspaceDir, worktreesDir } from "../workspace/paths";
-import { reportProcessingFailure } from "./processing-failure";
+import { handleTaskFailure } from "./task-failure";
 import { resolveRunIdentity } from "./run-identity";
 import { runTaskSteps } from "./step-runner";
 import type { TaskStep } from "./step-runner";
@@ -191,6 +179,8 @@ interface ImplementationInput {
   taskDetails: ReturnType<TaskTrackerClient["formatTaskDetails"]>;
   effectiveTargetBranch: string;
   resumeBranch?: string;
+  /** The PR this run is stacked on, when `effectiveTargetBranch` is its branch. */
+  stackBase?: StackBase;
 }
 
 /** Extract the `report` string from a recorded stage's JSON detail. */
@@ -332,6 +322,7 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     prTargetBranchExplicit: options.prTargetBranchExplicit,
     requestedPrTargetBranch: options.requestedPrTargetBranch,
     resumeBranch: input.resumeBranch,
+    stackBase: input.stackBase,
   });
 
   // An incomplete-summary file written during this run means the agent
@@ -392,8 +383,15 @@ export async function settleImplementationRun(input: {
   if (isMarkdownTaskTracker(tracker) && disposition.status === "succeeded") {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
   }
-  if (implementationIncomplete) {
-    await finishTaskRun("escalated", "implementation incomplete; handed back to a human");
+  // A closed stacked base escalates even without the incomplete summary (skipped during shutdown).
+  const stackBlocked = runContext.activeTaskContext?.stackBlocked;
+  if (implementationIncomplete || stackBlocked) {
+    await finishUnfinishedRun(
+      "escalated",
+      stackBlocked
+        ? `implementation handed back to a human: ${stackBlocked}`
+        : "implementation incomplete; handed back to a human",
+    );
   } else {
     // Markdown tasks have no remote PR, so `applyActionedTransition` is a
     // no-op for them; record the file (Done, or left open when blocked) as
@@ -429,132 +427,12 @@ export async function settleImplementationRun(input: {
     } else if (disposition.reason) {
       console.log(`\nℹ️  Agent reported the goal as ${disposition.reason}`);
     }
+    // The run delivered (pushed, PR attempted), so there is nothing to preserve.
     await finishTaskRun(disposition.status, disposition.reason);
     // A later reopen of the ticket starts with a clean retry slate.
     clearRetryState(workflowKey);
   }
   runContext.activeTaskContext = null;
-}
-
-/** Identifies the task attempt for failure handling. */
-export interface TaskAttempt {
-  taskKey: string;
-  taskIndex: number;
-  totalTasks: number;
-}
-
-/**
- * Handle a failed task attempt. Usage limits defer without failing the task;
- * other errors record tracker feedback and either rethrow (batch) or exit.
- *
- * Exported for tests; production callers go through {@link processSingleTask}.
- */
-export async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<never> {
-  const { taskKey, taskIndex, totalTasks } = attempt;
-  const options = runContext.options;
-
-  if (error instanceof UsageLimitError) {
-    await finishTaskRun("deferred", error.message);
-    if (isWorkerChild()) {
-      console.warn(`\n⏳ ${error.message}. Signaling worker to fail over.`);
-      if (runContext.activeTaskContext?.movedToInProgress) {
-        try {
-          const todoStatus = getTodoStatusForProject(
-            runContext.activeTaskContext.projectKey,
-            loadProjectSettings(),
-          );
-          if (todoStatus?.trim()) {
-            await runContext.activeTaskContext.tracker.transitionStatus(taskKey, todoStatus.trim());
-          }
-        } catch {
-          /* best-effort */
-        }
-      }
-      if (runContext.lockManager) {
-        runContext.lockManager.release();
-      }
-      writeUsageLimitHint(error);
-      await flushAnalyticsAndExit(USAGE_LIMIT_EXIT_CODE);
-    }
-    console.warn(`\n⏳ ${error.message}. Stopping; will retry on the next scheduled run.`);
-    try {
-      await reportProcessingFailure(taskKey, `${error.message} (usage limit)`);
-    } catch {
-      /* best-effort */
-    }
-    if (totalTasks > 1) {
-      throw error;
-    }
-    if (runContext.lockManager) {
-      runContext.lockManager.release();
-    }
-    await flushAnalyticsAndExit(0);
-  }
-
-  // A harness that could not start is a configuration problem, not a task
-  // attempt. In a worker child, signal the parent to fail over/defer without
-  // posting a failure comment, recording retry state, or transitioning the
-  // ticket. Interactive runs keep the normal failure path below.
-  if (error instanceof HarnessUnavailableError && isWorkerChild()) {
-    await finishTaskRun("deferred", error.message);
-    console.warn(`\n🛠️  ${error.message}. Signaling worker to try the next harness.`);
-    if (runContext.lockManager) {
-      runContext.lockManager.release();
-    }
-    await flushAnalyticsAndExit(HARNESS_UNAVAILABLE_EXIT_CODE);
-  }
-
-  const err = error as Error;
-  // Captured before the run ends so a defect report can be attached to it.
-  const failedRunId = getActiveRunContext()?.id;
-  const failedStep = failedRunId === undefined ? undefined : readRunStep(failedRunId);
-  await finishTaskRun("failed", err.message);
-
-  // A failed run may still have pushed a branch and opened a PR itself (agents
-  // sometimes run `gh pr create`). Register and label it so review polling and
-  // PR metadata stay correct; the run remains failed.
-  await adoptAgentCreatedChangeRequest({ taskKey });
-
-  const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
-  console.error(`${taskPrefix}❌ Error processing ${taskKey}: ${err.message}`);
-  if (options.verbose && err.stack) {
-    console.error(err.stack);
-  }
-  captureError(error, {
-    taskKey,
-    tracker: process.env.TASK_TRACKER || "jira",
-    stage: "process-task",
-  });
-
-  try {
-    await reportProcessingFailure(taskKey, err.message);
-  } catch {
-    /* best-effort */
-  }
-  // Opt-in (DEVINTERN_AUTO_REPORT): report confirmed DevIntern defects.
-  // Never throws, and runs after the failure is recorded and fed back.
-  await reportDevInternDefect({
-    error,
-    taskKey,
-    ...(failedRunId !== undefined ? { runId: failedRunId } : {}),
-    ...(failedStep ? { failedStep } : {}),
-  });
-  runContext.activeTaskContext = null;
-
-  if (totalTasks > 1) {
-    throw error;
-  }
-  if (!isWorkerTaskProcess()) {
-    await trackInteractiveTaskRun({
-      tracker: getActiveTrackerType(),
-      outcome: "failed",
-      taskCount: 1,
-      runMode: options.query ? "query" : "tasks",
-    });
-    await flushAnalytics();
-  }
-  await flushErrorTracking();
-  process.exit(1);
 }
 
 /** Resolved task/tracker context for one pipeline run. */
@@ -1274,6 +1152,7 @@ export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
       taskDetails,
       effectiveTargetBranch,
       resumeBranch,
+      stackBase,
     }) =>
       runImplementation({
         outputFile,
@@ -1284,6 +1163,7 @@ export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
         taskDetails,
         effectiveTargetBranch,
         resumeBranch,
+        stackBase,
       }),
   },
 ];
@@ -1346,6 +1226,7 @@ export async function processSingleTask(
 
     displayTaskSummary({ taskDetails, tracker, linkedResources, relatedIssues, comments });
 
+    resetStackBaseRelease();
     // Set only for a tracker ticket the worker stacked (see prepareTask).
     const stackBase = stackBaseFromEnv();
     const effectiveTargetBranch = await resolveEffectiveTargetBranch(
@@ -1457,6 +1338,9 @@ export async function processSingleTask(
         task,
         taskDetails,
         effectiveTargetBranch,
+        // Tracker tickets carry the base in the env, ad-hoc tasks in the
+        // description marker. Delivery re-checks it in case it merges mid-run.
+        stackBase: runStackBase(descriptionText, stackBase, effectiveTargetBranch),
         attachmentMap: new Map<string, string>(),
         relatedIssues,
         priorRetryState,
@@ -1469,7 +1353,7 @@ export async function processSingleTask(
       restoreExecution();
     }
     if (result.kind === "halted") {
-      await finishTaskRun("escalated", result.reason);
+      await finishUnfinishedRun("escalated", result.reason);
       runContext.activeTaskContext = null;
     }
   } catch (error) {

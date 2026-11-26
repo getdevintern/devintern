@@ -33,7 +33,7 @@ export async function transitionIssueStatus(
   if (!target) {
     throw new TaskTrackerError(
       `Label "${statusName}" not found in the ${operations.scope}. Available labels: ${labels.map((label) => label.name).join(", ")}. ` +
-        "Create the label or update the status names in .devintern-code/settings.json.",
+        "Create the label or update the status names under [trackers] in ~/.devintern/workspace.toml.",
     );
   }
 

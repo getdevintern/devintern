@@ -17,7 +17,7 @@
 import { execFile } from "child_process";
 import { createServer } from "net";
 import { dirname, resolve } from "path";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import {
   activeSandboxName,
   detectSandboxProviders,
@@ -26,6 +26,7 @@ import {
   sandboxInheritsEnclosingSandbox,
 } from "@devintern/agent-harness";
 import { WorkspaceConfigError, parseWorkspaceConfig } from "../workspace/config";
+import { workerWorkspaceView } from "../workspace/manual-only";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "../workspace/config";
 import {
   buildRepoCredentialEnv,
@@ -34,8 +35,12 @@ import {
   parseEnvFile,
 } from "../workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
+import { defaultProbe } from "@devintern/task-trackers";
 import { createTrackerClient, trackerRequiredEnv } from "../trackers/manager";
+import { redactUrlCredentials } from "./dashboard-workspace";
 import { collectHarnessPreflight } from "../agent/sandbox";
+import { resolveWorkerStatus } from "./dashboard-api";
+import type { WorkerStatusView } from "./dashboard-api";
 import type { ReadinessCheck } from "./readiness";
 
 type Env = Record<string, string | undefined>;
@@ -71,6 +76,8 @@ export interface WorkerDoctorDeps {
   resolveWorkspaceDir?: () => string;
   /** Count tasks matching a query against one tracker with explicit credentials. */
   dryRunQuery?: (tracker: string, env: Env, query: string) => Promise<number>;
+  /** Authenticated call that proves a source's tracker credentials are accepted (throws when rejected). */
+  probeCredentials?: (tracker: string, env: Env) => Promise<void>;
   /** Verify a repository's remote is reachable and readable with the configured credentials. */
   checkRepoAccess?: (repo: RepoConfig, env: Env) => Promise<RepoAccessResult>;
   /** Automation entitlement for the workspace (license, trial, or grace). */
@@ -83,6 +90,93 @@ export interface WorkerDoctorDeps {
   isPortInUse?: (port: number) => Promise<boolean>;
   /** Timeout for each query/repository probe. */
   probeTimeoutMs?: number;
+  /** Liveness of a worker already running on this workspace (lock file, local only). */
+  workerStatus?: (workspaceDir: string) => WorkerStatusView;
+  /**
+   * Pid of the process serving a DevIntern dashboard on `port` (from
+   * `GET /api/worker`); `undefined` when nothing answers like a dashboard.
+   */
+  dashboardServerPid?: (port: number) => Promise<number | undefined>;
+}
+
+/** Timeout for asking a busy dashboard port who owns it. */
+const DASHBOARD_PROBE_TIMEOUT_MS = 2_000;
+
+/** Default ownership probe: `serverPid` from the loopback dashboard's `/api/worker`. */
+async function defaultDashboardServerPid(port: number): Promise<number | undefined> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/worker`, {
+      signal: AbortSignal.timeout(DASHBOARD_PROBE_TIMEOUT_MS),
+    });
+    if (!response.ok) return undefined;
+    const body: unknown = await response.json();
+    if (typeof body !== "object" || body === null || !("serverPid" in body)) return undefined;
+    return typeof body.serverPid === "number" ? body.serverPid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Default liveness: the same lock lookup `devintern worker status` uses. */
+function defaultWorkerStatus(workspaceDir: string): WorkerStatusView {
+  return resolveWorkerStatus(workspaceDir);
+}
+
+/**
+ * `Worker` row for a running or unverifiable worker; `undefined` when the
+ * worker is stopped or there is no lock, so that report stays unchanged.
+ */
+function workerLivenessCheck(worker: WorkerStatusView): ReadinessCheck | undefined {
+  if (worker.status === "running") {
+    const facts = [
+      worker.pid === undefined ? undefined : `pid ${worker.pid}`,
+      worker.startedAt ? `since ${worker.startedAt}` : undefined,
+    ].filter(Boolean);
+    return {
+      id: "worker",
+      label: "Worker",
+      status: "ok",
+      detail: facts.length > 0 ? `running (${facts.join(", ")})` : "running",
+    };
+  }
+  if (worker.status === "unknown" && worker.reason === "pid-namespace") {
+    return {
+      id: "worker",
+      label: "Worker",
+      status: "warn",
+      detail: "unknown (cannot verify from this sandbox)",
+      hint: "Run `devintern worker status` on the host to see whether a worker is running",
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Closing line of `devintern worker doctor`, chosen from the report and the
+ * `worker` row (if any) in `checks`. Never tells the operator to start a
+ * worker that is already running or could not be verified.
+ */
+export function workerDoctorClosingLine(
+  checks: ReadinessCheck[],
+  report: { hasFailures: boolean; hasWarnings: boolean },
+): string {
+  if (report.hasFailures) {
+    return "❌ Not ready — the worker would sit idle or fail. Fix the checks above.";
+  }
+  const worker = checks.find((check) => check.id === "worker");
+  if (worker?.status === "ok") {
+    const reload =
+      "config changes hot-reload; restart-only settings need a restart (see docs/code/workspaces.md).";
+    return report.hasWarnings
+      ? `✅ A worker is already running (with the warnings above) — ${reload}`
+      : `✅ Everything looks good — a worker is already running; ${reload}`;
+  }
+  if (worker) {
+    return "✅ Ready to run (with the warnings above); could not tell whether a worker is already running — check with `devintern worker status` on the host.";
+  }
+  return report.hasWarnings
+    ? "✅ Ready to run (with the warnings above) — start it with `devintern worker`."
+    : "✅ Everything looks good — start the worker with `devintern worker`.";
 }
 
 /** Error message without a stack trace. */
@@ -103,11 +197,24 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Pr
   }
 }
 
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+function plural(count: number, noun: string, pluralNoun = `${noun}s`): string {
+  return `${count} ${count === 1 ? noun : pluralNoun}`;
 }
 
 /** Default dry-run: build an isolated tracker client and run the query once. */
+/**
+ * Hint for a Markdown source whose `MARKDOWN_TASKS_DIR` folder does not exist:
+ * the fix is the folder, not `task_query`. Resolved against this process's
+ * cwd, the same way the Markdown client resolves it.
+ */
+function missingMarkdownTasksDirHint(tracker: string, env: Env): string | undefined {
+  const dir = env.MARKDOWN_TASKS_DIR;
+  if (tracker !== "markdown" || !dir) return undefined;
+  const absolute = resolve(dir);
+  if (existsSync(absolute)) return undefined;
+  return `Create the folder ${absolute}, or set MARKDOWN_TASKS_DIR to an existing folder that holds the task files`;
+}
+
 async function defaultDryRunQuery(tracker: string, env: Env, query: string): Promise<number> {
   const client = createTrackerClient(tracker, env);
   const result = await client.searchTasks(query);
@@ -126,6 +233,44 @@ export function gitProbeEnv(env: Env): Env {
     probeEnv.GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=10";
   }
   return probeEnv;
+}
+
+/** Longest stderr excerpt kept in a repository failure detail. */
+const MAX_GIT_CAUSE_LENGTH = 200;
+
+/** Lines that name a specific failure, as opposed to git's trailing advice. */
+const GIT_CAUSE_LINE = /^(fatal:|error:|ssh:|remote:|.*Permission denied)/i;
+
+/** Git's generic follow-up after the real error ("Could not read from remote repository." …). */
+const GIT_BOILERPLATE_LINE =
+  /could not read from remote repository|make sure you have the correct access rights|and the repository exists/i;
+
+/**
+ * Decoration lines with no content, such as GitLab's `remote: ` /
+ * `remote: =====` banner around the real `remote: ERROR: …` line.
+ */
+const GIT_BANNER_LINE = /^(remote:)?[\s=*_-]*$/i;
+
+/**
+ * Pick the most specific cause from `git ls-remote` stderr. Git prints the
+ * real error first and generic access-rights advice last, so the first
+ * `fatal:`/`error:`/`ssh:`/`Permission denied` line that is not boilerplate
+ * wins; otherwise the first non-empty line. Banner lines that are only a
+ * `remote:` prefix or a `=`/`-` rule are skipped. URL userinfo is stripped and the
+ * result is one bounded line. Exported for tests.
+ */
+export function gitFailureCause(stderr: string): string | undefined {
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !GIT_BANNER_LINE.test(line));
+  const chosen =
+    lines.find((line) => GIT_CAUSE_LINE.test(line) && !GIT_BOILERPLATE_LINE.test(line)) ?? lines[0];
+  if (!chosen) return undefined;
+  const redacted = redactUrlCredentials(chosen).replace(/\s+/g, " ");
+  return redacted.length > MAX_GIT_CAUSE_LENGTH
+    ? `${redacted.slice(0, MAX_GIT_CAUSE_LENGTH - 1)}…`
+    : redacted;
 }
 
 /** Run `git ls-remote` without prompting for credentials. Exported for tests. */
@@ -148,45 +293,75 @@ export function gitLsRemote(
           resolvePromise({ ok: true, detail: "remote reachable" });
           return;
         }
-        const last = String(stderr).trim().split("\n").filter(Boolean).pop();
+        const detail = gitFailureCause(String(stderr));
         const cause = error.killed
           ? `timed out after ${timeoutMs / 1000}s`
           : `exited ${error.code ?? "with an error"}`;
-        resolvePromise({ ok: false, reason: `git ls-remote ${cause}${last ? `: ${last}` : ""}` });
+        resolvePromise({
+          ok: false,
+          reason: `git ls-remote ${cause}${detail ? `: ${detail}` : ""}`,
+        });
       },
     );
   });
 }
 
+/** Injectable network probes for {@link createDefaultRepoAccessCheck} (tests). */
+export interface RepoAccessProbes {
+  fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  lsRemote?: (remote: string, env: Env, timeoutMs: number) => Promise<RepoAccessResult>;
+}
+
 /**
  * Default repository probe. GitHub remotes with a token are checked through
- * the REST API (the same credentials the worker's mention/CI sweeps use);
- * everything else falls back to `git ls-remote`.
+ * the REST API (the same credentials the worker's mention/CI sweeps use) and
+ * with `git ls-remote`, because the worker clones and pushes through git's own
+ * credential chain: git never reads GITHUB_TOKEN by itself, so a box with a
+ * valid token but no credential helper passes the API and still cannot clone.
+ * Everything else uses `git ls-remote` only.
  */
-function createDefaultRepoAccessCheck(
+export function createDefaultRepoAccessCheck(
   timeoutMs: number,
+  probes: RepoAccessProbes = {},
 ): (repo: RepoConfig, env: Env) => Promise<RepoAccessResult> {
+  const fetchFn = probes.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  const lsRemote = probes.lsRemote ?? gitLsRemote;
   return async (repo, env) => {
     const slug = gitHubSlugFromRemote(repo.remote);
     const token = env.GITHUB_TOKEN;
     if (slug && token) {
-      const response = await fetch(`https://api.github.com/repos/${slug}`, {
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-          "User-Agent": "devintern-worker-doctor",
-        },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (response.ok) return { ok: true, detail: `GitHub ${slug} readable` };
-      return {
-        ok: false,
-        reason: `GitHub API ${response.status} for ${slug}${
-          response.status === 404 ? " (missing or not visible to GITHUB_TOKEN)" : ""
-        }`,
-      };
+      // In parallel: the caller bounds the whole check with one timeout.
+      const [response, git] = await Promise.all([
+        fetchFn(`https://api.github.com/repos/${slug}`, {
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${token}`,
+            "User-Agent": "devintern-worker-doctor",
+          },
+          signal: AbortSignal.timeout(timeoutMs),
+        }),
+        lsRemote(repo.remote, env, timeoutMs),
+      ]);
+      if (!response.ok) {
+        return {
+          ok: false,
+          reason: `GitHub API ${response.status} for ${slug}${
+            response.status === 404 ? " (missing or not visible to GITHUB_TOKEN)" : ""
+          }`,
+        };
+      }
+      if (!git.ok) {
+        return {
+          ok: false,
+          reason:
+            `GITHUB_TOKEN can read ${slug} through the API, but git cannot clone it (${git.reason}). ` +
+            "Git does not use GITHUB_TOKEN on its own: configure a git credential helper " +
+            "(for example `gh auth setup-git`) or use an SSH remote",
+        };
+      }
+      return { ok: true, detail: `GitHub ${slug} readable` };
     }
-    return gitLsRemote(repo.remote, env, timeoutMs);
+    return lsRemote(repo.remote, env, timeoutMs);
   };
 }
 
@@ -202,6 +377,7 @@ async function defaultCheckEntitlement(workspaceDir: string): Promise<WorkerEnti
     supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
     requireAutomation: true,
     allowTrial: true,
+    loginCommand: "devintern worker login",
   });
 }
 
@@ -378,7 +554,8 @@ function loadWorkspace(
         `${plural(config.repos.length, "repo")}, ${plural(config.teams.length, "team")}, ` +
         `${plural(config.automations.length, "automation")} (${configPath})`,
     });
-    return { workspaceDir, configPath, config };
+    // The doctor checks what the worker runs; manual-only repos are skipped.
+    return { workspaceDir, configPath, config: workerWorkspaceView(config) };
   } catch (error) {
     const problems = error instanceof WorkspaceConfigError ? error.problems : [errorMessage(error)];
     for (const problem of problems) {
@@ -442,7 +619,7 @@ function polledSources(
 function workSourcesCheck(config: WorkspaceConfig): ReadinessCheck {
   const queries = config.teams.length > 0 ? config.teams.length : config.defaults.taskQuery ? 1 : 0;
   const detail =
-    `${plural(queries, "tracker query")}, ${plural(config.automations.length, "automation")}, ` +
+    `${plural(queries, "tracker query", "tracker queries")}, ${plural(config.automations.length, "automation")}, ` +
     `${plural(config.errorMonitors.length, "error monitor")}, ${plural(config.repos.length, "repo")}`;
   if (config.repos.length === 0) {
     return {
@@ -483,6 +660,13 @@ async function collectConfigScopedChecks(
 
   // 2. Tracker credentials per source
   const credentialed: PolledSource[] = [];
+  const probeCredentials =
+    deps.probeCredentials ??
+    ((tracker: string, env: Env) =>
+      defaultProbe(
+        tracker,
+        Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => !!e[1])),
+      ));
   for (const source of sources) {
     const missing = trackerRequiredEnv(source.tracker).filter((key) => !source.env[key]);
     if (missing.length > 0) {
@@ -493,15 +677,33 @@ async function collectConfigScopedChecks(
         detail: `${source.name}: missing ${missing.join(", ")}`,
         hint: source.credentialHint,
       });
-    } else {
-      credentialed.push(source);
-      checks.push({
-        id: "credentials",
-        label: "Tracker credentials",
-        status: "ok",
-        detail: source.name,
-      });
+      continue;
     }
+    if (!offline) {
+      try {
+        await withTimeout(
+          probeCredentials(source.tracker, source.env),
+          timeoutMs,
+          "credential check",
+        );
+      } catch (error) {
+        checks.push({
+          id: "credentials",
+          label: "Tracker credentials",
+          status: "fail",
+          detail: `${source.name}: ${errorMessage(error)}`,
+          hint: source.credentialHint,
+        });
+        continue;
+      }
+    }
+    credentialed.push(source);
+    checks.push({
+      id: "credentials",
+      label: "Tracker credentials",
+      status: "ok",
+      detail: source.name,
+    });
   }
 
   // 3. Ready-tasks query dry-run, one API call per source
@@ -536,8 +738,14 @@ async function collectConfigScopedChecks(
       checks.push({
         id: "query",
         label: "Task query",
-        status: "ok",
+        // 0 matches is valid (nothing is ready yet), but worth a second look.
+        status: count === 0 ? "warn" : "ok",
         detail: `${source.name}: ${plural(count, "task")} match${count === 1 ? "es" : ""}`,
+        ...(count === 0
+          ? {
+              hint: "The query works but matches nothing right now; the worker keeps polling. Check it selects the tasks you expect",
+            }
+          : {}),
       });
     } catch (error) {
       checks.push({
@@ -545,9 +753,11 @@ async function collectConfigScopedChecks(
         label: "Task query",
         status: "fail",
         detail: `${source.name}: ${errorMessage(error)}`,
-        hint: source.team
-          ? `Fix task_query for [[teams]] "${source.team.name}" in workspace.toml (renamed status, project, or field?)`
-          : "Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)",
+        hint:
+          missingMarkdownTasksDirHint(source.tracker, source.env) ??
+          (source.team
+            ? `Fix task_query for [[teams]] "${source.team.name}" in workspace.toml (renamed status, project, or field?)`
+            : "Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)"),
       });
     }
   }
@@ -595,6 +805,56 @@ async function collectConfigScopedChecks(
       });
     }
   }
+}
+
+/**
+ * Dashboard port row. A busy port is reported ok only when the dashboard on it
+ * says it is served by the live worker's own process; anything else warns.
+ */
+async function dashboardPortCheck(
+  config: WorkspaceConfig,
+  workspaceEnv: Env,
+  worker: WorkerStatusView,
+  deps: WorkerDoctorDeps,
+): Promise<ReadinessCheck> {
+  const base = { id: "dashboard-port", label: "Dashboard port" } as const;
+  if (!config.workspace.dashboard) {
+    return { ...base, status: "ok", detail: "dashboard disabled" };
+  }
+  const port =
+    config.workspace.dashboardPort ??
+    (Number.parseInt(workspaceEnv.DASHBOARD_PORT || "", 10) || DEFAULT_DASHBOARD_PORT);
+  let busy = false;
+  try {
+    busy = await (deps.isPortInUse ?? defaultIsPortInUse)(port);
+  } catch {
+    busy = false;
+  }
+  if (!busy) return { ...base, status: "ok", detail: `127.0.0.1:${port} free` };
+  if (worker.status === "running" && worker.pid !== undefined) {
+    // The port may not be the worker's: dashboard settings are startup-only, so
+    // an edited port, or a dashboard that failed to bind, leaves someone else on it.
+    const serverPid = await (deps.dashboardServerPid ?? defaultDashboardServerPid)(port).catch(
+      () => undefined,
+    );
+    if (serverPid === worker.pid) {
+      return { ...base, status: "ok", detail: `127.0.0.1:${port} in use by the running worker` };
+    }
+    return {
+      ...base,
+      status: "warn",
+      detail: `127.0.0.1:${port} is in use by another process, not the running worker (pid ${worker.pid})`,
+      hint:
+        "Dashboard settings take effect only at worker start: stop the process holding the port " +
+        "or pick another [workspace].dashboard_port, then restart the worker",
+    };
+  }
+  return {
+    ...base,
+    status: "warn",
+    detail: `127.0.0.1:${port} is already in use (another worker or dashboard running?)`,
+    hint: "Stop the process holding the port or set [workspace].dashboard_port in workspace.toml",
+  };
 }
 
 /**
@@ -694,43 +954,18 @@ export async function collectWorkerDoctorChecks(
     }
   }
 
-  // 7. Dashboard port (warning only: the worker continues without it)
-  if (config) {
-    if (!config.workspace.dashboard) {
-      checks.push({
-        id: "dashboard-port",
-        label: "Dashboard port",
-        status: "ok",
-        detail: "dashboard disabled",
-      });
-    } else {
-      const port =
-        config.workspace.dashboardPort ??
-        (Number.parseInt(workspaceEnv.DASHBOARD_PORT || "", 10) || DEFAULT_DASHBOARD_PORT);
-      let busy = false;
-      try {
-        busy = await (deps.isPortInUse ?? defaultIsPortInUse)(port);
-      } catch {
-        busy = false;
-      }
-      checks.push(
-        busy
-          ? {
-              id: "dashboard-port",
-              label: "Dashboard port",
-              status: "warn",
-              detail: `127.0.0.1:${port} is already in use (another worker or dashboard running?)`,
-              hint: "Stop the process holding the port or set [workspace].dashboard_port in workspace.toml",
-            }
-          : {
-              id: "dashboard-port",
-              label: "Dashboard port",
-              status: "ok",
-              detail: `127.0.0.1:${port} free`,
-            },
-      );
-    }
+  // 7. Worker liveness (local lock file only; runs under --offline too)
+  let worker: WorkerStatusView = { status: "stopped" };
+  try {
+    worker = (deps.workerStatus ?? defaultWorkerStatus)(workspaceDir);
+  } catch {
+    // Unreadable lock: report as before, without a Worker row.
   }
+  const workerCheck = workerLivenessCheck(worker);
+  if (workerCheck) checks.push(workerCheck);
+
+  // 8. Dashboard port (warning only: the worker continues without it)
+  if (config) checks.push(await dashboardPortCheck(config, workspaceEnv, worker, deps));
 
   return checks;
 }

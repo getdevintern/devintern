@@ -116,6 +116,8 @@ export class TrelloClient {
   private apiKey: string;
   private apiToken: string;
   private baseUrl = "https://api.trello.com/1";
+  /** Short board id -> long id lookups (promises, so concurrent callers share one request). */
+  private boardIdCache = new Map<string, Promise<string>>();
 
   /**
    * Create a Trello REST API client.
@@ -218,6 +220,28 @@ export class TrelloClient {
    */
   async getBoards(): Promise<TrelloBoard[]> {
     return this.request<TrelloBoard[]>("/members/me/boards");
+  }
+
+  /**
+   * Resolve a board id or short id (the 8 characters in the board URL) to the
+   * 24-character id. Endpoints such as `/search` and webhook `idModel` reject
+   * short ids. Results are cached per client.
+   *
+   * @param boardId - Long board id or short id.
+   * @returns The 24-character board id.
+   * @throws When the board cannot be found or the API request fails.
+   */
+  async resolveBoardId(boardId: string): Promise<string> {
+    if (/^[0-9a-f]{24}$/i.test(boardId)) return boardId;
+    let pending = this.boardIdCache.get(boardId);
+    if (!pending) {
+      pending = this.request<{ id: string }>(
+        `/boards/${encodeURIComponent(boardId)}?fields=id`,
+      ).then((board) => board.id);
+      this.boardIdCache.set(boardId, pending);
+      pending.catch(() => this.boardIdCache.delete(boardId));
+    }
+    return pending;
   }
 
   /**
@@ -522,14 +546,15 @@ export class TrelloClient {
     query: string,
     boardId?: string,
   ): Promise<{ cards: TrelloCard[]; total: number }> {
+    const longBoardId = boardId ? await this.resolveBoardId(boardId) : undefined;
     const params: Record<string, string> = {
       query,
       modelTypes: "cards",
       cards_limit: "100",
       card_fields: "id,shortLink,url,name",
     };
-    if (boardId) {
-      params.idBoards = boardId;
+    if (longBoardId) {
+      params.idBoards = longBoardId;
     }
 
     const url = this.buildUrl("/search", params);

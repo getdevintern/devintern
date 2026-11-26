@@ -15,8 +15,6 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
-
 import { untrustedContentBlock } from "@getdevintern/code/pipeline";
 import type {
   PipelineContext,
@@ -26,10 +24,15 @@ import type {
   TaskStepResult,
 } from "@getdevintern/code/pipeline";
 
+import { resolvePromptPath } from "../shared/prompt-path";
+
 interface AgentReviewOptions {
   /** Inline review instructions. */
   prompt?: string;
-  /** Path to a prompt file, relative to `context.workingDir`. */
+  /**
+   * Path to a prompt file. Relative paths resolve against `context.pipelineDir`
+   * (the pipeline file's directory), or `context.workingDir` when it is `null`.
+   */
   promptFile?: string;
   /** Lowest priority that blocks, default `medium`. */
   minPriority?: ReviewPriority;
@@ -49,13 +52,14 @@ const DEFAULT_INSTRUCTIONS = [
 
 const PRIORITIES: readonly ReviewPriority[] = ["critical", "high", "medium", "low", "info"];
 
-function instructionsFor(options: AgentReviewOptions, workingDir: string): string {
+function instructionsFor(options: AgentReviewOptions, context: PipelineContext): string {
   if (typeof options.prompt === "string" && options.prompt.trim()) return options.prompt;
   if (typeof options.promptFile === "string" && options.promptFile.trim()) {
-    const file = isAbsolute(options.promptFile)
-      ? options.promptFile
-      : join(workingDir, options.promptFile);
-    if (existsSync(file)) return readFileSync(file, "utf8");
+    const file = resolvePromptPath(options.promptFile, context);
+    // A configured but missing prompt is a configuration error: never review
+    // with different instructions than the operator asked for.
+    if (!existsSync(file)) throw new Error(`agent-review: prompt file not found: ${file}`);
+    return readFileSync(file, "utf8");
   }
   return DEFAULT_INSTRUCTIONS;
 }
@@ -77,7 +81,12 @@ const definition: StepDefinition = {
     return {
       name: "agent-review",
       async run(context: PipelineContext): Promise<TaskStepResult> {
-        const instructions = instructionsFor(options, context.workingDir);
+        let instructions: string;
+        try {
+          instructions = instructionsFor(options, context);
+        } catch (error) {
+          return { kind: "halt", reason: (error as Error).message };
+        }
         const framedDiff = untrustedContentBlock(
           `\`\`\`diff\n${context.getDiff().trim()}\n\`\`\``,
           "implementation diff",

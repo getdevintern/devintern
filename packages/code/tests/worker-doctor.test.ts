@@ -18,9 +18,12 @@ import type { ReadinessCheck } from "../src/lib/observability/readiness";
 import { renderReadinessReport } from "../src/lib/observability/readiness";
 import {
   collectWorkerDoctorChecks,
+  createDefaultRepoAccessCheck,
   defaultCheckSandbox,
+  gitFailureCause,
   gitLsRemote,
   gitProbeEnv,
+  workerDoctorClosingLine,
 } from "../src/lib/observability/worker-readiness";
 import type { WorkerDoctorDeps } from "../src/lib/observability/worker-readiness";
 
@@ -74,12 +77,14 @@ function writeWorkspace(toml: string, env?: string): string {
 function passingDeps(overrides: Partial<WorkerDoctorDeps> = {}): WorkerDoctorDeps {
   return {
     processEnv: {},
+    probeCredentials: async () => {},
     dryRunQuery: async () => 3,
     checkRepoAccess: async () => ({ ok: true }),
     checkEntitlement: async () => ({ valid: true, source: "entitlement", message: "" }),
     checkHarness: async () => ok("harness"),
     checkSandbox: async () => ok("sandbox"),
     isPortInUse: async () => false,
+    workerStatus: () => ({ status: "stopped" }),
     ...overrides,
   };
 }
@@ -269,6 +274,58 @@ repo = "backend"
     expect(renderReadinessReport(checks).hasFailures).toBe(true);
   });
 
+  test("a rejected tracker credential fails the credentials check and skips the query", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    let queried = false;
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        probeCredentials: async () => {
+          throw new Error("JIRA API Error: 401 Unauthorized");
+        },
+        dryRunQuery: async () => {
+          queried = true;
+          return 1;
+        },
+      }),
+    );
+    const [credentials] = byId(checks, "credentials");
+    expect(credentials?.status).toBe("fail");
+    expect(credentials?.detail).toContain("401");
+    expect(byId(checks, "query")[0]?.status).toBe("fail");
+    expect(queried).toBe(false);
+  });
+
+  test("--offline skips the credential probe", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath, offline: true },
+      passingDeps({
+        probeCredentials: async () => {
+          throw new Error("must not be called");
+        },
+      }),
+    );
+    expect(byId(checks, "credentials")[0]?.status).toBe("ok");
+  });
+
+  test("a missing Markdown tasks folder hints to create it, not to fix task_query", async () => {
+    const tasksDir = join(workspaceDir, "missing-tasks");
+    const workspacePath = writeWorkspace(
+      '[defaults]\ntracker = "markdown"\ntask_query = "*"\n',
+      `MARKDOWN_TASKS_DIR=${tasksDir}\n`,
+    );
+    const deps = passingDeps();
+    delete deps.dryRunQuery; // the real Markdown client
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, deps);
+    const [query] = byId(checks, "query");
+    expect(query?.status).toBe("fail");
+    expect(query?.detail).toContain(`Markdown tasks directory not found: ${tasksDir}`);
+    expect(query?.hint).toBe(
+      `Create the folder ${tasksDir}, or set MARKDOWN_TASKS_DIR to an existing folder that holds the task files`,
+    );
+  });
+
   test("a hung query times out as a failing check", async () => {
     const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
     const checks = await collectWorkerDoctorChecks(
@@ -415,6 +472,159 @@ remote = "git@github.com:acme/backend.git"
     },
   );
 
+  test("a running worker owns the busy dashboard port and gets an ok Worker row", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const dirs: string[] = [];
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        isPortInUse: async () => true,
+        workerStatus: (dir) => {
+          dirs.push(dir);
+          return { status: "running", pid: 1234, startedAt: "2026-11-22T10:00:00.000Z" };
+        },
+        dashboardServerPid: async () => 1234,
+      }),
+    );
+    expect(dirs).toEqual([workspaceDir]);
+    const [worker] = byId(checks, "worker");
+    expect(worker?.status).toBe("ok");
+    expect(worker?.detail).toBe("running (pid 1234, since 2026-11-22T10:00:00.000Z)");
+    const [port] = byId(checks, "dashboard-port");
+    expect(port?.status).toBe("ok");
+    expect(port?.detail).toBe("127.0.0.1:4400 in use by the running worker");
+    const report = renderReadinessReport(checks);
+    expect(report.hasFailures).toBe(false);
+    expect(report.hasWarnings).toBe(false);
+    const closing = workerDoctorClosingLine(checks, report);
+    expect(closing).toContain("already running");
+    expect(closing).toContain("hot-reload");
+    expect(closing).not.toContain("start it with");
+    expect(closing).not.toContain("start the worker");
+  });
+
+  test.each([
+    ["another process's dashboard", async () => 999],
+    ["a non-dashboard listener", async () => undefined],
+    [
+      "a failing probe",
+      async () => {
+        throw new Error("boom");
+      },
+    ],
+  ])("a running worker does not own a busy port held by %s", async (_name, dashboardServerPid) => {
+    // Worker started on 4400; operator then edited dashboard_port (startup-only).
+    const workspacePath = writeWorkspace(
+      `[workspace]\ndashboard_port = 4555\n${TEAMS_CONFIG}`,
+      JIRA_ENV,
+    );
+    const probed: number[] = [];
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        isPortInUse: async () => true,
+        workerStatus: () => ({ status: "running", pid: 1234 }),
+        dashboardServerPid: async (port) => {
+          probed.push(port);
+          return dashboardServerPid();
+        },
+      }),
+    );
+    expect(probed).toEqual([4555]);
+    const [port] = byId(checks, "dashboard-port");
+    expect(port?.status).toBe("warn");
+    expect(port?.detail).toContain("not the running worker (pid 1234)");
+    expect(port?.hint).toContain("restart the worker");
+    expect(renderReadinessReport(checks).hasWarnings).toBe(true);
+  });
+
+  test("the default ownership probe reads serverPid from a real dashboard", async () => {
+    const { startDashboardServer } = await import("../src/dashboard-server");
+    const server = startDashboardServer({
+      port: 0,
+      dbPath: join(workspaceDir, "queue.db"),
+      workingDir: workspaceDir,
+      workspaceDir,
+      logDirs: [],
+    });
+    try {
+      const run = (pid: number) =>
+        collectWorkerDoctorChecks(
+          {
+            workspacePath: writeWorkspace(
+              `[workspace]\ndashboard_port = ${server.port}\n${TEAMS_CONFIG}`,
+              JIRA_ENV,
+            ),
+          },
+          {
+            ...passingDeps({ workerStatus: () => ({ status: "running", pid }) }),
+            isPortInUse: undefined,
+          },
+        );
+      // In-process dashboard: its pid is the worker's.
+      const [owned] = byId(await run(process.pid), "dashboard-port");
+      expect(owned?.status).toBe("ok");
+      expect(owned?.detail).toContain("in use by the running worker");
+      const [foreign] = byId(await run(process.pid + 1), "dashboard-port");
+      expect(foreign?.status).toBe("warn");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("an unverifiable worker (other PID namespace) warns and keeps the port row", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath, offline: true },
+      passingDeps({
+        isPortInUse: async () => true,
+        workerStatus: () => ({ status: "unknown", pid: 7, reason: "pid-namespace" }),
+      }),
+    );
+    const [worker] = byId(checks, "worker");
+    expect(worker?.status).toBe("warn");
+    expect(worker?.detail).toBe("unknown (cannot verify from this sandbox)");
+    expect(worker?.hint).toContain("devintern worker status");
+    const [port] = byId(checks, "dashboard-port");
+    expect(port?.status).toBe("warn");
+    expect(port?.detail).toContain("already in use");
+    expectHintsOnProblems(checks);
+    const report = renderReadinessReport(checks);
+    expect(report.hasFailures).toBe(false);
+    const closing = workerDoctorClosingLine(checks, report);
+    expect(closing).toContain("could not tell whether a worker is already running");
+    expect(closing).not.toContain("start it with");
+    expect(closing).not.toContain("start the worker");
+    expect(closing).not.toContain("stopped");
+  });
+
+  test.each([
+    ["stopped", { status: "stopped" as const, pid: 99 }],
+    ["no lock", { status: "unknown" as const }],
+  ])("a %s worker adds no row and keeps the closing line", async (_name, status) => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({ workerStatus: () => status }),
+    );
+    expect(byId(checks, "worker")).toHaveLength(0);
+    expect(workerDoctorClosingLine(checks, renderReadinessReport(checks))).toBe(
+      "✅ Everything looks good — start the worker with `devintern worker`.",
+    );
+    const warned = [...checks, { id: "x", label: "x", status: "warn" as const, hint: "h" }];
+    expect(workerDoctorClosingLine(warned, renderReadinessReport(warned))).toBe(
+      "✅ Ready to run (with the warnings above) — start it with `devintern worker`.",
+    );
+  });
+
+  test("a failing check wins over a running worker in the closing line", () => {
+    const checks: ReadinessCheck[] = [
+      { id: "worker", label: "Worker", status: "ok", detail: "running (pid 1)" },
+      { id: "entitlement", label: "e", status: "fail", hint: "h" },
+    ];
+    expect(workerDoctorClosingLine(checks, renderReadinessReport(checks))).toContain("Not ready");
+  });
+
   test("a busy dashboard port is a warning only", async () => {
     const workspacePath = writeWorkspace(
       `[workspace]\ndashboard_port = 4555\n${TEAMS_CONFIG}`,
@@ -447,8 +657,15 @@ remote = "git@github.com:acme/backend.git"
       "0 repos, 0 teams, 0 automations",
     );
     expect(byId(checks, "work-sources")[0]?.status).toBe("warn");
+    expect(byId(checks, "work-sources")[0]?.detail).toContain("0 tracker queries");
     expect(renderReadinessReport(checks).hasFailures).toBe(false);
     expectHintsOnProblems(checks);
+  });
+
+  test("work sources count one tracker query in the singular", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, passingDeps());
+    expect(byId(checks, "work-sources")[0]?.detail).toContain("1 tracker query,");
   });
 });
 
@@ -499,6 +716,156 @@ describe("gitLsRemote SSH probe", () => {
     expect(gitProbeEnv({ GIT_SSH_COMMAND: "ssh -i key" }).GIT_SSH_COMMAND).toBe("ssh -i key");
     expect(gitProbeEnv({ GIT_SSH: "/usr/bin/plink" }).GIT_SSH_COMMAND).toBeUndefined();
     expect(gitProbeEnv({}).GIT_TERMINAL_PROMPT).toBe("0");
+  });
+});
+
+describe("gitFailureCause", () => {
+  const boilerplate =
+    "fatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n";
+
+  test("names a missing local path, not the trailing advice", () => {
+    expect(
+      gitFailureCause(
+        `fatal: '/tmp/gone.git' does not appear to be a git repository\n${boilerplate}`,
+      ),
+    ).toBe("fatal: '/tmp/gone.git' does not appear to be a git repository");
+  });
+
+  test("names a GitHub repository that is not found", () => {
+    expect(
+      gitFailureCause(
+        "remote: Repository not found.\nfatal: repository 'https://github.com/acme/gone.git/' not found\n",
+      ),
+    ).toBe("remote: Repository not found.");
+  });
+
+  test("names an ssh host-resolution failure", () => {
+    expect(
+      gitFailureCause(
+        `ssh: Could not resolve hostname github.invalid: Name or service not known\n${boilerplate}`,
+      ),
+    ).toBe("ssh: Could not resolve hostname github.invalid: Name or service not known");
+  });
+
+  test("names a publickey denial", () => {
+    expect(gitFailureCause(`git@github.com: Permission denied (publickey).\n${boilerplate}`)).toBe(
+      "git@github.com: Permission denied (publickey).",
+    );
+  });
+
+  test("strips URL userinfo", () => {
+    const cause = gitFailureCause(
+      "fatal: unable to access 'https://bot:ghs_secret123@github.com/acme/repo.git/': Could not resolve host: github.com\n",
+    );
+    expect(cause).toBe(
+      "fatal: unable to access 'https://github.com/acme/repo.git/': Could not resolve host: github.com",
+    );
+    expect(cause).not.toContain("ghs_secret123");
+  });
+
+  test("falls back to the first non-empty line, and to nothing for empty stderr", () => {
+    expect(gitFailureCause(boilerplate)).toBe("fatal: Could not read from remote repository.");
+    expect(gitFailureCause("\n  something odd happened\nmore\n")).toBe("something odd happened");
+    expect(gitFailureCause("")).toBeUndefined();
+    expect(gitFailureCause(" \n\n")).toBeUndefined();
+  });
+
+  test("skips GitLab's empty remote: banner lines for the ERROR line", () => {
+    const gitlab =
+      "remote: \nremote: ========================================================================\nremote: \nremote: ERROR: The project you were looking for could not be found or you don't have permission to view it.\nremote: \nremote: ========================================================================\nremote: \n" +
+      boilerplate;
+    expect(gitFailureCause(gitlab)).toBe(
+      "remote: ERROR: The project you were looking for could not be found or you don't have permission to view it.",
+    );
+    expect(gitFailureCause("remote: \nremote: -----\n")).toBeUndefined();
+  });
+
+  test("keeps the detail bounded", () => {
+    const cause = gitFailureCause(`fatal: ${"x".repeat(500)}`);
+    expect(cause?.length).toBeLessThanOrEqual(200);
+    expect(cause?.endsWith("…")).toBe(true);
+  });
+});
+
+describe("default repository access check", () => {
+  const repo = {
+    name: "backend",
+    remote: "https://github.com/acme/backend.git",
+  } as Parameters<ReturnType<typeof createDefaultRepoAccessCheck>>[0];
+  const env = { GITHUB_TOKEN: "fake-token" };
+  const apiOk = async () => new Response("{}", { status: 200 });
+
+  test("a token GitHub can read still fails when git has no credentials", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: async () => ({
+        ok: false,
+        reason: "git ls-remote exited 128: fatal: could not read Username for 'https://github.com'",
+      }),
+    });
+    const result = await check(repo, env);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain(
+      "can read acme/backend through the API, but git cannot clone it",
+    );
+    expect(result.reason).toContain("could not read Username");
+    expect(result.reason).toContain("gh auth setup-git");
+  });
+
+  test("passes when both the API and git can read the repository", async () => {
+    const remotes: string[] = [];
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: async (remote) => {
+        remotes.push(remote);
+        return { ok: true, detail: "remote reachable" };
+      },
+    });
+    expect(await check(repo, env)).toEqual({ ok: true, detail: "GitHub acme/backend readable" });
+    expect(remotes).toEqual([repo.remote]);
+  });
+
+  test("an API rejection is reported before the git result", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: async () => new Response("{}", { status: 404 }),
+      lsRemote: async () => ({ ok: true, detail: "remote reachable" }),
+    });
+    expect(await check(repo, env)).toEqual({
+      ok: false,
+      reason: "GitHub API 404 for acme/backend (missing or not visible to GITHUB_TOKEN)",
+    });
+  });
+});
+
+describe("gitLsRemote failure detail", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "worker-doctor-lsremote-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a missing path remote reports the real cause", async () => {
+    const result = await gitLsRemote(join(dir, "gone.git"), { ...process.env }, 10_000);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toMatch(/^git ls-remote exited 128: /);
+    expect(result.reason).toContain("does not appear to be a git repository");
+    expect(result.reason).not.toContain("and the repository exists.");
+  });
+
+  test("a hung remote reports the timeout", async () => {
+    const fakeSsh = join(dir, "ssh-hang");
+    writeFileSync(fakeSsh, "#!/bin/sh\nexec sleep 5 </dev/null >/dev/null 2>&1\n");
+    chmodSync(fakeSsh, 0o755);
+    const result = await gitLsRemote(
+      "git@github.com:acme/backend.git",
+      { ...process.env, GIT_SSH_COMMAND: fakeSsh },
+      300,
+    );
+    expect(result).toEqual({ ok: false, reason: "git ls-remote timed out after 0.3s" });
   });
 });
 

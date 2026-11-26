@@ -13,6 +13,9 @@ await Bun.build({
   sourcemap: "external",
   define: {
     __VERSION__: JSON.stringify(pkg.version),
+    // True only in publish jobs: release bundles ignore DEVINTERN_SKIP_LICENSE_CHECK
+    // and DEVINTERN_API_BASE. Local and e2e builds leave it unset.
+    __DEVINTERN_RELEASE_BUILD__: JSON.stringify(process.env.DEVINTERN_RELEASE_BUILD === "1"),
     // Analytics is permanently disabled in builds without a key (local dev).
     __POSTHOG_API_KEY__: JSON.stringify(process.env.POSTHOG_API_KEY?.trim() ?? ""),
     __POSTHOG_HOST__: JSON.stringify(
@@ -64,5 +67,11 @@ cpSync(uiDist, "dist/dashboard-ui", { recursive: true });
 // resolve it relative to dist/index.js in published artifacts.
 rmSync("dist/prompts", { recursive: true, force: true });
 cpSync("prompts", "dist/prompts", { recursive: true });
+
+// Ship the bundled automation catalog next to the bundle so
+// `devintern automations add` and the `doctor` catalog check work from the
+// published npm artifact.
+rmSync("dist/catalog", { recursive: true, force: true });
+cpSync("catalog", "dist/catalog", { recursive: true });
 
 console.log(`Built devintern v${pkg.version} (with dashboard UI)`);

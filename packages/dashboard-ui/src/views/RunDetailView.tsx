@@ -20,15 +20,17 @@ import type { StatusTone } from "@/components/shared";
 import { TicketKey } from "@/components/TicketKey";
 import { Button } from "@/components/ui/button";
 import { triggerRunRetry, usePoll } from "@/lib/api";
+import { isDemoMode } from "@/lib/demo";
 import { Markdown } from "@/lib/markdown";
 import { automationHash } from "@/lib/routes";
 import { dropHeadline, runReport } from "@/lib/run-report";
 import type { RunReport } from "@/lib/run-report";
-import type { RunDetailResponse, RunRecord } from "@/lib/api";
+import type { RunDetailResponse, RunLineageParent, RunRecord } from "@/lib/api";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { runPrHref, runWorkLink } from "@/lib/run-work";
 import { cn, formatDuration, formatTime } from "@/lib/utils";
 import { attemptInfo, runTitle, statusTone } from "./run-detail/helpers";
+import { SourcedFrom, SpawnedWorkSection } from "./run-detail/Lineage";
 import { Reference } from "./run-detail/Reference";
 import { ReportProblem } from "./run-detail/ReportProblem";
 import { RetryAuditList, RetryConfirm, RetryFeedback } from "./run-detail/RetryParts";
@@ -283,11 +285,26 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function Facts({ run, attempt, total }: { run: RunRecord; attempt?: number; total?: number }) {
+function Facts({
+  run,
+  attempt,
+  total,
+  parent,
+}: {
+  run: RunRecord;
+  attempt?: number;
+  total?: number;
+  parent?: RunLineageParent | null;
+}) {
   const prHref = runPrHref(run);
   return (
     <dl className="grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-1 lg:gap-y-2.5">
       <Fact label="Origin">{formatRunOrigin(run.origin)}</Fact>
+      {parent ? (
+        <Fact label="Sourced from">
+          <SourcedFrom parent={parent} />
+        </Fact>
+      ) : null}
       {run.tracker ? <Fact label="Tracker">{run.tracker}</Fact> : null}
       {run.harness ? <Fact label="Harness">{run.harness}</Fact> : null}
       {attempt !== undefined ? (
@@ -435,7 +452,7 @@ function RunHeader({
           ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {data.retry.eligible && !confirming ? (
+          {data.retry.eligible && !confirming && !isDemoMode() ? (
             <Button
               onClick={() => {
                 setFeedback(null);
@@ -466,7 +483,7 @@ function RunHeader({
               </a>
             </Button>
           ) : null}
-          <ReportProblem run={run} />
+          {isDemoMode() ? null : <ReportProblem run={run} />}
         </div>
       </div>
 
@@ -526,10 +543,11 @@ export function RunDetailView({ runId }: { runId: number; onBack?: () => void })
                   showsHeadline={!run.outcomeReason}
                 />
               ) : null}
+              <SpawnedWorkSection spawned={data.lineage?.spawned} />
               <Timeline run={run} stages={data.stages} compact={Boolean(report)} />
             </div>
             <aside aria-label="Run facts" className="rd-rail space-y-6">
-              <Facts run={run} attempt={attempt} total={total} />
+              <Facts run={run} attempt={attempt} total={total} parent={data.lineage?.parent} />
               <RetryAuditList entries={data.retry.audit} />
             </aside>
             <div className="rd-reference-area min-w-0">

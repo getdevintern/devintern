@@ -96,17 +96,11 @@ export class LockManager {
   private reclaimForeign: boolean;
 
   /**
-   * Create a per-directory process lock under `.devintern-code/`.
+   * Create a process lock whose file sits directly in `lockDir`.
    *
-   * @param workingDir - Project root used to locate the lock file
-   * @param lockFileName - Lock file name; the default guards CLI task runs,
-   *                       while the worker daemon uses its own lock so an
-   *                       idle daemon does not block manual runs
-   * @param options - `plainDir` places the lock file directly in
-   *                  `workingDir` instead of nesting `.devintern-code/`
-   *                  (workspace locks live in `~/.devintern/`, which is a
-   *                  config dir already, not a project root); `probes`
-   *                  overrides the OS liveness seams (tests);
+   * @param lockDir - Directory holding the lock file; created if missing
+   * @param lockFileName - Lock file name (e.g. `.worker.lock`)
+   * @param options - `probes` overrides the OS liveness seams (tests);
    *                  `reclaimForeign` lets `acquire()` take over a
    *                  foreign-namespace lock whose heartbeat is older than
    *                  {@link LOCK_HEARTBEAT_RECLAIM_MS}. Only set it for
@@ -115,27 +109,21 @@ export class LockManager {
    *                  reclaimed automatically
    */
   constructor(
-    workingDir: string = process.cwd(),
-    lockFileName = ".pid.lock",
-    options: { plainDir?: boolean; probes?: LockProbes; reclaimForeign?: boolean } = {},
+    lockDir: string,
+    lockFileName: string,
+    options: { probes?: LockProbes; reclaimForeign?: boolean } = {},
   ) {
     this.probes = options.probes ?? {};
     this.reclaimForeign = options.reclaimForeign ?? false;
-    // Create lock file in .devintern-code directory
-    const configDir = options.plainDir
-      ? resolve(workingDir)
-      : resolve(workingDir, ".devintern-code");
-
-    // Ensure .devintern-code directory exists
-    if (!existsSync(configDir)) {
-      mkdirSync(configDir, { recursive: true });
+    const dir = resolve(lockDir);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
     }
-
-    this.lockFilePath = join(configDir, lockFileName);
+    this.lockFilePath = join(dir, lockFileName);
   }
 
   /**
-   * Acquire an exclusive lock for the current directory.
+   * Acquire this exclusive lock.
    *
    * @returns Success flag, message, and conflicting PID when another instance runs
    */
@@ -294,23 +282,17 @@ export class LockManager {
   /**
    * Read a lock file's status without acquiring or touching it.
    *
-   * @param workingDir - Project root used to locate the lock file
+   * @param lockDir - Directory holding the lock file
    * @param lockFileName - Lock file name (e.g. `.worker.lock`)
-   * @param options - `plainDir` reads the lock directly from `workingDir`
-   *                  instead of nesting `.devintern-code/` (workspace locks
-   *                  live in `~/.devintern/`, which is not a project root);
-   *                  `probes` overrides the OS liveness seams (tests)
+   * @param options - `probes` overrides the OS liveness seams (tests)
    * @returns Lock status, or `null` when no lock file exists (or it is unreadable)
    */
   static readLockStatus(
-    workingDir: string = process.cwd(),
-    lockFileName = ".pid.lock",
-    options: { plainDir?: boolean; probes?: LockProbes } = {},
+    lockDir: string,
+    lockFileName: string,
+    options: { probes?: LockProbes } = {},
   ): LockStatus | null {
-    const configDir = options.plainDir
-      ? resolve(workingDir)
-      : resolve(workingDir, ".devintern-code");
-    const lockFilePath = join(configDir, lockFileName);
+    const lockFilePath = join(resolve(lockDir), lockFileName);
     if (!existsSync(lockFilePath)) {
       return null;
     }

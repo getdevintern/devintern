@@ -16,6 +16,8 @@ import {
   removeGitLabRelayRegistration,
   registerRelaySource,
   saveRelayState,
+  verifiedGitHubRelayRepositories,
+  verifyGitHubReposWithRelayToken,
 } from "../src/lib/relay/connect";
 import type { RelayConnectState } from "../src/lib/relay/connect";
 
@@ -27,7 +29,8 @@ describe("relay-connect auth", () => {
 
   beforeEach(() => {
     dir = join(tmpdir(), `relay-connect-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(join(dir, ".devintern-code"), { recursive: true });
+    // A workspace home: relay state lives in its state/code/.
+    mkdirSync(join(dir, "state", "code"), { recursive: true });
     calls = [];
   });
 
@@ -35,11 +38,27 @@ describe("relay-connect auth", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function mockFetch(handler: (url: string, body: unknown) => Response): typeof fetch {
+  /**
+   * Fake relay. Unless `verify` is set it behaves like a relay that predates
+   * browser-free verification: `verify-github-repos` gets the legacy 400 and
+   * is not recorded, so pairing-focused tests see only the pairing calls.
+   */
+  function mockFetch(
+    handler: (url: string, body: unknown) => Response,
+    options: { verify?: boolean } = {},
+  ): typeof fetch {
     return (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       const auth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? null;
       const body = init?.body ? JSON.parse(String(init.body)) : null;
+      if (
+        !options.verify &&
+        (body as { action?: string } | null)?.action === "verify-github-repos"
+      ) {
+        return new Response(JSON.stringify({ error: "unsupported action: verify-github-repos" }), {
+          status: 400,
+        });
+      }
       calls.push({ url, auth, body });
       return handler(url, body);
     }) as typeof fetch;
@@ -117,7 +136,7 @@ describe("relay-connect auth", () => {
     expect(relayToken).toBe("drt_minted_abc");
     expect(state.customerId).toBe("user_1");
     expect(loadRelayState(dir)?.relayToken).toBe("drt_minted_abc");
-    expect(statSync(join(dir, ".devintern-code", "relay.json")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(dir, "state", "code", "relay.json")).mode & 0o777).toBe(0o600);
     expect(calls[0].auth).toBe("Bearer supa-access");
 
     // Second call reuses the stored token (no re-mint).
@@ -252,7 +271,7 @@ describe("relay-connect auth", () => {
         connectedAt: expect.any(String),
       },
     ]);
-    const persisted = readFileSync(join(dir, ".devintern-code", "relay.json"), "utf8");
+    const persisted = readFileSync(join(dir, "state", "code", "relay.json"), "utf8");
     expect(persisted).not.toContain(signingToken);
     expect(persisted).not.toContain(legacySecret);
 
@@ -469,6 +488,269 @@ describe("relay-connect auth", () => {
       "issue-token",
       "begin-github-pairing",
     ]);
+  });
+
+  describe("browser-free GitHub verification", () => {
+    const ISSUE_TOKEN = {
+      customerId: "user_1",
+      licenseSource: "solo-automation",
+      relayToken: "drt_verify_1",
+    };
+    const PAIRING = {
+      customerId: "user_1",
+      licenseSource: "solo-automation",
+      installUrl: "https://github.com/apps/devintern-ai/installations/new?state=abc",
+      pairingStatusUrl: `${RELAY_URL}/v1/github/pairings/abc`,
+      expiresAt: Date.now() + 60_000,
+    };
+    const IDS: Record<string, { installationId: number; repositoryId: number }> = {
+      "acme/web": { installationId: 7001, repositoryId: 9001 },
+      "acme/api": { installationId: 7001, repositoryId: 9002 },
+      "acme/new": { installationId: 7001, repositoryId: 9003 },
+    };
+
+    function verifyBody(repos: string[], verifiable: string[]) {
+      return {
+        customerId: "user_1",
+        licenseSource: "solo-automation",
+        registrations: [{ kind: "repo", key: "acme/web", createdAt: 1, lastEventAt: null }],
+        repositories: repos
+          .filter((repo) => verifiable.includes(repo))
+          .map((repo) => ({ repo, ...IDS[repo] })),
+        unverified: repos
+          .filter((repo) => !verifiable.includes(repo))
+          .map((repo) => ({ repo, reason: "not_installed" })),
+      };
+    }
+
+    function relay(options: {
+      verifiable: string[];
+      verifyResponse?: () => Response;
+      pairingRepos?: string[][];
+    }): typeof fetch {
+      return mockFetch(
+        (url, body) => {
+          const request = body as { action?: string; repos?: string[] } | null;
+          if (url.includes("/v1/github/pairings/")) {
+            const repos = options.pairingRepos?.at(-1) ?? [];
+            return new Response(
+              JSON.stringify({
+                status: "complete",
+                customerId: "user_1",
+                licenseSource: "solo-automation",
+                registrations: [],
+                repositories: repos.map((repo) => ({ repo, ...IDS[repo] })),
+              }),
+              { status: 200 },
+            );
+          }
+          if (request?.action === "issue-token") {
+            return new Response(JSON.stringify(ISSUE_TOKEN), { status: 200 });
+          }
+          if (request?.action === "verify-github-repos" || url.endsWith("/v1/github/verify")) {
+            if (options.verifyResponse) return options.verifyResponse();
+            return new Response(
+              JSON.stringify(verifyBody(request?.repos ?? [], options.verifiable)),
+              { status: 200 },
+            );
+          }
+          if (request?.action === "begin-github-pairing") {
+            options.pairingRepos?.push(request.repos ?? []);
+            return new Response(JSON.stringify(PAIRING), { status: 200 });
+          }
+          return new Response(JSON.stringify({ error: "unexpected" }), { status: 500 });
+        },
+        { verify: true },
+      );
+    }
+
+    const actions = () =>
+      calls.map(
+        (c) => (c.body as { action?: string } | null)?.action ?? c.url.replace(RELAY_URL, ""),
+      );
+
+    test("all repositories verified: no pairing and no install URL", async () => {
+      const installUrls: string[] = [];
+      const state = await connectGitHubRepo({
+        repos: ["Acme/Web", "acme/api"],
+        accessToken: "supa-access",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl: relay({ verifiable: ["acme/web", "acme/api"] }),
+        onInstallUrl: (url) => installUrls.push(url),
+      });
+
+      expect(installUrls).toEqual([]);
+      expect(actions()).toEqual(["issue-token", "verify-github-repos"]);
+      expect(calls[1]?.body).toEqual({
+        action: "verify-github-repos",
+        repos: ["acme/web", "acme/api"],
+      });
+      expect(calls[1]?.auth).toBe("Bearer supa-access");
+      expect(hasGitHubRelayRegistration(state, "acme/web")).toBe(true);
+      expect(hasGitHubRelayRegistration(state, "acme/api")).toBe(true);
+      expect(state.relayToken).toBe("drt_verify_1");
+      const appRecord = JSON.parse(
+        readFileSync(join(dir, "state", "code", "github-app.json"), "utf8"),
+      ) as { repositories: Array<{ repo: string; repositoryId: number }> };
+      expect(appRecord.repositories.map((record) => record.repo).sort()).toEqual([
+        "acme/api",
+        "acme/web",
+      ]);
+    });
+
+    test("partially verified: pairing requested only for the rest", async () => {
+      const pairingRepos: string[][] = [];
+      const verified: string[][] = [];
+      const state = await connectGitHubRepo({
+        repos: ["acme/web", "acme/new"],
+        accessToken: "supa-access",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl: relay({ verifiable: ["acme/web"], pairingRepos }),
+        sleep: async () => {},
+        onVerified: (repos) => verified.push(repos),
+      });
+
+      expect(verified).toEqual([["acme/web"]]);
+      expect(pairingRepos).toEqual([["acme/new"]]);
+      expect(
+        verifiedGitHubRelayRepositories(state)
+          .map((repository) => repository.repo)
+          .sort(),
+      ).toEqual(["acme/new", "acme/web"]);
+    });
+
+    test("locally verified repo the relay now reports not_installed still pairs", async () => {
+      await connectGitHubRepo({
+        repos: ["acme/web"],
+        accessToken: "supa-access",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl: relay({ verifiable: ["acme/web"] }),
+      });
+
+      // The App has since lost access: the relay verifies nothing new and
+      // explicitly reports acme/web unverified.
+      const pairingRepos: string[][] = [];
+      const verified: string[][] = [];
+      await connectGitHubRepo({
+        repos: ["acme/web"],
+        accessToken: "supa-access",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl: relay({ verifiable: [], pairingRepos }),
+        sleep: async () => {},
+        onVerified: (repos) => verified.push(repos),
+      });
+
+      expect(verified).toEqual([]);
+      expect(pairingRepos).toEqual([["acme/web"]]);
+    });
+
+    for (const [label, response] of [
+      [
+        "400 unsupported action",
+        () =>
+          new Response(JSON.stringify({ error: "unsupported action: verify-github-repos" }), {
+            status: 400,
+          }),
+      ],
+      ["503 not configured", () => new Response("{}", { status: 503 })],
+      ["404", () => new Response("not found", { status: 404 })],
+    ] as const) {
+      test(`older relay (${label}) falls back to the browser pairing`, async () => {
+        const pairingRepos: string[][] = [];
+        const installUrls: string[] = [];
+        const state = await connectGitHubRepo({
+          repos: ["acme/web"],
+          accessToken: "supa-access",
+          workingDir: dir,
+          relayUrl: RELAY_URL,
+          fetchImpl: relay({ verifiable: [], verifyResponse: response, pairingRepos }),
+          sleep: async () => {},
+          onInstallUrl: (url) => installUrls.push(url),
+        });
+
+        expect(installUrls).toEqual([PAIRING.installUrl]);
+        expect(pairingRepos).toEqual([["acme/web"]]);
+        expect(hasGitHubRelayRegistration(state, "acme/web")).toBe(true);
+      });
+    }
+
+    test("connectRelayTarget github succeeds without printing an install URL", async () => {
+      const logs: string[] = [];
+      const originalLog = console.log;
+      console.log = (...args: unknown[]) => logs.push(args.join(" "));
+      let code: number;
+      try {
+        code = await connectRelayTarget("github", {
+          repos: ["acme/web"],
+          workingDir: dir,
+          relayUrl: RELAY_URL,
+          fetchImpl: relay({ verifiable: ["acme/web"] }),
+          getAccessToken: async () => "supa-access",
+        });
+      } finally {
+        console.log = originalLog;
+      }
+      expect(code).toBe(0);
+      expect(logs.some((line) => line.includes("installations/new"))).toBe(false);
+      expect(logs.some((line) => line.includes("existing DevIntern GitHub App installation"))).toBe(
+        true,
+      );
+    });
+
+    test("verifyGitHubReposWithRelayToken uses the relay token data-plane route", async () => {
+      saveRelayState(
+        {
+          relayUrl: RELAY_URL,
+          customerId: "user_1",
+          connectedAt: "2026-01-01T00:00:00.000Z",
+          registrations: [],
+          relayToken: "drt_worker",
+          githubRepositories: [{ repo: "acme/web", ...IDS["acme/web"]! }],
+        },
+        dir,
+      );
+      const result = await verifyGitHubReposWithRelayToken({
+        repos: ["acme/api", "acme/other"],
+        relayToken: "drt_worker",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl: relay({ verifiable: ["acme/api"] }),
+      });
+
+      expect(calls.map((c) => [c.url, c.auth])).toEqual([
+        [`${RELAY_URL}/v1/github/verify`, "Bearer drt_worker"],
+      ]);
+      expect(calls[0]?.body).toEqual({ repos: ["acme/api", "acme/other"] });
+      expect(result.kind).toBe("ok");
+      if (result.kind !== "ok") return;
+      expect(result.verified.map((repository) => repository.repo)).toEqual(["acme/api"]);
+      expect(result.unverified).toEqual([{ repo: "acme/other", reason: "not_installed" }]);
+      const saved = loadRelayState(dir);
+      expect(saved?.relayToken).toBe("drt_worker");
+      expect(
+        verifiedGitHubRelayRepositories(saved)
+          .map((repository) => repository.repo)
+          .sort(),
+      ).toEqual(["acme/api", "acme/web"]);
+    });
+
+    test("verifyGitHubReposWithRelayToken reports 404 as unsupported", async () => {
+      const result = await verifyGitHubReposWithRelayToken({
+        repos: ["acme/api"],
+        relayToken: "drt_worker",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl: relay({
+          verifiable: [],
+          verifyResponse: () => new Response("", { status: 404 }),
+        }),
+      });
+      expect(result).toEqual({ kind: "unsupported" });
+    });
   });
 
   test("registerRelaySource returns an ingest URL and keeps the relay token", async () => {
@@ -699,12 +981,12 @@ describe("relay-connect auth", () => {
       getAccessToken: async () => "supa-access",
     });
     expect(code).toBe(0);
-    const saved = JSON.parse(readFileSync(join(dir, ".devintern-code", "relay.json"), "utf8")) as {
+    const saved = JSON.parse(readFileSync(join(dir, "state", "code", "relay.json"), "utf8")) as {
       relayToken: string;
     };
     expect(saved.relayToken).toBe("drt_cli_1");
     const appRecord = JSON.parse(
-      readFileSync(join(dir, ".devintern-code", "github-app.json"), "utf8"),
+      readFileSync(join(dir, "state", "code", "github-app.json"), "utf8"),
     ) as { repositories: Array<{ installationId: number; repositoryId: number }> };
     expect(appRecord.repositories[0]?.installationId).toBe(7001);
     expect(appRecord.repositories[0]?.repositoryId).toBe(9001);

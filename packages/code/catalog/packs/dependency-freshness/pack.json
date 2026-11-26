@@ -1,0 +1,10 @@
+{
+  "id": "dependency-freshness",
+  "version": 1,
+  "name": "Dependency freshness",
+  "description": "Keep direct dependencies current within their major version, up to five related upgrade groups per run.",
+  "schedule": { "cron": "0 8 * * 1#1" },
+  "openPr": true,
+  "allowNoChanges": true,
+  "prompt": "prompt.md"
+}

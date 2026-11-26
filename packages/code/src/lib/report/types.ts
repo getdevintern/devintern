@@ -98,6 +98,8 @@ export interface BugReportDraft {
   last?: boolean;
   /** Attach a specific local run id. */
   runId?: number;
+  /** Attach a local run at all. Default true; false skips run selection (environment and logs only). */
+  attachRun?: boolean;
   /** Attach the latest local run for this task key. */
   taskKey?: string;
   /** Extra log files (tailed and redacted). */

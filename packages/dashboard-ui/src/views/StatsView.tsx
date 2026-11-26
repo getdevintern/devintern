@@ -267,9 +267,44 @@ function Metric({ label, value, detail }: { label: string; value: string; detail
   );
 }
 
-function SummaryRow({ stats }: { stats: Stats }) {
+/** Counts behind the headline rates; older workers without `rateBasis` fall back to totals. */
+export function rateCounts(stats: Stats): {
+  terminal: number;
+  succeeded: number;
+  escalated: number;
+} {
+  if (stats.rateBasis) return stats.rateBasis;
   const { byStatus } = stats.totals;
-  const finished = byStatus.succeeded + byStatus.failed + byStatus.escalated;
+  return {
+    terminal: byStatus.succeeded + byStatus.failed + byStatus.escalated + byStatus.abandoned,
+    succeeded: byStatus.succeeded,
+    escalated: byStatus.escalated,
+  };
+}
+
+export function AutoMergeSummary({ stats }: { stats: Stats }) {
+  const counts = stats.byOriginStatus?.auto_merge;
+  if (!counts || (stats.byOrigin.auto_merge ?? 0) === 0) return null;
+  const other = counts.failed + counts.abandoned;
+  return (
+    <p data-slot="stats-auto-merge" className="subtle-text mt-2 text-xs">
+      Rates exclude auto-merge decisions. Auto-merge:{" "}
+      <span className="font-medium text-foreground tabular-nums">{counts.succeeded}</span> merged ·{" "}
+      <span className="font-medium text-foreground tabular-nums">{counts.escalated}</span> left for
+      review
+      {other > 0 ? (
+        <>
+          {" "}
+          · <span className="font-medium text-foreground tabular-nums">{other}</span> failed
+        </>
+      ) : null}
+    </p>
+  );
+}
+
+export function SummaryRow({ stats }: { stats: Stats }) {
+  const { byStatus } = stats.totals;
+  const basis = rateCounts(stats);
   const weeks = stats.runsPerWeek.length;
   return (
     <div
@@ -284,12 +319,12 @@ function SummaryRow({ stats }: { stats: Stats }) {
       <Metric
         label="Success rate"
         value={formatRate(stats.successRate)}
-        detail={`${byStatus.succeeded} of ${finished} finished`}
+        detail={`${basis.succeeded} of ${basis.terminal} finished`}
       />
       <Metric
         label="Escalation rate"
         value={formatRate(stats.escalationRate)}
-        detail={`${byStatus.escalated} handed to a human`}
+        detail={`${basis.escalated} handed to a human`}
       />
       <Metric
         label="Median duration"
@@ -419,7 +454,10 @@ export function StatsView() {
 
       {stats && stats.totals.runs > 0 ? (
         <>
-          <SummaryRow stats={stats} />
+          <div>
+            <SummaryRow stats={stats} />
+            <AutoMergeSummary stats={stats} />
+          </div>
 
           <div className="grid gap-4 lg:grid-cols-3">
             <section className="flex min-w-0 flex-col rounded-lg border border-border bg-card p-4 lg:col-span-2">

@@ -6,8 +6,8 @@
  * The parsed artifact is returned as structured `data`, so a later step can
  * read it through `context.results` without re-reading the file.
  *
- * Copy this file to `.devintern-code/steps/verify-artifacts.ts` and register it
- * in `.devintern-code/settings.json` (see settings.json here).
+ * Copy this file to `~/.devintern/pipelines/steps/verify-artifacts.ts` and
+ * register it in a workspace pipeline file (see pipeline.json here).
  */
 
 import { existsSync, readFileSync } from "node:fs";

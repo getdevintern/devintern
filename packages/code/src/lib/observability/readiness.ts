@@ -22,6 +22,7 @@ import type { HarnessEntryReadiness } from "@devintern/agent-harness";
 import type { SupabaseAuthConfig } from "@devintern/auth";
 import { harnessModelEnvKey, resolveAgentModel } from "../agent/model";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
+import { defaultCatalogDir, validateCatalog } from "../automation/catalog";
 
 export type ReadinessStatus = "ok" | "warn" | "fail";
 
@@ -74,6 +75,18 @@ export interface ReadinessDeps {
    * chain resolution over AGENT_HARNESS / AGENT_SANDBOX.
    */
   probeAgentChain?: () => AgentChainProbeResult | Promise<AgentChainProbeResult>;
+  /** Overrides bundled automation-catalog validation; defaults to the real catalog. */
+  probeCatalog?: () => CatalogProbeResult;
+}
+
+/** Result of validating the bundled automation catalog. */
+export interface CatalogProbeResult {
+  /** Number of valid packs found. */
+  packCount: number;
+  /** Broken entries (missing/invalid prompt, duplicate id, bad schedule). */
+  errors: string[];
+  /** Non-fatal problems (orphaned pack directories). */
+  warnings: string[];
 }
 
 /** One requested harness chain entry as `devintern doctor` reports it. */
@@ -310,7 +323,7 @@ export function agentChainCheck(probe: AgentChainProbeResult): ReadinessCheck {
       label: "AI agent CLI",
       status: "fail",
       detail: `${sandboxText} fails every harness in ${chainText || "AGENT_HARNESS"}: ${probe.sandboxError}`,
-      hint: "Fix AGENT_SANDBOX in .devintern-code/.env (e.g. AGENT_SANDBOX=auto, nono, or none); switching AGENT_HARNESS will not help",
+      hint: "Fix AGENT_SANDBOX in ~/.devintern/env/<repo>.env or ~/.devintern/.env (e.g. AGENT_SANDBOX=auto, nono, or none); switching AGENT_HARNESS will not help",
       items,
     };
   }
@@ -322,7 +335,7 @@ export function agentChainCheck(probe: AgentChainProbeResult): ReadinessCheck {
       status: "fail",
       detail: `no usable harness in ${chainText || "AGENT_HARNESS"} (${sandboxText})`,
       hint: other
-        ? `${other.displayName} is installed: set AGENT_HARNESS=${other.name} in .devintern-code/.env to use it`
+        ? `${other.displayName} is installed: set AGENT_HARNESS=${other.name} in ~/.devintern/env/<repo>.env to use it`
         : "Install an agent CLI (e.g. Claude Code) or set <HARNESS>_CLI_PATH to its executable",
       items,
     };
@@ -376,6 +389,63 @@ export function agentChainCheck(probe: AgentChainProbeResult): ReadinessCheck {
     hint: "Fix or remove the flagged entries; the worker skips excluded ones",
     items,
   };
+}
+
+/** Default catalog probe over the bundled `catalog/` directory. */
+function defaultCatalogProbe(): CatalogProbeResult {
+  const { packs, issues } = validateCatalog(defaultCatalogDir());
+  return {
+    packCount: packs.length,
+    errors: issues.filter((issue) => issue.level === "error").map((issue) => issue.message),
+    warnings: issues.filter((issue) => issue.level === "warn").map((issue) => issue.message),
+  };
+}
+
+/**
+ * Turn a catalog probe into a readiness check. Broken (unusable) entries fail;
+ * orphaned directories warn.
+ */
+function catalogReadinessCheck(catalog: CatalogProbeResult): ReadinessCheck {
+  if (catalog.errors.length > 0) {
+    return {
+      id: "catalog",
+      label: "Automation catalog",
+      status: "fail",
+      detail:
+        `${catalog.packCount} valid pack(s); broken: ` + catalog.errors.slice(0, 3).join("; "),
+      hint: "Run 'devintern automations list' for details, or reinstall the package",
+    };
+  }
+  if (catalog.warnings.length > 0) {
+    return {
+      id: "catalog",
+      label: "Automation catalog",
+      status: "warn",
+      detail: `${catalog.packCount} pack(s); orphaned: ` + catalog.warnings.slice(0, 3).join("; "),
+      hint: "List every pack in catalog.json or remove the extra directory",
+    };
+  }
+  return {
+    id: "catalog",
+    label: "Automation catalog",
+    status: "ok",
+    detail: `${catalog.packCount} pack(s)`,
+  };
+}
+
+/** Run a catalog probe (injected or default) without letting it throw. */
+function safeCatalogCheck(deps: ReadinessDeps): ReadinessCheck {
+  try {
+    return catalogReadinessCheck(deps.probeCatalog?.() ?? defaultCatalogProbe());
+  } catch (error) {
+    return {
+      id: "catalog",
+      label: "Automation catalog",
+      status: "fail",
+      detail: error instanceof Error ? error.message : String(error),
+      hint: "Reinstall @getdevintern/code; the bundled catalog could not be read",
+    };
+  }
 }
 
 /** Detect the installed git version, or null when git is unavailable. */
@@ -459,7 +529,7 @@ export async function collectReadinessChecks(deps: ReadinessDeps = {}): Promise<
         label: "Task tracker",
         status: "fail",
         detail: `${capabilities.displayName}: missing ${missing.join(", ")}`,
-        hint: "Run 'devintern init' or edit .devintern-code/.env",
+        hint: "Run 'devintern init' or edit ~/.devintern/env/<repo>.env",
       });
     } else {
       checks.push({
@@ -471,7 +541,11 @@ export async function collectReadinessChecks(deps: ReadinessDeps = {}): Promise<
     }
   }
 
-  // 5. Sign-in session + license (skipped without an auth config)
+  // 5. Bundled automation catalog — broken (unusable) entries fail; orphaned
+  // directories warn.
+  checks.push(safeCatalogCheck(deps));
+
+  // 6. Sign-in session + license (skipped without an auth config)
   if (deps.supabaseConfig) {
     const getUser = deps.getUser ?? getAuthenticatedUser;
     let user: ReadinessUserLike | null = null;

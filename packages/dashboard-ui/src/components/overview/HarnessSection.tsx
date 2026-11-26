@@ -36,7 +36,7 @@ function HarnessRow({
   const inUse = workerRunning && entry.active && entry.state !== "limited";
   return (
     <li
-      className="ov-harness grid grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5"
+      className="ov-harness grid grid-cols-[22px_minmax(7rem,1fr)_auto] items-center gap-3 px-4 py-2.5"
       data-state={entry.state}
       data-active={inUse ? "" : undefined}
       data-last={last ? "" : undefined}
@@ -68,7 +68,9 @@ function HarnessRow({
           )}
         </span>
       </span>
-      <span className="flex flex-col items-end text-[0.8125rem] whitespace-nowrap">
+      {/* The middle column keeps a floor so a long status detail wraps here
+          instead of squeezing the harness name down to a letter. */}
+      <span className="flex flex-col items-end text-right text-[0.8125rem] whitespace-nowrap">
         {entry.state === "healthy" ? (
           <span className="inline-flex items-center gap-1.5 text-muted-foreground">
             <span className="status-dot text-success" aria-hidden="true" />
@@ -97,7 +99,7 @@ function HarnessRow({
               <span className="status-dot" aria-hidden="true" />
               quota unconfirmed
             </span>
-            <span className="text-xs text-subtle-foreground tabular-nums">
+            <span className="text-xs whitespace-normal text-subtle-foreground tabular-nums">
               {entry.limitEndedAt !== undefined
                 ? `limit window ended ${formatClock(entry.limitEndedAt, now)} · no run since`
                 : "no run since its last limit"}

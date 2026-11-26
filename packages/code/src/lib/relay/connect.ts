@@ -18,7 +18,7 @@ import { saveGitHubAppRecord } from "../code-host/github/app-setup";
 import { GitLabWebhookAdminClient } from "../code-host/gitlab/webhook-admin";
 import type { GitLabProjectHook, GitLabWebhookProject } from "../code-host/gitlab/webhook-admin";
 import { resolveGitLabCodeHostConfig } from "../code-host/index";
-import { codeStateDirFor, isWorkspaceHome } from "../workspace/paths";
+import { codeStateDirFor, isWorkspaceHome, resolveWorkspaceDir } from "../workspace/paths";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
@@ -204,7 +204,9 @@ function authSessionPath(workingDir: string): string {
  *
  * @param workingDir - Workspace root (defaults to cwd for low-level callers)
  */
-export function loadRelayState(workingDir: string = process.cwd()): RelayConnectState | null {
+export function loadRelayState(
+  workingDir: string = resolveWorkspaceDir(),
+): RelayConnectState | null {
   const path = relayStatePath(workingDir);
   if (!existsSync(path)) {
     return null;
@@ -218,7 +220,10 @@ export function loadRelayState(workingDir: string = process.cwd()): RelayConnect
 }
 
 /** Persist connect state beside the auth session. */
-export function saveRelayState(state: RelayConnectState, workingDir: string = process.cwd()): void {
+export function saveRelayState(
+  state: RelayConnectState,
+  workingDir: string = resolveWorkspaceDir(),
+): void {
   const path = relayStatePath(workingDir);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(state, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
@@ -368,7 +373,7 @@ export async function issueRelayToken(
 }
 
 /**
- * Ensure `.devintern-code/relay.json` holds a usable relay token, minting one
+ * Ensure `state/code/relay.json` holds a usable relay token, minting one
  * when missing (or when `force` is set).
  */
 export async function ensureRelayToken(
@@ -421,7 +426,9 @@ function mergeConnectState(
     relayUrl,
     customerId: data.customerId,
     connectedAt: new Date().toISOString(),
-    registrations: data.registrations,
+    registrations: Array.isArray(data.registrations)
+      ? data.registrations
+      : (previousForCustomer?.registrations ?? []),
     relayToken: relayToken ?? previousForCustomer?.relayToken,
     github: verified[0] ?? previousForCustomer?.github,
     githubRepositories,
@@ -465,6 +472,170 @@ function verifiedRepositoriesFromResponse(data: ConnectResponse): VerifiedGitHub
     ];
   }
   return [];
+}
+
+/** A repository the relay could not verify without a browser pairing. */
+export interface UnverifiedGitHubRelayRepository {
+  repo: string;
+  /** Relay reason code, e.g. `not_installed`. */
+  reason: string;
+}
+
+/** Result of a browser-free GitHub repository verification. */
+export type GitHubRepoVerificationResult =
+  | { kind: "unsupported" }
+  | {
+      kind: "ok";
+      state: RelayConnectState;
+      /** Requested repositories that are now verified in relay state. */
+      verified: VerifiedGitHubRelayRepository[];
+      /** Requested repositories that still need the browser pairing. */
+      unverified: UnverifiedGitHubRelayRepository[];
+    };
+
+interface VerifyResponse extends ConnectResponse {
+  unverified?: Array<{ repo?: unknown; reason?: unknown }>;
+}
+
+function normalizeRepoList(repos: string[]): string[] {
+  return [
+    ...new Set(repos.map((repo) => repo.trim().toLowerCase()).filter((repo) => repo.length > 0)),
+  ];
+}
+
+/**
+ * Whether a failed verification response means the relay cannot verify
+ * without a browser: older relays reject the connect action (400) or lack the
+ * data-plane route (404), and 503 means the relay is not configured for it.
+ */
+async function isVerificationUnsupported(response: Response): Promise<boolean> {
+  if (response.status === 404 || response.status === 503) return true;
+  if (response.status !== 400) return false;
+  const body = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { error?: unknown } | null;
+  return typeof body?.error === "string" && body.error.includes("unsupported action");
+}
+
+/** Merge a 200 verification response into relay state and report requested repos. */
+async function applyVerificationResponse(
+  response: Response,
+  requested: string[],
+  workingDir: string,
+  relayUrl: string,
+  relayToken: string | undefined,
+): Promise<GitHubRepoVerificationResult> {
+  if (!response.ok) {
+    if (await isVerificationUnsupported(response)) return { kind: "unsupported" };
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+  }
+  const data = (await response.json().catch(() => null)) as VerifyResponse | null;
+  if (!data || typeof data.customerId !== "string" || !data.customerId) {
+    throw new Error("relay returned an invalid GitHub verification response");
+  }
+  const reasons = new Map<string, string>();
+  for (const entry of Array.isArray(data.unverified) ? data.unverified : []) {
+    if (typeof entry?.repo !== "string") continue;
+    reasons.set(
+      entry.repo.toLowerCase(),
+      typeof entry.reason === "string" ? entry.reason : "unverified",
+    );
+  }
+  // Leave relay state untouched when nothing new verified.
+  const newlyVerified = verifiedRepositoriesFromResponse(data).length > 0;
+  const existing = newlyVerified ? null : loadRelayState(workingDir);
+  const state = existing ?? mergeConnectState(workingDir, relayUrl, data, relayToken);
+  // The relay is authoritative for the repos it was asked about: a repo it
+  // reports unverified (e.g. the App lost access) stays unverified even when
+  // local state still lists it from an earlier pairing.
+  const verified = verifiedGitHubRelayRepositories(state).filter(
+    (repository) => requested.includes(repository.repo) && !reasons.has(repository.repo),
+  );
+  const unverified = requested
+    .filter((repo) => !verified.some((repository) => repository.repo === repo))
+    .map((repo) => ({ repo, reason: reasons.get(repo) ?? "unverified" }));
+  if (newlyVerified) {
+    for (const repository of verified) {
+      saveGitHubAppRecord(
+        {
+          repo: repository.repo,
+          enabled: true,
+          connectedAt: new Date().toISOString(),
+          installationId: repository.installationId,
+          repositoryId: repository.repositoryId,
+        },
+        workingDir,
+      );
+    }
+  }
+  return { kind: "ok", state, verified, unverified };
+}
+
+/**
+ * Verify GitHub repositories without a browser using the signed-in session
+ * (`/v1/connect` action `verify-github-repos`). Only repositories under an
+ * installation this customer already paired can verify this way.
+ *
+ * @returns `unsupported` when the relay predates the action
+ */
+export async function verifyGitHubReposWithSession(options: {
+  repos: string[];
+  accessToken: string;
+  relayToken?: string;
+  workingDir?: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<GitHubRepoVerificationResult> {
+  const repos = normalizeRepoList(options.repos);
+  const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
+  const response = await connectRequest(
+    options.accessToken,
+    { action: "verify-github-repos", repos },
+    { relayUrl, fetchImpl: options.fetchImpl },
+  );
+  return applyVerificationResponse(
+    response,
+    repos,
+    options.workingDir ?? process.cwd(),
+    relayUrl,
+    options.relayToken,
+  );
+}
+
+/**
+ * Verify GitHub repositories without a browser using the worker's durable
+ * relay token (`/v1/github/verify`). Used by the worker, which never opens a
+ * browser.
+ *
+ * @returns `unsupported` when the relay predates the route
+ */
+export async function verifyGitHubReposWithRelayToken(options: {
+  repos: string[];
+  relayToken: string;
+  workingDir: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<GitHubRepoVerificationResult> {
+  const repos = normalizeRepoList(options.repos);
+  const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const response = await fetchImpl(`${relayUrl}/v1/github/verify`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${options.relayToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ repos }),
+  });
+  return applyVerificationResponse(
+    response,
+    repos,
+    options.workingDir,
+    relayUrl,
+    options.relayToken,
+  );
 }
 
 export interface GitLabRelayRegistrationBegin {
@@ -648,6 +819,8 @@ export async function connectGitHubRepo(options: {
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   onInstallUrl?: (url: string) => void;
+  /** Observe repositories verified through an existing installation (no browser). */
+  onVerified?: (repos: string[]) => void;
 }): Promise<RelayConnectState> {
   const deps: RelayConnectDeps = {
     workingDir: options.workingDir,
@@ -655,18 +828,41 @@ export async function connectGitHubRepo(options: {
     fetchImpl: options.fetchImpl,
     sleep: options.sleep,
   };
-  const repos = [
-    ...new Set(
-      options.repos.map((repo) => repo.trim().toLowerCase()).filter((repo) => repo.length > 0),
-    ),
-  ];
-  if (repos.length === 0) {
+  const requested = normalizeRepoList(options.repos);
+  if (requested.length === 0) {
     throw new Error("At least one repository is required to pair with the relay.");
   }
 
   const { relayToken } = await ensureRelayToken(options.accessToken, deps);
   const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
   const workingDir = options.workingDir ?? process.cwd();
+
+  // Repositories under an installation this customer already paired (for
+  // example "All repositories" access) verify without a browser. Any failure
+  // here falls back to the browser pairing, which works with every relay.
+  let repos = requested;
+  try {
+    const verification = await verifyGitHubReposWithSession({
+      repos: requested,
+      accessToken: options.accessToken,
+      relayToken,
+      workingDir,
+      relayUrl,
+      fetchImpl: options.fetchImpl,
+    });
+    if (verification.kind === "ok") {
+      if (verification.verified.length > 0) {
+        options.onVerified?.(verification.verified.map((repository) => repository.repo));
+      }
+      if (verification.unverified.length === 0) return verification.state;
+      repos = verification.unverified.map((entry) => entry.repo);
+    }
+  } catch (error) {
+    console.warn(
+      `⚠️  Browser-free GitHub verification failed (${(error as Error).message}); ` +
+        "continuing with the GitHub App pairing.",
+    );
+  }
 
   const response = await connectRequest(
     options.accessToken,
@@ -967,7 +1163,9 @@ async function connectTrelloTarget({ env, connectOpts }: TrackerConnectContext):
   try {
     const { ingestUrl } = await registerRelaySource({ source: "trello", ...connectOpts });
     const { TrelloClient } = await import("@devintern/task-trackers");
-    const webhook = await new TrelloClient({ apiKey, apiToken }).createWebhook(ingestUrl, boardId);
+    const trello = new TrelloClient({ apiKey, apiToken });
+    // Webhooks need the 24-character id; TRELLO_DEFAULT_BOARD_ID may be the short URL id.
+    const webhook = await trello.createWebhook(ingestUrl, await trello.resolveBoardId(boardId));
     console.log(
       `✅ Trello webhook registered (${webhook.id}); card events on board ${boardId} now relay instantly.`,
     );
@@ -1055,6 +1253,11 @@ async function connectGitHubTarget(
       repos: requested,
       ...connectOpts,
       sleep: deps.sleep,
+      onVerified(verified) {
+        console.log(
+          `✅ Verified ${verified.join(", ")} through the existing DevIntern GitHub App installation.`,
+        );
+      },
       onInstallUrl(url) {
         installUrl = url;
         deps.onGitHubInstallUrl?.(url);

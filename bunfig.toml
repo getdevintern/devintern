@@ -35,4 +35,5 @@ preload = [
   "./packages/code/tests/setup/guard-workspace-dir.ts",
   "./packages/code/tests/setup/guard-sentry.ts",
   "./packages/code/tests/setup/guard-worker-env.ts",
+  "./packages/pm/guard-run-env.ts",
 ]

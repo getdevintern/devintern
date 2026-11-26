@@ -1,4 +1,3 @@
-import { readFileSync } from "fs";
 import {
   activeSandboxName,
   describeNonoPack,
@@ -7,7 +6,7 @@ import {
   parseHarnessList,
   resolveHarness,
 } from "@devintern/agent-harness";
-import { getLoadedEnvPath, loadEnvironment } from "../cli/bootstrap";
+import { bootstrapCheckoutEnv, checkoutEnvSource } from "../cli/checkout-env";
 import { hasHelpArg } from "../cli/help";
 import { buildSandboxDoctorReport, collectHarnessPreflight } from "./sandbox";
 
@@ -32,26 +31,15 @@ export async function runSandboxCommand(): Promise<never> {
     console.log(SANDBOX_USAGE);
     process.exit(0);
   }
-  loadEnvironment();
+  // A registered checkout reads the workspace env layers, like a task run.
+  const workspaceRun = await bootstrapCheckoutEnv();
   const detections = await detectSandboxProviders();
   const configured = process.env.AGENT_SANDBOX || "none";
-  // Attribute the value to the .env file only when that file actually sets it;
+  // Attribute the value to an env file only when that file actually sets it;
   // dotenv merges into process.env, so the two are indistinguishable after
   // loading.
-  const loadedEnvPath = getLoadedEnvPath();
-  const envFileSetsIt = (() => {
-    try {
-      return loadedEnvPath
-        ? /^\s*AGENT_SANDBOX\s*=/m.test(readFileSync(loadedEnvPath, "utf-8"))
-        : false;
-    } catch {
-      return false;
-    }
-  })();
   const configuredSource = process.env.AGENT_SANDBOX
-    ? envFileSetsIt
-      ? (loadedEnvPath as string)
-      : "environment"
+    ? (checkoutEnvSource(workspaceRun, "AGENT_SANDBOX") ?? "environment")
     : "default";
   const requested = parseHarnessList(process.env.AGENT_HARNESS);
   // Pack-profile status per chain entry: shows which harness runs are backed

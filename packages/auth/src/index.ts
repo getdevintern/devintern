@@ -5,7 +5,8 @@ import {
   createAuthCallbackServer,
   EMAIL_AUTH_CALLBACK_TIMEOUT_MS,
 } from "./auth-callback";
-import { loginMethodLabel, promptForEmail } from "./login-provider";
+import type { AuthCallbackServer } from "./auth-callback";
+import { loginMethodLabel, promptForEmail, watchStdinLines } from "./login-provider";
 import type { ResolvedLogin, OAuthProvider } from "./login-provider";
 import {
   isRemoteCliSession,
@@ -29,6 +30,7 @@ export {
   promptForOAuthProvider,
   resolveLogin,
   resolveLoginProvider,
+  stdinClosedError,
   type ResolvedLogin,
 } from "./login-provider";
 export {
@@ -36,6 +38,8 @@ export {
   DEFAULT_REMOTE_AUTH_CALLBACK_PORT,
   EMAIL_AUTH_CALLBACK_TIMEOUT_MS,
   createAuthCallbackServer,
+  parsePastedCallback,
+  type PastedCallback,
 } from "./auth-callback";
 export { isRemoteCliSession, resolveAuthCallbackPort } from "./runtime";
 
@@ -89,6 +93,39 @@ export interface LoginHooks {
   openUrl?: (url: string) => Promise<void>;
   /** Receive human-readable progress messages (default: console.log). */
   onStatus?: (message: string) => void;
+  /**
+   * Also accept the callback address pasted on stdin, for a browser that
+   * cannot reach this host's `127.0.0.1`. Defaults to `true` unless `openUrl`
+   * is set (an embedding host owns the browser and has no terminal).
+   */
+  acceptPastedCallback?: boolean;
+}
+
+const PASTE_CALLBACK_HINT = [
+  "Signing in from another machine? When the browser ends on a 127.0.0.1 page that",
+  "does not load, copy that page's full address and paste it here, then press Enter.",
+].join("\n");
+
+/** Whether a login should read pasted callback addresses from stdin. */
+function acceptsPastedCallback(hooks: LoginHooks | undefined): boolean {
+  return hooks?.acceptPastedCallback ?? hooks?.openUrl === undefined;
+}
+
+/**
+ * Feed callback addresses pasted on stdin to the callback server.
+ *
+ * @returns Stops reading stdin.
+ */
+function acceptPastedCallbacks(
+  callback: AuthCallbackServer,
+  onStatus: (message: string) => void,
+): () => void {
+  return watchStdinLines((line) => {
+    if (!line.trim() || callback.submitPastedCallback(line)) return;
+    onStatus(
+      "That is not the sign-in address. Paste the full address from the browser (it contains `code=`).",
+    );
+  });
 }
 
 /** Read and validate the persisted session file, or `null` if missing or corrupt. */
@@ -173,27 +210,33 @@ async function exchangeCodeAndPersist(
 /**
  * Print how to complete browser OAuth when the CLI has no local GUI (SSH/mosh).
  *
- * Mosh cannot forward TCP — prefer copying a session from a laptop login.
- * SSH can LocalForward the fixed callback port so the laptop browser reaches
- * this process.
+ * Pasting the address the laptop browser lands on works everywhere, including
+ * mosh. SSH can instead LocalForward the fixed callback port so the laptop
+ * browser reaches this process directly.
  */
 function printRemoteLoginHints(
   onStatus: (message: string) => void,
   port: number,
   url: string,
+  acceptPaste: boolean,
 ): void {
+  const tunnel = `ssh -N -L ${port}:127.0.0.1:${port} user@this-host`;
   onStatus(
     [
-      "Remote shell detected (SSH/mosh) — a browser on this host will not complete login.",
+      "Remote shell detected (SSH/mosh): a browser on this host will not complete login.",
       "",
-      "Easiest (works with mosh): on your laptop run `devintern login`, then copy",
-      "  .devintern-code/.auth-session.json",
-      "to this machine (same path under the project) and Ctrl-C here; re-run once signed in.",
-      "",
-      "Or SSH-tunnel the callback (mosh cannot forward ports — use ssh):",
-      `  ssh -N -L ${port}:127.0.0.1:${port} user@this-host`,
-      "Then open this URL in your laptop browser:",
+      "Open this URL in your laptop browser:",
       url,
+      "",
+      ...(acceptPaste
+        ? [
+            "The browser then ends on a 127.0.0.1 page that does not load. Copy that page's",
+            "full address and paste it here, then press Enter.",
+            "",
+            "Or tunnel the callback before opening the URL (ssh only; mosh cannot forward ports):",
+          ]
+        : ["Tunnel the callback before opening the URL (ssh only; mosh cannot forward ports):"]),
+      `  ${tunnel}`,
     ].join("\n"),
   );
 }
@@ -213,6 +256,7 @@ export async function loginWithOAuth(
 ): Promise<AuthenticatedUser> {
   const openUrl = hooks?.openUrl ?? openBrowser;
   const onStatus = hooks?.onStatus ?? console.log;
+  const acceptPaste = acceptsPastedCallback(hooks);
   const client = createSupabaseClient(config);
   const providerName = loginMethodLabel(provider);
   const remote = isRemoteCliSession();
@@ -221,6 +265,7 @@ export async function loginWithOAuth(
     callbackPort === undefined ? {} : { port: callbackPort },
   );
 
+  let stopPaste = () => {};
   try {
     const { data, error } = await client.auth.signInWithOAuth({
       provider,
@@ -237,7 +282,7 @@ export async function loginWithOAuth(
     }
 
     if (remote) {
-      printRemoteLoginHints(onStatus, callback.port, data.url);
+      printRemoteLoginHints(onStatus, callback.port, data.url, acceptPaste);
     } else {
       onStatus(`Opening ${providerName} login in your browser...`);
       onStatus(`If the browser does not open, visit:\n${data.url}`);
@@ -247,13 +292,16 @@ export async function loginWithOAuth(
         onStatus(
           `Could not open the browser automatically (${(error as Error).message}). Open the URL above.`,
         );
+        if (acceptPaste) onStatus(PASTE_CALLBACK_HINT);
       }
     }
+    if (acceptPaste) stopPaste = acceptPastedCallbacks(callback, onStatus);
     onStatus("Waiting for authentication callback...");
 
     const code = await callback.waitForCode(AUTH_CALLBACK_TIMEOUT_MS);
-    return exchangeCodeAndPersist(config, client, code);
+    return await exchangeCodeAndPersist(config, client, code);
   } finally {
+    stopPaste();
     callback.stop().catch(() => {});
   }
 }
@@ -278,6 +326,7 @@ export async function loginWithEmail(
     throw new Error("Email is required.");
   }
 
+  const acceptPaste = acceptsPastedCallback(hooks);
   const client = createSupabaseClient(config);
   const remote = isRemoteCliSession();
   const callbackPort = resolveAuthCallbackPort();
@@ -285,6 +334,7 @@ export async function loginWithEmail(
     callbackPort === undefined ? {} : { port: callbackPort },
   );
 
+  let stopPaste = () => {};
   try {
     const { error } = await client.auth.signInWithOtp({
       email: address,
@@ -298,20 +348,28 @@ export async function loginWithEmail(
     }
 
     onStatus(`Sign-in link sent to ${address}.`);
-    if (remote) {
+    if (acceptPaste) {
       onStatus(
         [
-          "Remote shell detected — open the email link on your laptop after tunneling:",
+          "Opening the link on another device or over SSH? It ends on a 127.0.0.1 page that",
+          "does not load. Copy that page's full address and paste it here, then press Enter.",
+        ].join("\n"),
+      );
+      stopPaste = acceptPastedCallbacks(callback, onStatus);
+    } else if (remote) {
+      onStatus(
+        [
+          "Remote shell detected: open the email link on your laptop after tunneling:",
           `  ssh -N -L ${callback.port}:127.0.0.1:${callback.port} user@this-host`,
-          "(mosh cannot forward TCP; prefer `devintern login` on a laptop and copy .auth-session.json)",
         ].join("\n"),
       );
     }
     onStatus("Check your email and open the link (waiting up to 10 minutes)...");
 
     const code = await callback.waitForCode(EMAIL_AUTH_CALLBACK_TIMEOUT_MS);
-    return exchangeCodeAndPersist(config, client, code);
+    return await exchangeCodeAndPersist(config, client, code);
   } finally {
+    stopPaste();
     callback.stop().catch(() => {});
   }
 }

@@ -19,6 +19,7 @@ import { AutomationStateStore } from "../../../code/src/lib/automation/state";
 import { RunStore } from "../../../code/src/lib/state/run-recorder";
 import { WebhookQueue } from "../../../code/src/lib/state/webhook-queue";
 import { WorkerState } from "../../../code/src/lib/state/worker-state";
+import { DELEGATED_RUN, DELEGATING_AUTOMATION, seedLineage } from "./seed-lineage";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -187,7 +188,7 @@ writeFileSync(join(workspaceDir, ".env"), WORKSPACE_ENV, { mode: 0o600 });
 // ---------------------------------------------------------------------------
 
 type Harness = "claude-code" | "codex";
-type Origin = "task" | "scheduled" | "pr_mention" | "ci_fix" | "error_monitor";
+type Origin = "task" | "scheduled" | "pr_mention" | "ci_fix" | "error_monitor" | "local";
 type Status = "succeeded" | "in_progress" | "escalated" | "failed";
 type Tracker = "jira" | "linear" | "github";
 type Repo = "api" | "web" | "infra" | "sdk";
@@ -253,50 +254,444 @@ const FEATURED = "PROJ-1842";
 
 const RUNS: DemoRun[] = [
   // Three tasks in flight at once (max_concurrency = 3), one per repository.
-  { start: 3, origin: "task", status: "in_progress", repo: "sdk", harness: "codex", key: "acme/sdk#61", tracker: "github", title: "Raise typed errors for API validation failures", step: "feasibility", stepFor: 1 },
-  { start: 11, origin: "task", status: "in_progress", repo: "api", harness: "claude-code", key: "PROJ-1901", tracker: "jira", title: "Add cursor pagination to the audit log endpoint", step: "implement", stepFor: 8, assessment: "Clear and implementable; touches the audit log service only." },
-  { start: 24, origin: "task", status: "in_progress", repo: "web", harness: "claude-code", key: "PRD-224", tracker: "linear", title: "Add bulk archive to the projects table", step: "auto-review", stepFor: 2, assessment: "Clear and implementable; reuses the existing archive mutation." },
-  { start: 52, dur: 12, origin: "scheduled", status: "succeeded", repo: "api", harness: "claude-code", automation: "repair-failing-main", pr: 4423, open: true },
-  { start: 95, dur: 31, origin: "task", status: "succeeded", repo: "web", harness: "claude-code", key: "PRD-218", tracker: "linear", title: "Show a loading skeleton on the usage dashboard", pr: 1882, open: true },
-  { start: 140, dur: 26, origin: "task", status: "succeeded", repo: "infra", harness: "codex", key: "PROJ-1898", tracker: "jira", title: "Pin Terraform provider versions in the staging module", pr: 611, open: true },
-  { start: 190, dur: 29, origin: "task", status: "succeeded", repo: "api", harness: "claude-code", key: FEATURED, tracker: "jira", title: "Rate limit the password reset endpoint", pr: 4419, open: true },
-  { start: 235, dur: 9, origin: "pr_mention", status: "succeeded", repo: "api", harness: "claude-code", pr: 4412 },
-  { start: 300, dur: 24, origin: "task", status: "succeeded", repo: "sdk", harness: "claude-code", key: "acme/sdk#58", tracker: "github", title: "Retry idempotent requests on 429 responses", pr: 92, open: true },
-  { start: 335, dur: 3, origin: "task", status: "escalated", repo: "web", harness: "claude-code", key: "PRD-214", tracker: "linear", title: "Export project data as CSV", reason: "Handed back to the tracker: the ticket does not say whether archived projects belong in the export. Asked for clarification before writing any code." },
-  { start: 420, dur: 18, origin: "scheduled", status: "succeeded", repo: "api", harness: "claude-code", automation: "log-triage", pr: 4415 },
-  { start: 600, dur: 33, origin: "task", status: "succeeded", repo: "api", harness: "claude-code", key: "PROJ-1895", tracker: "jira", title: "Validate webhook signatures with a constant-time compare", pr: 4417 },
-  { start: 690, dur: 11, origin: "ci_fix", status: "succeeded", repo: "web", harness: "codex", pr: 1877 },
-  { start: 900, dur: 27, origin: "task", status: "succeeded", repo: "web", harness: "codex", key: "PRD-216", tracker: "linear", title: "Persist table column widths per user", pr: 1879 },
-  { start: 1500, dur: 22, origin: "task", status: "succeeded", repo: "web", harness: "claude-code", key: "PRD-211", tracker: "linear", title: "Add keyboard shortcuts to the command palette", pr: 1874, open: true },
-  { start: 1560, dur: 16, origin: "scheduled", status: "succeeded", repo: "web", harness: "claude-code", automation: "docs-drift", pr: 1873 },
-  { start: 1620, dur: 14, origin: "error_monitor", status: "succeeded", repo: "api", harness: "claude-code", key: "ACME-API-4F", title: "TypeError in invoice export when customer has no billing address", pr: 4410 },
-  { start: 1700, dur: 29, origin: "task", status: "succeeded", repo: "api", harness: "claude-code", key: "PROJ-1887", tracker: "jira", title: "Return 409 instead of 500 on duplicate API key names", pr: 4408 },
-  { start: 1800, dur: 25, origin: "task", status: "succeeded", repo: "infra", harness: "claude-code", key: "PROJ-1883", tracker: "jira", title: "Add a CloudWatch alarm for queue depth", pr: 608 },
-  { start: 1900, dur: 12, origin: "scheduled", status: "succeeded", repo: "api", harness: "claude-code", automation: "repair-failing-main", pr: 4406 },
-  { start: 2100, dur: 35, origin: "task", status: "succeeded", repo: "sdk", harness: "codex", key: "acme/sdk#55", tracker: "github", title: "Expose request timeouts in the client options", pr: 90 },
-  { start: 2200, dur: 21, origin: "task", status: "succeeded", repo: "web", harness: "claude-code", key: "PRD-209", tracker: "linear", title: "Fix tooltip clipping in the billing table", pr: 1870 },
-  { start: 2330, dur: 17, origin: "scheduled", status: "succeeded", repo: "api", harness: "claude-code", automation: "log-triage", pr: 4401 },
-  { start: 2500, dur: 38, origin: "task", status: "failed", repo: "api", harness: "codex", key: "PROJ-1879", tracker: "jira", title: "Migrate session storage to Redis", reason: "Verification failed after 3 repair attempts: integration tests require a Redis service that is not available in the worker environment." },
-  { start: 2580, dur: 26, origin: "task", status: "succeeded", repo: "api", harness: "claude-code", key: "PROJ-1876", tracker: "jira", title: "Include the request id in structured error responses", pr: 4398 },
-  { start: 2700, dur: 28, origin: "task", status: "succeeded", repo: "web", harness: "claude-code", key: "PRD-205", tracker: "linear", title: "Replace the legacy date picker on the reports page", pr: 1866 },
-  { start: 2900, dur: 19, origin: "pr_mention", status: "succeeded", repo: "web", harness: "claude-code", pr: 1866 },
-  { start: 3000, dur: 31, origin: "task", status: "succeeded", repo: "infra", harness: "claude-code", key: "PROJ-1871", tracker: "jira", title: "Rotate the staging database credentials via Secrets Manager", pr: 604 },
-  { start: 3200, dur: 23, origin: "task", status: "succeeded", repo: "sdk", harness: "claude-code", key: "acme/sdk#52", tracker: "github", title: "Document pagination helpers in the README", pr: 88 },
-  { start: 3300, dur: 27, origin: "task", status: "succeeded", repo: "api", harness: "claude-code", key: "PROJ-1868", tracker: "jira", title: "Add an index for the invoices.customer_id lookup", pr: 4391 },
-  { start: 3500, dur: 30, origin: "task", status: "succeeded", repo: "web", harness: "codex", key: "PRD-201", tracker: "linear", title: "Make the sidebar collapsible on tablet widths", pr: 1859 },
-  { start: 3650, dur: 20, origin: "ci_fix", status: "succeeded", repo: "api", harness: "claude-code", pr: 4386 },
-  { start: 3800, dur: 24, origin: "task", status: "succeeded", repo: "api", harness: "claude-code", key: "PROJ-1862", tracker: "jira", title: "Paginate the list of API keys", pr: 4380 },
-  { start: 4100, dur: 15, origin: "scheduled", status: "succeeded", repo: "web", harness: "claude-code", automation: "dependency-updates", pr: 1852 },
-  { start: 4300, dur: 33, origin: "task", status: "succeeded", repo: "infra", harness: "claude-code", key: "PROJ-1855", tracker: "jira", title: "Move CI runners to the new base image", pr: 598 },
+  {
+    start: 3,
+    origin: "task",
+    status: "in_progress",
+    repo: "sdk",
+    harness: "codex",
+    key: "acme/sdk#61",
+    tracker: "github",
+    title: "Raise typed errors for API validation failures",
+    step: "feasibility",
+    stepFor: 1,
+  },
+  {
+    start: 11,
+    origin: "task",
+    status: "in_progress",
+    repo: "api",
+    harness: "claude-code",
+    key: "PROJ-1901",
+    tracker: "jira",
+    title: "Add cursor pagination to the audit log endpoint",
+    step: "implement",
+    stepFor: 8,
+    assessment: "Clear and implementable; touches the audit log service only.",
+  },
+  {
+    start: 24,
+    origin: "task",
+    status: "in_progress",
+    repo: "web",
+    harness: "claude-code",
+    key: "PRD-224",
+    tracker: "linear",
+    title: "Add bulk archive to the projects table",
+    step: "auto-review",
+    stepFor: 2,
+    assessment: "Clear and implementable; reuses the existing archive mutation.",
+  },
+  {
+    start: 52,
+    dur: 12,
+    origin: "scheduled",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    automation: "repair-failing-main",
+    pr: 4423,
+    open: true,
+  },
+  {
+    start: 95,
+    dur: 31,
+    origin: "task",
+    status: "succeeded",
+    repo: "web",
+    harness: "claude-code",
+    key: "PRD-218",
+    tracker: "linear",
+    title: "Show a loading skeleton on the usage dashboard",
+    pr: 1882,
+    open: true,
+  },
+  {
+    start: 140,
+    dur: 26,
+    origin: "task",
+    status: "succeeded",
+    repo: "infra",
+    harness: "codex",
+    key: "PROJ-1898",
+    tracker: "jira",
+    title: "Pin Terraform provider versions in the staging module",
+    pr: 611,
+    open: true,
+  },
+  {
+    start: 190,
+    dur: 29,
+    origin: "task",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    key: FEATURED,
+    tracker: "jira",
+    title: "Rate limit the password reset endpoint",
+    pr: 4419,
+    open: true,
+  },
+  {
+    start: 235,
+    dur: 9,
+    origin: "pr_mention",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    pr: 4412,
+  },
+  {
+    start: 300,
+    dur: 24,
+    origin: "task",
+    status: "succeeded",
+    repo: "sdk",
+    harness: "claude-code",
+    key: "acme/sdk#58",
+    tracker: "github",
+    title: "Retry idempotent requests on 429 responses",
+    pr: 92,
+    open: true,
+  },
+  {
+    start: 335,
+    dur: 3,
+    origin: "task",
+    status: "escalated",
+    repo: "web",
+    harness: "claude-code",
+    key: "PRD-214",
+    tracker: "linear",
+    title: "Export project data as CSV",
+    reason:
+      "Handed back to the tracker: the ticket does not say whether archived projects belong in the export. Asked for clarification before writing any code.",
+  },
+  {
+    start: 420,
+    dur: 18,
+    origin: "scheduled",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    automation: "log-triage",
+    pr: 4415,
+  },
+  {
+    start: 600,
+    dur: 33,
+    origin: "task",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    key: "PROJ-1895",
+    tracker: "jira",
+    title: "Validate webhook signatures with a constant-time compare",
+    pr: 4417,
+  },
+  {
+    start: 690,
+    dur: 11,
+    origin: "ci_fix",
+    status: "succeeded",
+    repo: "web",
+    harness: "codex",
+    pr: 1877,
+  },
+  {
+    start: 900,
+    dur: 27,
+    origin: "task",
+    status: "succeeded",
+    repo: "web",
+    harness: "codex",
+    key: "PRD-216",
+    tracker: "linear",
+    title: "Persist table column widths per user",
+    pr: 1879,
+  },
+  {
+    start: 1500,
+    dur: 22,
+    origin: "task",
+    status: "succeeded",
+    repo: "web",
+    harness: "claude-code",
+    key: "PRD-211",
+    tracker: "linear",
+    title: "Add keyboard shortcuts to the command palette",
+    pr: 1874,
+    open: true,
+  },
+  {
+    start: 1560,
+    dur: 16,
+    origin: "scheduled",
+    status: "succeeded",
+    repo: "web",
+    harness: "claude-code",
+    automation: "docs-drift",
+    pr: 1873,
+  },
+  {
+    start: 1620,
+    dur: 14,
+    origin: "error_monitor",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    key: "ACME-API-4F",
+    title: "TypeError in invoice export when customer has no billing address",
+    pr: 4410,
+  },
+  {
+    start: 1700,
+    dur: 29,
+    origin: "task",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    key: "PROJ-1887",
+    tracker: "jira",
+    title: "Return 409 instead of 500 on duplicate API key names",
+    pr: 4408,
+  },
+  {
+    start: 1800,
+    dur: 25,
+    origin: "task",
+    status: "succeeded",
+    repo: "infra",
+    harness: "claude-code",
+    key: "PROJ-1883",
+    tracker: "jira",
+    title: "Add a CloudWatch alarm for queue depth",
+    pr: 608,
+  },
+  {
+    start: 1900,
+    dur: 12,
+    origin: "scheduled",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    automation: "repair-failing-main",
+    pr: 4406,
+  },
+  {
+    start: 2100,
+    dur: 35,
+    origin: "task",
+    status: "succeeded",
+    repo: "sdk",
+    harness: "codex",
+    key: "acme/sdk#55",
+    tracker: "github",
+    title: "Expose request timeouts in the client options",
+    pr: 90,
+  },
+  {
+    start: 2200,
+    dur: 21,
+    origin: "task",
+    status: "succeeded",
+    repo: "web",
+    harness: "claude-code",
+    key: "PRD-209",
+    tracker: "linear",
+    title: "Fix tooltip clipping in the billing table",
+    pr: 1870,
+  },
+  {
+    start: 2330,
+    dur: 17,
+    origin: "scheduled",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    automation: "log-triage",
+    pr: 4401,
+  },
+  {
+    start: 2500,
+    dur: 38,
+    origin: "task",
+    status: "failed",
+    repo: "api",
+    harness: "codex",
+    key: "PROJ-1879",
+    tracker: "jira",
+    title: "Migrate session storage to Redis",
+    reason:
+      "Verification failed after 3 repair attempts: integration tests require a Redis service that is not available in the worker environment.",
+  },
+  {
+    start: 2580,
+    dur: 26,
+    origin: "task",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    key: "PROJ-1876",
+    tracker: "jira",
+    title: "Include the request id in structured error responses",
+    pr: 4398,
+  },
+  {
+    start: 2700,
+    dur: 28,
+    origin: "task",
+    status: "succeeded",
+    repo: "web",
+    harness: "claude-code",
+    key: "PRD-205",
+    tracker: "linear",
+    title: "Replace the legacy date picker on the reports page",
+    pr: 1866,
+  },
+  {
+    start: 2900,
+    dur: 19,
+    origin: "pr_mention",
+    status: "succeeded",
+    repo: "web",
+    harness: "claude-code",
+    pr: 1866,
+  },
+  {
+    start: 3000,
+    dur: 31,
+    origin: "task",
+    status: "succeeded",
+    repo: "infra",
+    harness: "claude-code",
+    key: "PROJ-1871",
+    tracker: "jira",
+    title: "Rotate the staging database credentials via Secrets Manager",
+    pr: 604,
+  },
+  {
+    start: 3200,
+    dur: 23,
+    origin: "task",
+    status: "succeeded",
+    repo: "sdk",
+    harness: "claude-code",
+    key: "acme/sdk#52",
+    tracker: "github",
+    title: "Document pagination helpers in the README",
+    pr: 88,
+  },
+  {
+    start: 3300,
+    dur: 27,
+    origin: "task",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    key: "PROJ-1868",
+    tracker: "jira",
+    title: "Add an index for the invoices.customer_id lookup",
+    pr: 4391,
+  },
+  {
+    start: 3500,
+    dur: 30,
+    origin: "task",
+    status: "succeeded",
+    repo: "web",
+    harness: "codex",
+    key: "PRD-201",
+    tracker: "linear",
+    title: "Make the sidebar collapsible on tablet widths",
+    pr: 1859,
+  },
+  {
+    start: 3650,
+    dur: 20,
+    origin: "ci_fix",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    pr: 4386,
+  },
+  {
+    start: 3800,
+    dur: 24,
+    origin: "task",
+    status: "succeeded",
+    repo: "api",
+    harness: "claude-code",
+    key: "PROJ-1862",
+    tracker: "jira",
+    title: "Paginate the list of API keys",
+    pr: 4380,
+  },
+  {
+    start: 4100,
+    dur: 15,
+    origin: "scheduled",
+    status: "succeeded",
+    repo: "web",
+    harness: "claude-code",
+    automation: "dependency-updates",
+    pr: 1852,
+  },
+  {
+    start: 4300,
+    dur: 33,
+    origin: "task",
+    status: "succeeded",
+    repo: "infra",
+    harness: "claude-code",
+    key: "PROJ-1855",
+    tracker: "jira",
+    title: "Move CI runners to the new base image",
+    pr: 598,
+  },
 ];
 
-RUNS.push({ start: 0, dur: 21, origin: "scheduled", status: "succeeded", repo: "api", harness: "claude-code", automation: "security-audit", pr: 4403 });
+RUNS.push({
+  start: 0,
+  dur: 21,
+  origin: "scheduled",
+  status: "succeeded",
+  repo: "api",
+  harness: "claude-code",
+  automation: "security-audit",
+  pr: 4403,
+});
 
 // Cron automations ran at their real last occurrence.
 for (const [id, cron] of Object.entries(CRONS)) {
   const latest = RUNS.filter((r) => r.automation === id).sort((a, b) => a.start - b.start)[0];
   if (latest) latest.start = Math.round((now - occurrence(cron, -1)) / MIN);
 }
+
+// Run lineage (see seed-lineage.ts): a task the docs-drift automation delegated.
+const delegatingStart = RUNS.find((r) => r.automation === DELEGATING_AUTOMATION)?.start ?? 1560;
+RUNS.push({
+  start: Math.max(delegatingStart - 30, 2),
+  dur: 14,
+  origin: "local",
+  status: "succeeded",
+  repo: DELEGATED_RUN.repo,
+  harness: "claude-code",
+  key: DELEGATED_RUN.key,
+  title: DELEGATED_RUN.title,
+  pr: DELEGATED_RUN.pr,
+  open: true,
+});
 
 const DESCRIPTIONS: Record<string, string> = {
   [FEATURED]: `# Rate limit the password reset endpoint
@@ -335,6 +730,7 @@ const db = new Database(dbPath);
 
 const sorted = [...RUNS].sort((a, b) => b.start - a.start);
 const idByKey = new Map<string, number>();
+const idByAutomation = new Map<string, number>();
 for (const run of sorted) {
   const branch = run.key
     ? `devintern/${run.key.replace(/[^A-Za-z0-9]+/g, "-").toLowerCase()}`
@@ -354,6 +750,8 @@ for (const run of sorted) {
     attempt: 1,
   });
   if (run.key) idByKey.set(run.key, id);
+  // Oldest first, so the last write is the automation's latest run.
+  if (run.automation) idByAutomation.set(run.automation, id);
   const started = ago(run.start);
   const finished = run.dur === undefined ? null : started + run.dur * MIN;
   const prUrl = run.pr ? `https://github.com/acme/${run.repo}/pull/${run.pr}` : null;
@@ -424,7 +822,12 @@ function seedStages(runId: number, run: DemoRun, started: number): void {
   const at = (fraction: number): number => started + Math.round(dur * fraction * MIN);
 
   if (run.origin === "pr_mention" || run.origin === "ci_fix") {
-    stage("change_request", "succeeded", run.pr ? `Updated pull request #${run.pr}` : null, at(0.9));
+    stage(
+      "change_request",
+      "succeeded",
+      run.pr ? `Updated pull request #${run.pr}` : null,
+      at(0.9),
+    );
     stage("outcome", "succeeded", defaultReason(run), at(1));
     return;
   }
@@ -432,7 +835,11 @@ function seedStages(runId: number, run: DemoRun, started: number): void {
     // Record the stages finished before the current step.
     if (run.step === "feasibility") return;
     const summary = run.assessment ?? "Clear and implementable.";
-    stage("feasibility", "succeeded", summary, started + 2 * MIN, { isImplementable: true, clarityScore: 9, summary });
+    stage("feasibility", "succeeded", summary, started + 2 * MIN, {
+      isImplementable: true,
+      clarityScore: 9,
+      summary,
+    });
     if (run.step === "implement") return;
     const stepStart = now - (run.stepFor ?? 0) * MIN;
     stage("implementation", "succeeded", null, stepStart - 4 * MIN, {
@@ -441,7 +848,12 @@ function seedStages(runId: number, run: DemoRun, started: number): void {
       report: "Implemented the change and added tests.",
     });
     if (run.step === "verify") return;
-    stage("verify", "succeeded", "Tests pass.", stepStart, { approved: true, blocking: 0, total: 0, summary: "Tests pass." });
+    stage("verify", "succeeded", "Tests pass.", stepStart, {
+      approved: true,
+      blocking: 0,
+      total: 0,
+      summary: "Tests pass.",
+    });
     return;
   }
   if (run.status === "escalated") {
@@ -455,11 +867,21 @@ function seedStages(runId: number, run: DemoRun, started: number): void {
     return;
   }
   const featured = run.key === FEATURED;
-  stage("feasibility", "succeeded", featured ? "Clear and implementable; limits belong in the auth middleware." : "Clear and implementable.", at(0.07), {
-    isImplementable: true,
-    clarityScore: 9,
-    summary: featured ? "Clear and implementable; limits belong in the auth middleware." : "Clear and implementable.",
-  });
+  stage(
+    "feasibility",
+    "succeeded",
+    featured
+      ? "Clear and implementable; limits belong in the auth middleware."
+      : "Clear and implementable.",
+    at(0.07),
+    {
+      isImplementable: true,
+      clarityScore: 9,
+      summary: featured
+        ? "Clear and implementable; limits belong in the auth middleware."
+        : "Clear and implementable.",
+    },
+  );
   stage(
     "implementation",
     run.status === "failed" ? "failed" : "succeeded",
@@ -481,17 +903,34 @@ function seedStages(runId: number, run: DemoRun, started: number): void {
     stage("outcome", "failed", run.reason ?? null, at(1));
     return;
   }
-  stage("verify", "succeeded", featured ? "Unit and integration tests pass; limits verified at the boundary." : "Tests pass.", at(0.78), {
-    approved: true,
-    blocking: 0,
-    total: 0,
-    summary: featured ? "Unit and integration tests pass; limits verified at the boundary." : "Tests pass.",
-  });
-  stage("auto_review", "succeeded", featured ? "Approved after 1 iteration; no blocking findings." : "Approved after 1 iteration.", at(0.94), {
-    iterations: 1,
-    success: true,
-    finalFeedback: { summary: featured ? "Approved after 1 iteration; no blocking findings." : "Approved.", items: [] },
-  });
+  stage(
+    "verify",
+    "succeeded",
+    featured ? "Unit and integration tests pass; limits verified at the boundary." : "Tests pass.",
+    at(0.78),
+    {
+      approved: true,
+      blocking: 0,
+      total: 0,
+      summary: featured
+        ? "Unit and integration tests pass; limits verified at the boundary."
+        : "Tests pass.",
+    },
+  );
+  stage(
+    "auto_review",
+    "succeeded",
+    featured ? "Approved after 1 iteration; no blocking findings." : "Approved after 1 iteration.",
+    at(0.94),
+    {
+      iterations: 1,
+      success: true,
+      finalFeedback: {
+        summary: featured ? "Approved after 1 iteration; no blocking findings." : "Approved.",
+        items: [],
+      },
+    },
+  );
   stage("outcome", "succeeded", defaultReason(run), at(1));
 }
 
@@ -513,9 +952,16 @@ for (const source of ["jira:engineering", "linear:product", "github:developer-to
   db.run("UPDATE cursors SET updated_at = ? WHERE source = ?", [now - 25_000, source]);
 }
 
-const lastAutomationRun = (id: string): DemoRun | undefined => RUNS.find((r) => r.automation === id);
+const lastAutomationRun = (id: string): DemoRun | undefined =>
+  RUNS.find((r) => r.automation === id);
 const sixHours = 12 * HOUR;
-for (const id of ["log-triage", "repair-failing-main", "dependency-updates", "docs-drift", "security-audit"]) {
+for (const id of [
+  "log-triage",
+  "repair-failing-main",
+  "dependency-updates",
+  "docs-drift",
+  "security-audit",
+]) {
   const cron = CRONS[id];
   const last = lastAutomationRun(id);
   const lastAt = last ? ago(last.start) : cron ? occurrence(cron, -1) : now - HOUR;
@@ -525,6 +971,18 @@ for (const id of ["log-triage", "repair-failing-main", "dependency-updates", "do
        (automation_id, schedule_spec, last_scheduled_at, next_due_at) VALUES (?, ?, ?, ?)`,
     [id, cron ? `cron:${cron}` : "interval:12h", lastAt, nextAt],
   );
+}
+
+const delegatingRunId = idByAutomation.get(DELEGATING_AUTOMATION);
+if (delegatingRunId !== undefined) {
+  seedLineage({
+    db,
+    store,
+    dbPath,
+    workspaceDir,
+    parentRunId: delegatingRunId,
+    createdAt: ago(delegatingStart - 5),
+  });
 }
 
 db.close();

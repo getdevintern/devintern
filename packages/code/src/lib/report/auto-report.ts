@@ -127,7 +127,7 @@ async function runAutoReport(
     return { status: "not_reported", analysis };
   }
 
-  const reportDir = resolveReportDir(deps.configDir, cwd);
+  const reportDir = resolveReportDir(deps.configDir);
   pruneSpool(reportDir);
   const duplicate = findDuplicate(reportDir, analysis.signature, now());
   if (duplicate?.status === "submitted") {

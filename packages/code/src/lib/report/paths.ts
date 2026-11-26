@@ -1,29 +1,29 @@
 /**
  * Local report paths.
  *
- * The public report API must not import `@devintern/utils`, so this module
- * reimplements the small "nearest .devintern-code" lookup without the shared
- * dependency. CLI entry points pass the exact runtime state directory instead.
+ * The public report API must not import `@devintern/utils` or the CLI's
+ * workspace helpers, so this module mirrors the one rule it needs: reports
+ * and the run database live in the workspace home (`DEVINTERN_WORKSPACE_DIR`,
+ * default `~/.devintern`). CLI entry points pass the exact runtime state
+ * directory instead.
  */
 
-import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
-/** Resolve the report config directory, nearest to `startDir` unless supplied. */
-export function resolveReportConfigDir(configDir?: string, startDir = process.cwd()): string {
+/** Workspace home, matching `resolveWorkspaceDir()` in the CLI. */
+export function reportWorkspaceDir(): string {
+  const override = process.env.DEVINTERN_WORKSPACE_DIR?.trim();
+  return override ? override : join(homedir(), ".devintern");
+}
+
+/** Resolve the report config directory (the workspace's `state/code/` unless supplied). */
+export function resolveReportConfigDir(configDir?: string): string {
   if (configDir?.trim()) return resolve(configDir.trim());
-  let current = resolve(startDir);
-  for (;;) {
-    const candidate = join(current, ".devintern-code");
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return join(resolve(startDir), ".devintern-code");
+  return join(reportWorkspaceDir(), "state", "code");
 }
 
 /** Resolve the local report spool directory. */
-export function resolveReportDir(configDir?: string, startDir = process.cwd()): string {
-  return join(resolveReportConfigDir(configDir, startDir), "reports");
+export function resolveReportDir(configDir?: string): string {
+  return join(resolveReportConfigDir(configDir), "reports");
 }

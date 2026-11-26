@@ -18,7 +18,7 @@
  * working unchanged.
  */
 
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
 
 import type { BaseProjectConfig, ProjectSettings } from "../../types/settings";
 import { asTable } from "./config-readers";
@@ -150,4 +150,66 @@ export function mergeTrackerSettings(
     merged.projects = { ...base.projects, ...primary.projects };
   }
   return merged;
+}
+
+/** A TOML key: bare when it only has safe characters, else a quoted string. */
+function tomlKey(key: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(key) ? key : JSON.stringify(key);
+}
+
+/**
+ * Append tracker project settings missing from `workspace.toml`.
+ *
+ * Used by the automatic migration of `.devintern-code/settings.json`. Only
+ * project keys the workspace does not define yet are added (whole tables, so
+ * no TOML table is ever declared twice); existing entries are never changed.
+ * The result is validated before it is written.
+ *
+ * @param workspaceDir - Workspace home holding `workspace.toml`
+ * @param settings - Legacy settings whose tracker sections to copy
+ * @param validate - Parses the would-be file and throws when it is invalid
+ * @returns `tracker/KEY` labels of the entries added
+ */
+export function appendTrackerSettings(
+  workspaceDir: string,
+  settings: ProjectSettings,
+  validate: (text: string) => void,
+): string[] {
+  const configPath = workspaceConfigPath(workspaceDir);
+  if (!existsSync(configPath)) return [];
+  const text = readFileSync(configPath, "utf8");
+  const existing = loadWorkspaceTrackerSettings(workspaceDir) ?? {};
+  const reverse = Object.entries(PROJECT_FIELDS) as Array<[string, keyof BaseProjectConfig]>;
+
+  // The legacy top-level `projects` map is Jira's.
+  const sections: Array<[TrackerSettingsName, Record<string, BaseProjectConfig> | undefined]> =
+    TRACKER_SETTINGS_NAMES.map((name) => [
+      name,
+      name === "jira"
+        ? { ...settings.projects, ...settings.jira?.projects }
+        : settings[name]?.projects,
+    ]);
+
+  const added: string[] = [];
+  let block = "";
+  for (const [name, projects] of sections) {
+    for (const [projectKey, project] of Object.entries(projects ?? {})) {
+      if (existing[name]?.projects?.[projectKey]) continue;
+      const lines = reverse
+        .filter(([, field]) => typeof project?.[field] === "string" && project[field]?.trim())
+        .map(([key, field]) => `${key} = ${JSON.stringify(project[field])}`);
+      if (lines.length === 0) continue;
+      block += `\n[trackers.${name}.projects.${tomlKey(projectKey)}]\n${lines.join("\n")}\n`;
+      added.push(`${name}/${projectKey}`);
+    }
+  }
+  if (!block) return [];
+  const updated = `${text.endsWith("\n") ? text : `${text}\n`}${block}`;
+  validate(updated);
+  // Atomic replace: concurrent writers never leave a half-written file, and
+  // each writes a complete, validated document.
+  const temp = `${configPath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temp, updated);
+  renameSync(temp, configPath);
+  return added;
 }

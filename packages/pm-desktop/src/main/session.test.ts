@@ -310,6 +310,22 @@ describe("loadProject suitability", () => {
 describe("session git sync integration", () => {
   let tempDir: string;
   let gitCalls: string[];
+  let userDataDir: string;
+
+  beforeAll(async () => {
+    // loadProject persists project bindings; isolate them so settings never
+    // resolve Electron's userData (which lazily downloads the binary in CI and
+    // can exceed the per-test timeout).
+    userDataDir = await mkdtemp(join(tmpdir(), "pm-desktop-sync-userdata-"));
+    setUserDataDirForTests(userDataDir);
+  });
+
+  afterAll(async () => {
+    setUserDataDirForTests(undefined);
+    if (userDataDir) {
+      await rm(userDataDir, { recursive: true, force: true });
+    }
+  });
 
   afterEach(async () => {
     setSessionGitExecForTests(undefined);
@@ -548,7 +564,7 @@ describe("session git sync integration", () => {
       const binding = await findBindingByLocalPath(tempDir);
       expect(binding?.lastFetch).toBe(1000);
     } finally {
-      setUserDataDirForTests(undefined);
+      setUserDataDirForTests(userDataDir);
       await rm(userData, { recursive: true, force: true });
     }
   });

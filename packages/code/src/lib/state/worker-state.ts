@@ -2,7 +2,7 @@
  * Worker State Store
  *
  * Durable state for the worker daemon, kept in the same SQLite database as
- * the webhook queue (`.devintern-code/queue.db`):
+ * the webhook queue (the workspace `queue.db`):
  *
  * - `cursors` — per-source high-water marks for polling ("changed since"
  *   values and HTTP ETags). On startup the worker resumes from these, never

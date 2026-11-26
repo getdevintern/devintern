@@ -26,6 +26,7 @@ import { RunStore } from "../state/run-recorder";
 import { resolveRunIdentity } from "../task/run-identity";
 import type { StackBase } from "../dependencies/gate";
 import { encodeStackBaseEnv, STACKED_ON_ENV } from "../dependencies/stacked-base";
+import { worktreeKeepReason } from "../utils/worktree-keep";
 import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 
 /** Cap the description snapshot read from an ad-hoc task file. */
@@ -114,6 +115,12 @@ export interface WorkspaceTaskAcquirerDeps {
    * changed since. Built by the workspace wiring with tracker access.
    */
   isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
+  /**
+   * Keys of this source's tickets a scheduled dashboard retry owns (pending
+   * or running); the poller never starts them. See `heldTaskKeys` on
+   * {@link TaskPollingAcquirer}.
+   */
+  heldTaskKeys?: () => ReadonlySet<string>;
   /**
    * Explicit actioned-ticket source key pinned into each task subprocess (see
    * `ACTIONED_SOURCE_ENV`), so the recorder and gate can never disagree.
@@ -279,6 +286,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     isTaskActionedUnchanged: deps.isTaskActionedUnchanged
       ? (task) => deps.isTaskActionedUnchanged!(task.key, task.updated)
       : undefined,
+    heldTaskKeys: deps.heldTaskKeys,
   });
 }
 
@@ -525,7 +533,15 @@ export function createGatedFleetTaskExecutor(
 
           // A retry-gate skip is a clean outcome: no run was started, so the
           // disposable worktree holds no work to debug.
-          if (ok === true || ok === "skipped") {
+          // An escalated run also exits 0; one whose unfinished work could
+          // not be pushed marks its worktree to be kept (see preserve-work.ts).
+          const keepReason =
+            ok === true || ok === "skipped" ? await worktreeKeepReason(worktree) : undefined;
+          if (keepReason) {
+            console.warn(
+              `⚠️  ${scope} keeping worktree with ${taskKey}'s unsaved work: ${worktree} (${keepReason})`,
+            );
+          } else if (ok === true || ok === "skipped") {
             await repoManager.removeTaskWorktree(repo.name, worktree);
           } else {
             console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);

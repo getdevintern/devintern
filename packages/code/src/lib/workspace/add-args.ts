@@ -24,6 +24,8 @@ export interface AddOptions {
   after: string[];
   /** `--stack` / `--wait-merge` override of `[defaults].dependency_mode`. */
   dependencyMode?: DependencyMode;
+  /** `--parent-run`: run that delegated this task (wins over `DEVINTERN_RUN_ID`). */
+  parentRunId?: number;
 }
 
 export type ParsedAddArgs =
@@ -51,7 +53,10 @@ export function workerAddUsage(): string {
     "                            A 'Depends on: <key>, ...' line in the body works too",
     "  --stack                   Stack on an unmerged dependency's branch once it succeeded",
     "  --wait-merge              Wait until every dependency's PR merged",
-    "                            (default: [defaults].dependency_mode, else stacked)",
+    "                            (default: [defaults].dependency_mode, else stacked on",
+    "                            GitHub repos and merged elsewhere)",
+    "  --parent-run <runId>      Record the run that delegated this task (default:",
+    "                            $DEVINTERN_RUN_ID, set inside DevIntern agent runs)",
     "  --resume <taskKey>        Re-queue a settled ad-hoc task (continues its branch and open",
     "                            PR; a fresh branch if it is gone or the PR merged/closed)",
     "  --wait                    Block until the run finishes; exit with its status",
@@ -75,6 +80,7 @@ const VALUE_FLAGS = new Set([
   "--resume",
   "--wait-timeout",
   "--after",
+  "--parent-run",
 ]);
 
 /**
@@ -100,6 +106,7 @@ function validateResumeArgs(options: AddOptions): string | null {
     options.after.length > 0 ? "--after" : undefined,
     options.dependencyMode === "stacked" ? "--stack" : undefined,
     options.dependencyMode === "merged" ? "--wait-merge" : undefined,
+    options.parentRunId !== undefined ? "--parent-run" : undefined,
   ].filter((flag): flag is string => flag !== undefined);
   if (conflicting.length > 0) {
     return `--resume re-queues the existing task; drop ${conflicting.join(", ")}.`;
@@ -142,6 +149,15 @@ function applyValueFlag(options: AddOptions, flag: string, value: string): strin
       if (!value.trim()) return "--after requires a task key.";
       options.after.push(value.trim());
       break;
+    case "--parent-run": {
+      const trimmed = value.trim();
+      const id = Number(trimmed);
+      if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(id) || id <= 0) {
+        return "--parent-run requires a positive integer run id.";
+      }
+      options.parentRunId = id;
+      break;
+    }
     case "--wait-timeout": {
       const seconds = Number(value);
       if (!Number.isInteger(seconds) || seconds < 0) {

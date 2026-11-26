@@ -35,7 +35,7 @@ Open a run in the [dashboard](./dashboard.md). Run details list the artifacts re
 
 ## Choose what appears on the PR
 
-Publication is off by default. Add an `artifacts` block next to `steps` and `plugins` in the pipeline definition (inside `pipeline` in `.devintern-code/settings.json`):
+Publication is off by default. Add an `artifacts` block next to `steps` and `plugins` in your workspace `pipeline_file`:
 
 ```json
 {
@@ -169,7 +169,7 @@ DEVINTERN_ARTIFACT_PUBLIC_BASE_URL=https://artifacts.example.com/
 
 Use credentials created for this bucket; for R2 that means R2 S3 API keys, not a Cloudflare API token. Ambient AWS credentials are never used. Create the bucket and make `DEVINTERN_ARTIFACT_PUBLIC_BASE_URL` (for R2, a public custom domain) readable by reviewers yourself; DevIntern does not change bucket visibility or create signed links. Missing or invalid settings fail the run before implementation starts.
 
-Workspace values apply to every repository; a repository's `env_file` or `[repos.env]` can override them. Worker tasks do not read a checkout's `.devintern-code/.env`, but direct CLI runs do. Keep these files out of git.
+Workspace values apply to every repository; a repository's `env_file` or `[repos.env]` can override them. These values live in `~/.devintern`, outside your repositories.
 
 The [PNG explainer example](https://github.com/getdevintern/devintern/tree/main/examples/pipeline-plugins/pr-explainer-image) shows generation, capture, upload, and the PR comment end to end.
 

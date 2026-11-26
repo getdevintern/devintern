@@ -137,12 +137,11 @@ export function isWorkspaceHome(dir: string): boolean {
 
 /**
  * Directory holding per-user runtime state (auth session, relay and GitHub App
- * pairing) for commands that target `workingDir`: `state/code/` for a
- * workspace home, otherwise the project's `.devintern-code/`.
+ * pairing) for the workspace at `workspaceDir`: its `state/code/`, also
+ * before the workspace is fully set up.
  */
-export function codeStateDirFor(workingDir: string): string {
-  const dir = resolve(workingDir);
-  return isWorkspaceHome(dir) ? workspaceCodeStateDir(dir) : join(dir, ".devintern-code");
+export function codeStateDirFor(workspaceDir: string): string {
+  return workspaceCodeStateDir(resolve(workspaceDir));
 }
 
 /** Path of the central workspace SQLite database. */
@@ -248,6 +247,24 @@ export function reposDir(workspaceDir: string = resolveWorkspaceDir()): string {
  */
 export function injectedTasksDir(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, "injected");
+}
+
+/**
+ * Directory holding per-run outputs files (`DEVINTERN_RUN_OUTPUTS`): JSONL
+ * records an agent run appends for the work it created, ingested into the
+ * `run_outputs` table when the run finishes. Under `state/` so sandboxed
+ * agents can already write it.
+ */
+export function runOutputsDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceStateDir(workspaceDir), "run-outputs");
+}
+
+/** Outputs file for one run (see {@link runOutputsDir}). */
+export function runOutputsPath(
+  runId: number,
+  workspaceDir: string = resolveWorkspaceDir(),
+): string {
+  return join(runOutputsDir(workspaceDir), `${runId}.jsonl`);
 }
 
 /** Directory holding per-task worktrees (`worktrees/<repo>/<task>`). */

@@ -88,13 +88,15 @@ describe("Asana endpoint override import ordering", () => {
     root = mkdtempSync(join(tmpdir(), "asana-env-ordering-"));
     const home = join(root, "home");
     const project = join(root, "project");
-    const configDir = join(project, ".devintern-code");
+    // Run from a subdirectory: Bun auto-loads only the cwd's `.env` at
+    // startup, while DevIntern's loader finds the project-root one later.
+    const cwd = join(project, "packages", "app");
     mkdirSync(home, { recursive: true });
-    mkdirSync(configDir, { recursive: true });
+    mkdirSync(cwd, { recursive: true });
     // Stop the upward .env walk at the fixture project.
     mkdirSync(join(project, ".git"), { recursive: true });
     writeFileSync(
-      join(configDir, ".env"),
+      join(project, ".env"),
       ["DEVINTERN_E2E_FAKE_ASANA=1", "ASANA_API_BASE_URL=http://127.0.0.1:54321/api/1.0", ""].join(
         "\n",
       ),
@@ -114,7 +116,7 @@ describe("Asana endpoint override import ordering", () => {
     delete env.DEVINTERN_WORKER_SUBPROCESS;
 
     const result = spawnSync(process.execPath, [fixturePath], {
-      cwd: project,
+      cwd,
       env,
       encoding: "utf8",
     });
@@ -122,7 +124,7 @@ describe("Asana endpoint override import ordering", () => {
 
     const parsed = JSON.parse(result.stdout.trim()) as FixtureResult;
     // The loader did apply the project `.env`...
-    expect(parsed.envPath).toBe(join(configDir, ".env"));
+    expect(parsed.envPath).toBe(join(project, ".env"));
     expect(parsed.flag).toBe("1");
     expect(parsed.baseUrl).toBe("http://127.0.0.1:54321/api/1.0");
     // ...and a client evaluated after it would have honored the redirect...

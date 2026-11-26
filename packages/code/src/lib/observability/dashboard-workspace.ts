@@ -11,8 +11,9 @@
  *   referenced `env_file`s are reduced to their KEY NAMES; values are never
  *   read into the DTO.
  * - URLs (repo remotes, monitor base URLs) lose any `user:password@` userinfo.
- * - TOML syntax errors can quote the offending value (for example an unquoted
- *   token), so quoted fragments in parse-error messages are masked.
+ * - Load errors can quote the offending value (a TOML syntax error echoes an
+ *   unquoted token; a validation error quotes a value pasted into the wrong
+ *   field), so quoted fragments in every load-error message are masked.
  *
  * A missing or invalid config is a typed `status` in a 200 response, never a
  * 500, so the dashboard can render the problem.
@@ -80,7 +81,7 @@ export function loadDashboardWorkspaceConfig(configPath: string): DashboardWorks
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     const syntax = raw.startsWith("Failed to parse ");
-    const message = redactUrlCredentials(syntax ? maskQuotedFragments(raw) : raw);
+    const message = redactUrlCredentials(maskQuotedFragments(raw));
     // Validation errors are "Invalid <path>:\n- a\n- b"; split the bullet list.
     const [headline = message, ...rest] = message.split("\n- ");
     return {
@@ -374,7 +375,7 @@ export function toWorkspaceConfigView(
 
 /** Running worker's pid and start time (epoch ms) from its lock, when determinable. */
 function runningWorker(data: DashboardData): { pid?: number; startedAt: number } | undefined {
-  const worker = resolveWorkerStatus(data.workingDir, data.workspaceDir);
+  const worker = resolveWorkerStatus(data.workspaceDir);
   if (worker.status !== "running" || !worker.startedAt) {
     return undefined;
   }

@@ -1,6 +1,11 @@
 import { describe, test, expect } from "bun:test";
 
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+
 import {
+  checkServiceManager,
   detectWorkerService,
   installWorkerService,
   LAUNCHD_PLIST_NAME,
@@ -291,6 +296,67 @@ describe("installWorkerService on Linux", () => {
     );
     expect(result.ok).toBe(false);
     expect(files.get(unitPath)).toBe(managedUnit);
+  });
+});
+
+describe("service rollback leaves no empty directories", () => {
+  test("a failed first install removes the unit directories it created, not older ones", async () => {
+    const home = mkdtempSync(join(tmpdir(), "devintern-service-home-"));
+    try {
+      mkdirSync(join(home, ".config"));
+      const result = await installWorkerService(
+        { workspaceDir: "/srv/workspace", execPath: "devintern" },
+        {
+          platform: "linux",
+          homedir: home,
+          run: async (_command, args) =>
+            args.includes("daemon-reload")
+              ? { status: 1, stdout: "", stderr: "Failed to connect to bus" }
+              : inactive,
+        },
+      );
+      expect(result.ok).toBe(false);
+      expect(existsSync(join(home, ".config", "systemd"))).toBe(false);
+      // ~/.config existed before the install, so it stays.
+      expect(existsSync(join(home, ".config"))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("checkServiceManager", () => {
+  test("is available when the systemd user manager answers", async () => {
+    const { deps, commands } = fakeServiceDeps({ platform: "linux" });
+    expect(await checkServiceManager(deps)).toEqual({ available: true });
+    expect(commands).toEqual([["systemctl", "--user", "show-environment"]]);
+  });
+
+  test("reports a missing systemctl binary", async () => {
+    const { deps } = fakeServiceDeps({
+      platform: "linux",
+      run: async () => ({ status: 127, stdout: "", stderr: "ENOENT" }),
+    });
+    expect(await checkServiceManager(deps)).toEqual({
+      available: false,
+      reason: "systemctl is not installed",
+    });
+  });
+
+  test("reports a missing user session (containers, WSL without systemd)", async () => {
+    const { deps } = fakeServiceDeps({
+      platform: "linux",
+      run: async () => ({ status: 1, stdout: "", stderr: "Failed to connect to bus" }),
+    });
+    const result = await checkServiceManager(deps);
+    expect(result.available).toBe(false);
+    expect(result.available === false && result.reason).toContain("no systemd user session");
+  });
+
+  test("macOS always has launchd", async () => {
+    const { deps, commands } = fakeServiceDeps({ platform: "darwin" });
+    expect(await checkServiceManager(deps)).toEqual({ available: true });
+    expect(commands).toEqual([]);
   });
 });
 

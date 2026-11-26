@@ -51,14 +51,30 @@ real repository or tracker.
 
 ## Install and copy a plugin
 
+Pipelines live in your workspace home, `~/.devintern`, not in the repository.
 Each example README has exact commands. The usual shape is:
 
 ```bash
-mkdir -p .devintern-code/steps
-cp <example>/plugin.ts .devintern-code/steps/<name>.ts
-bun add -d @getdevintern/code
-# then merge the example's settings.json "pipeline" block
+mkdir -p ~/.devintern/pipelines/steps
+cp <example>/plugin.ts ~/.devintern/pipelines/steps/<name>.ts
+cp <example>/pipeline.json ~/.devintern/pipelines/<repo>.json
+cd ~/.devintern/pipelines && bun add @getdevintern/code
 ```
+
+Then point the repository's entry in `~/.devintern/workspace.toml` at the file
+(paths resolve against `~/.devintern`):
+
+```toml
+[[repos]]
+name = "backend"
+pipeline_file = "pipelines/backend.json"
+```
+
+Use `[defaults].pipeline_file` instead to run the pipeline for every
+repository. Relative `plugins` paths in a pipeline file (`./steps/<name>.ts`)
+resolve against that file's directory. If the repository already has a
+pipeline file, merge the example's `plugins` and its step into it. See
+[Pipelines for the fleet and per repository](../../docs/code/workspaces.md#pipelines-for-the-fleet-and-per-repository).
 
 The plugin runs **inside the task process** with that process's environment and
 permissions — the same access your coding agent has. Review any example before
@@ -67,16 +83,15 @@ running it unattended.
 ### Installing a plugin from a package
 
 A plugin can also be published as an npm package that default-exports a
-`StepDefinition`. Reference the package name from `pipeline.plugins`:
+`StepDefinition`. Reference the package name from the pipeline file's `plugins`:
 
 ```json
-{ "pipeline": { "plugins": ["@acme/devintern-steps"], "steps": ["…"] } }
+{ "plugins": ["@acme/devintern-steps"], "steps": ["…"] }
 ```
 
-Package names resolve with `Bun.resolveSync` from the directory of the
-declaring configuration: the repository root for `.devintern-code/settings.json`,
-or the pipeline file's directory for a workspace `pipeline_file`. Install the
-package and its dependencies **next to that file** so resolution succeeds.
+Package names resolve from the pipeline file's directory, so install the
+package and its dependencies **next to that file**
+(`cd ~/.devintern/pipelines && bun add @acme/devintern-steps`).
 Community plugins are maintained in their own repositories; this repository
 does not endorse or host a plugin marketplace.
 
@@ -88,7 +103,7 @@ behavior that does not already have a runnable counterpart.
 Required files per example:
 
 - `plugin.ts` — self-contained, imports only from the public API.
-- `settings.json` — a complete `pipeline` block with the step placed correctly.
+- `pipeline.json` — a complete workspace pipeline file with the step placed correctly.
 - `README.md` — files, options, setup, expected output, and a success/failure
   walkthrough.
 - `fixtures/` — small, isolated inputs. Never point at developer state, a real
@@ -132,7 +147,7 @@ each variant's `CREDITS.md`. The visual guidance originates in Humanlayer's
 
 Explainers register immutable outputs through `context.artifacts.addFile`.
 The narrative key is `explanation-narrative`; the visual key is
-`explanation-visual`. Their `settings.json` files explicitly select publication
+`explanation-visual`. Their `pipeline.json` files explicitly select publication
 in one managed PR comment. The same artifacts appear in the dashboard, scoped
 to the exact run.
 See [Pipeline artifacts](../../docs/code/artifacts.md) for the full contract.

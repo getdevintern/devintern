@@ -26,6 +26,8 @@ import {
 } from "./lib/trackers/capabilities";
 import { acquireRunLocks } from "./lib/cli/run-locks";
 import { applyManualWorkspaceRun, findWorkspaceRepoForCheckout } from "./lib/workspace/manual-run";
+import { moveLegacyCheckoutState } from "./lib/workspace/migrate-checkout";
+import { bootstrapCheckoutEnv } from "./lib/cli/checkout-env";
 import { Utils } from "./lib/utils";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import {
@@ -60,6 +62,7 @@ import {
 } from "./lib/review/cli";
 import { runLoginCommand, runLogoutCommand, runWhoamiCommand } from "./lib/account/cli";
 import { runSandboxCommand } from "./lib/agent/cli";
+import { runAutomationsCommand } from "./lib/automation/cli";
 import { runReportCommand } from "./lib/report/cli";
 
 // Get the directory of this script at runtime (works in both ESM and bundled environments)
@@ -93,6 +96,7 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
 
 // Migrate legacy config directory on startup
 migrateLegacyConfigDir();
+moveLegacyCheckoutState();
 
 // Check npm for a newer global install before any real work. Local/monorepo
 // runs and --help/--version/--no-update are no-ops inside maybeOfferCliUpdate.
@@ -133,6 +137,8 @@ if (process.argv[2] === "init") {
   await runLogoutCommand();
 } else if (process.argv[2] === "sandbox") {
   await runSandboxCommand();
+} else if (process.argv[2] === "automations") {
+  await runAutomationsCommand(process.argv.slice(3));
 } else if (process.argv[2] === "doctor") {
   await runDoctorCommand();
 } else if (process.argv[2] === "report") {
@@ -147,10 +153,10 @@ if (process.argv[2] === "init") {
   // JIRA_BASE_URL paired with the user's real token).
   // A checkout of a registered workspace repo takes its env, state, and
   // prompts from the workspace; its own `.devintern-code/.env` is skipped.
-  runContext.manualWorkspace = await findWorkspaceRepoForCheckout();
-  if (runContext.manualWorkspace) applyManualWorkspaceRun(runContext.manualWorkspace);
-  loadEnvironment(findEnvFileArg(process.argv), {
-    skipProjectEnv: Boolean(runContext.manualWorkspace),
+  // First run of this release in a legacy checkout: move its settings first.
+  runContext.manualWorkspace = await bootstrapCheckoutEnv({
+    envFile: findEnvFileArg(process.argv),
+    migrate: true,
   });
 }
 
@@ -222,8 +228,17 @@ runContext.autoReviewIterationCap = (() => {
   }
 })();
 
-// Resolve the final agent harness
-const resolvedAgent = resolveAgentHarness(options.agentPath || options.claudePath);
+// Resolve the final agent harness. A missing or invalid agent CLI is a setup
+// problem, not a crash: print the resolver's message without a stack trace.
+const resolvedAgent = (() => {
+  try {
+    return resolveAgentHarness(options.agentPath || options.claudePath);
+  } catch (error) {
+    console.error(`❌ ${error instanceof Error ? error.message : String(error)}`);
+    console.error("   Run `devintern doctor` to check your setup.");
+    process.exit(1);
+  }
+})();
 runContext.resolvedAgent = resolvedAgent;
 if (options.verbose) {
   console.log(`🤖 ${resolvedAgent.harness.displayName} resolved to: ${resolvedAgent.path}`);
@@ -256,7 +271,7 @@ async function main(): Promise<void> {
 
     // Anonymous usage analytics (PostHog). Fire-and-forget; never blocks or
     // fails the run. Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
-    // analytics.enabled: false in .devintern-code/settings.json.
+    // analytics.enabled: false in ~/.devintern/settings.json.
     if (!isWorkerTaskProcess()) {
       const firstTelemetryRun = isAnonymousIdNewlyCreated();
       void track("cli_run", buildCliRunProps(activeTrackerType));
@@ -275,8 +290,17 @@ async function main(): Promise<void> {
     if (needsTrackerEnv) {
       const firstRun = await ensureTrackerEnvConfigured({
         automated: isAutomatedEnvironment(),
-        reloadEnv: () => {
-          loadEnvironment(options.envFile);
+        reloadEnv: async () => {
+          // The wizard may have just registered this checkout in the workspace.
+          runContext.manualWorkspace ??= await findWorkspaceRepoForCheckout();
+          if (runContext.manualWorkspace) {
+            applyManualWorkspaceRun(runContext.manualWorkspace, {
+              runtimeOnly: Boolean(options.envFile),
+            });
+          }
+          loadEnvironment(options.envFile, {
+            skipProjectEnv: Boolean(runContext.manualWorkspace),
+          });
         },
       });
       if (firstRun === "failed") {

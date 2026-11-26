@@ -12,7 +12,7 @@ dateModified: 2026-11-18
 Agents run with their own permission prompts turned off (like `--dangerously-skip-permissions`), so by default they can do anything your user account can. A sandbox confines each agent run at the OS level. This matters most for unattended worker runs.
 
 ```bash
-# Workspace .env (~/.devintern/.env) or .devintern-code/.env
+# ~/.devintern/.env (every repo) or ~/.devintern/env/<repo>.env (one repo)
 AGENT_SANDBOX=auto
 ```
 
@@ -30,7 +30,7 @@ A one-shot run picks up a changed `AGENT_SANDBOX` immediately. A running `devint
 | `auto`          | Best option per harness: `native` first, then `nono`. Runs unsandboxed with a warning if neither is available. Never picks `docker`        | depends on pick                                        |
 | `native`        | The harness's built-in sandbox, configured by DevIntern. Nothing to install                                                               | `claude-code`, `codex`                                 |
 | `nono`          | Kernel-enforced isolation of the whole agent process (Landlock on Linux, Seatbelt on macOS). See [nono.sh](https://nono.sh)               | all harnesses                                          |
-| `docker`        | A [Docker Sandboxes](https://www.docker.com/products/docker-sandboxes) microVM, run through the `sbx` CLI                                  | `claude-code`, `codex`, `cursor`, `gemini`, `opencode` |
+| `docker`        | A [Docker Sandboxes](https://www.docker.com/products/docker-sandboxes) microVM, run through the `sbx` CLI                                  | `claude-code`, `codex`, `cursor`, `opencode`           |
 
 If you name a provider that isn't installed or doesn't support your harness, the run fails with an error instead of running unsandboxed. In a failover chain, worker runs skip any fallback entry the provider can't wrap. Interactive and PR-review runs use only the first entry, so that one must work.
 

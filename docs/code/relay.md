@@ -4,7 +4,7 @@ sidebarLabel: "Relay & Connections"
 description: "Use when the worker should receive PR and tracker events in seconds through the DevIntern relay instead of polling or self-hosted webhooks."
 section: "Automation"
 order: 5
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # Relay (Instant Events)
@@ -22,6 +22,8 @@ devintern worker           # starts the relay connection alongside polling
 ```
 
 `devintern worker init` offers the same pairing during setup. Authorize any GitHub App URL the CLI prints. GitLab hooks are created and tested automatically when the token has Maintainer or Owner access. Run `worker connect` again after adding repositories, or to repair or rotate a registration.
+
+If you gave the DevIntern AI App access to **All repositories**, GitHub repositories you add to `workspace.toml` later, including newly created ones, are verified automatically when the worker starts or reloads its config, and `devintern worker connect github` finishes without opening the browser. A repository under a different GitHub account or organization still needs one more `devintern worker connect github` to authorize the App there.
 
 For trackers, set the tracker credentials (see the table below), then run `devintern worker connect <tracker>`.
 
@@ -45,7 +47,7 @@ For trackers, set the tracker credentials (see the table below), then run `devin
 
 | Variable              | Required | Description                                                                    |
 | --------------------- | -------- | ------------------------------------------------------------------------------ |
-| (signed-in session)   | Connect  | Run `devintern login` first; stored in `.devintern-code/.auth-session.json`    |
+| (signed-in session)   | Connect  | Run `devintern login` first; stored in `~/.devintern/state/code/.auth-session.json`    |
 | `LICENSE_KEY`         | Worker   | Automation license for unattended `devintern worker` runs                      |
 | `WORKER_RELAY_URL`    | No       | Relay base URL (default `https://relay.devintern.com`)                         |
 | `DEVINTERN_AUTH_CALLBACK_PORT` | No | Fixed OAuth callback port for remote sign-in (default `17865`)              |
@@ -89,7 +91,7 @@ The relay never receives diffs, file contents, ticket bodies, comment text, CI l
 - **GitLab** hooks are created with your local token, which stays on your machine. Self-Managed instances need only outbound HTTPS to `relay.devintern.com`.
 - **Linear** and **Asana** deliveries are signature-verified. **Trello**, **Azure DevOps**, and **Jira** deliveries are authenticated by the unguessable ingest URL, so keep it secret.
 
-Pairing state is stored in owner-only `.devintern-code/relay.json` under the workspace home.
+Pairing state is stored in owner-only `~/.devintern/state/code/relay.json`.
 
 ## How events are handled
 
@@ -100,18 +102,15 @@ Pairing state is stored in owner-only `.devintern-code/relay.json` under the wor
 
 ## Signing in over SSH or mosh
 
-Browser sign-in redirects to `127.0.0.1` on the machine running the CLI. On a remote host, either copy the session file from a machine with a browser:
+Browser sign-in redirects to `127.0.0.1` on the machine running the CLI. On a remote host or in a container, run `devintern worker login github` (or `google`, `x`, `email you@company.com`) and open the printed URL in your laptop browser. After you sign in, the browser lands on a `127.0.0.1` page that does not load. Copy that page's full address, paste it into the waiting terminal, and press Enter. This works over SSH, mosh, and `docker run -it`. An email sign-in link works the same way.
 
-```bash
-devintern login   # on your laptop
-scp .devintern-code/.auth-session.json user@host:/path/to/project/.devintern-code/
-```
-
-or forward the callback port over SSH (mosh cannot forward ports) and open the printed URL locally:
+Over SSH you can instead forward the callback port before opening the URL (mosh cannot forward ports):
 
 ```bash
 ssh -N -L 17865:127.0.0.1:17865 user@host
 ```
+
+You can also copy `~/.devintern/state/code/.auth-session.json` from a machine where you are already signed in.
 
 ## Availability
 

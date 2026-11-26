@@ -52,7 +52,7 @@ You can mix a tracker task with local files: `devintern PROJ-123 ./extra-context
 | `--estimate`                        | off             | Add story-point estimates instead of implementing. See [Story Points Estimation](./story-points-estimation.md).                         |
 | `--sandbox <provider>`              | `AGENT_SANDBOX` | Run the agent in a sandbox: `none`, `auto`, `native`, `nono`, or `docker`. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent). |
 | `--agent-path <path>`               | `PATH` lookup   | Path to the agent CLI executable.                                                                                                       |
-| `--env-file <path>`                 | `.devintern-code/.env` | Load a different `.env` file.                                                                                                    |
+| `--env-file <path>`                 | workspace env files | Load a different `.env` file instead.                                                                                                    |
 | `-v`, `--verbose`                   | off             | Verbose output for debugging.                                                                                                           |
 | `--no-update`                       | off             | Skip the update check for this run.                                                                                                     |
 
@@ -62,7 +62,7 @@ The agent harness, model, and reasoning effort are set in your environment, not 
 
 | Command                                  | Use it to                                                                     |
 | ---------------------------------------- | ----------------------------------------------------------------------------- |
-| `devintern init`                         | Create `.devintern-code/` configuration with the setup wizard (`--yes` for a template). |
+| `devintern init`                         | Register this repository in `~/.devintern` with the setup wizard (`--yes` for a template). |
 | `devintern doctor`                       | Check runtime, git, agent CLI, tracker credentials, sign-in, and license.     |
 | `devintern worker`                       | Run the workspace worker. See [Worker](./worker.md).                          |
 | `devintern dashboard`                    | Open run history without the worker. See [Dashboard](./dashboard.md).          |
@@ -146,10 +146,12 @@ The effective harness, model, and effort are printed before the run and saved in
 
 **"There are uncommitted changes"**: commit or stash your changes, or pass `--no-git` to skip branch creation.
 
+**Recovering work discarded before a branch was created**: uncommitted changes in the checkout are backed up before the feature branch is created, under `refs/devintern/backups/<task>-<timestamp>` rather than on your `git stash` list. List them with `git for-each-ref refs/devintern/backups/` and restore one with `git stash apply <ref-or-sha>`. Backups older than 30 days are deleted.
+
 **"Agent reached maximum turns limit"**: raise `--max-turns` (for example `1000`) or split the task into smaller ones.
 
 **"PR creation failed"**: check that your GitHub or Bitbucket token (or GitHub App installation) has access to the repository, then run again with `--verbose`. The branch is already pushed and a `Pull request could not be created` comment is posted on the ticket. Fix the cause and re-run with `--create-pr`.
 
-**"Issue not found" / card fetch errors**: check the tracker credentials in `.devintern-code/.env` and that the task exists and you can access it. For Jira, check `JIRA_BASE_URL`. For Trello, set `TASK_TRACKER=trello`, `TRELLO_API_KEY`, and `TRELLO_API_TOKEN`.
+**"Issue not found" / card fetch errors**: check the tracker credentials in `~/.devintern/env/<repo>.env` and that the task exists and you can access it. For Jira, check `JIRA_BASE_URL`. For Trello, set `TASK_TRACKER=trello`, `TRELLO_API_KEY`, and `TRELLO_API_TOKEN`.
 
 Run `devintern doctor` to check your setup.

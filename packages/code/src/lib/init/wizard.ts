@@ -1,7 +1,7 @@
 /**
  * Interactive `devintern init` wizard: pick a tracker, paste tokens with a
  * deep link to each provider's token-creation page, validate the connection,
- * then write `.devintern-code/` via the shared scaffold.
+ * then register the checkout in `~/.devintern` with its own env file.
  *
  * Prompt-loop mechanics and credential probes live in
  * `@devintern/task-trackers` (shared with `devpm init`); this module wires
@@ -11,8 +11,8 @@
  * falls back to the non-interactive template scaffold.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { join, resolve } from "path";
+import { existsSync, readFileSync } from "fs";
+import { isAbsolute, join, resolve } from "path";
 import { listInstalledHarnesses, resolveHarness } from "@devintern/agent-harness";
 import {
   createDefaultSupabaseAuthConfig,
@@ -32,6 +32,8 @@ import {
   validateConnection,
 } from "@devintern/task-trackers";
 import { findProjectRoot, upsertEnvVars } from "@devintern/utils";
+import { isPromptAbort } from "../cli/prompt-abort";
+import { resolveWizardPrompts } from "../cli/prompt-session";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import type { SetupSignInStatus, SetupSource } from "../observability/analytics";
 import {
@@ -45,11 +47,14 @@ import {
   TRACKER_DOCS,
   TRACKER_SETUP,
   renderEnvFile,
-  scaffoldProject,
 } from "./scaffold";
 import { collectReadinessChecks, renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
+import { workspaceCodeStateDir } from "../workspace/paths";
+import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
+import { registerManualCheckout } from "../workspace/register-checkout";
+import { writeSecretFile } from "../utils/secret-file";
 
 export { isInteractive };
 
@@ -65,6 +70,8 @@ export interface InitWizardUserLike {
 export interface InitWizardDeps {
   /** Reads one line of user input; defaults to node:readline over stdin. */
   prompt?: PromptFn;
+  /** Reads a token without echoing it; defaults to `prompt` when `prompt` is injected. */
+  promptSecret?: PromptFn;
   /** Credential probe; defaults to a cheap authenticated API call per tracker. */
   probe?: ProbeFn;
   /** Working directory; defaults to `process.cwd()`. */
@@ -86,9 +93,20 @@ export interface InitWizardDeps {
   source?: SetupSource;
 }
 
+/** Where init wrote this checkout's configuration. */
+export interface InitTarget {
+  /** Env file holding the tracker credentials and agent settings. */
+  envPath: string;
+  /** Workspace home when the checkout was registered in the workspace. */
+  workspaceDir?: string;
+}
+
 /** Supabase auth config matching what the CLI uses at runtime. */
-function wizardSupabaseConfig(cwd: string): SupabaseAuthConfig {
-  return createDefaultSupabaseAuthConfig(join(resolveProjectConfigDir(cwd), ".auth-session.json"));
+function wizardSupabaseConfig(cwd: string, target?: InitTarget): SupabaseAuthConfig {
+  const stateDir = target?.workspaceDir
+    ? workspaceCodeStateDir(target.workspaceDir)
+    : resolveProjectConfigDir(cwd);
+  return createDefaultSupabaseAuthConfig(join(stateDir, ".auth-session.json"));
 }
 
 /**
@@ -104,6 +122,7 @@ async function runPostSetup(
   prompt: PromptFn,
   log: (message: string) => void,
   deps: InitWizardDeps,
+  target: InitTarget,
 ): Promise<{ signedIn: SetupSignInStatus; checks?: ReadinessCheck[] }> {
   // Agent CLI availability
   const agents =
@@ -111,18 +130,18 @@ async function runPostSetup(
     listInstalledHarnesses().map((h) => ({ name: h.name, displayName: h.displayName }));
   if (agents.length === 0) {
     log("\n🤖 No AI agent CLI found on your PATH.");
-    log("   Install one (e.g. Claude Code), or set AGENT_CLI_PATH in .devintern-code/.env.");
+    log(`   Install one (e.g. Claude Code), or set AGENT_CLI_PATH in ${target.envPath}.`);
   } else {
     const defaultAgent = resolveHarness({ warnDeprecated: false }).harness;
     const names = agents.map((a) => a.displayName).join(", ");
     log(
       `\n🤖 Agent CLIs detected: ${names}. Default: ${defaultAgent.displayName} ` +
-        `(change with AGENT_HARNESS in .devintern-code/.env).`,
+        `(change with AGENT_HARNESS in ${target.envPath}).`,
     );
   }
 
   // Inline sign-in offer
-  const supabaseConfig = wizardSupabaseConfig(cwd);
+  const supabaseConfig = wizardSupabaseConfig(cwd, target);
   const getUser = deps.getUser ?? (() => getAuthenticatedUser(supabaseConfig));
   let user: InitWizardUserLike | null = null;
   try {
@@ -152,6 +171,8 @@ async function runPostSetup(
           log("⚠️  Sign-in did not complete — run 'devintern login' before using those features.");
         }
       } catch (error) {
+        // Closed input stops the whole wizard, not just the sign-in step.
+        if (isPromptAbort(error)) throw error;
         signedIn = "failed";
         log(
           `⚠️  Sign-in failed: ${error instanceof Error ? error.message : error}\n` +
@@ -167,7 +188,7 @@ async function runPostSetup(
   // Readiness checklist over the freshly written configuration
   let checks: ReadinessCheck[] | undefined;
   try {
-    const envPath = join(findProjectRoot({ startDir: cwd }), ".devintern-code", ".env");
+    const envPath = target.envPath;
     const envRecord = parseEnvContent(readFileSync(envPath, "utf8"));
     checks = await collectReadinessChecks({
       env: { ...process.env, ...envRecord },
@@ -192,33 +213,41 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
   log("🚀 Initializing @devintern/code for this project...");
 
-  const projectRoot = findProjectRoot({ startDir: cwd });
-  const configDir = resolve(projectRoot, ".devintern-code");
-  // A config folder without .env is an incomplete setup: keep guiding. Only
-  // refuse when credentials already exist (the scaffold never overwrites).
-  if (existsSync(join(configDir, ".env"))) {
-    // Delegate to the scaffold's refusal message (it never overwrites).
-    scaffoldProject({ cwd });
+  // Re-running init on a registered checkout edits its env file instead
+  // (`devintern init` routes there); never prompt for a second registration.
+  const registered = await findWorkspaceRepoForCheckout({ cwd });
+  if (registered) {
+    log(`ℹ️  This checkout is already registered as "${registered.repo.name}".`);
+    log("   Run `devintern init` in a terminal to update its settings.");
     return;
   }
 
-  let rl: import("node:readline/promises").Interface | undefined;
-  let prompt = deps.prompt;
-  if (!prompt) {
-    const { createInterface } = await import("node:readline/promises");
-    rl = createInterface({ input: process.stdin, output: process.stdout });
-    prompt = (question: string) => rl!.question(question);
-  }
+  const session = await resolveWizardPrompts(deps);
+  const { prompt, promptSecret } = session;
+
+  // The checkout is registered in the workspace as a manual-only repo (by its
+  // origin, or by its directory when it has no recognised remote).
+  let workspaceDir = "";
+  const writeEnv = async (envContent: string): Promise<string | null> => {
+    const registered = await registerManualCheckout(cwd, envContent, log);
+    if (!registered.ok) {
+      log(`❌ ${registered.error}`);
+      return null;
+    }
+    workspaceDir = registered.workspaceDir;
+    return registered.envPath;
+  };
 
   try {
     trackSetupStarted(deps.source ?? "init");
-    const result = await runTrackerSetup(prompt, log, probe, cwd);
+    const result = await runTrackerSetup(prompt, log, probe, cwd, { writeEnv, promptSecret });
     if (!result) {
       trackSetupFailed("scaffold_refused");
       return;
     }
+    const target: InitTarget = { envPath: result.envPath, workspaceDir };
 
-    const postSetup = await runPostSetup(cwd, prompt, log, deps);
+    const postSetup = await runPostSetup(cwd, prompt, log, deps, target);
     trackSetupCompleted({
       tracker: result.trackerId,
       signedIn: postSetup.signedIn,
@@ -232,14 +261,35 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
       log(`   1. Create ${tasksDir} and add a task file, e.g. TASK-1.md`);
       log("   2. Run 'devintern TASK-1' to start working on it");
     } else {
-      log(`   1. Review ${join(configDir, ".env")} (credentials were written there)`);
+      log(`   1. Review ${target.envPath} (credentials were written there)`);
       log(
-        `   2. Optionally edit ${join(configDir, "settings.json")} for per-project status transitions`,
+        `   2. Optionally add [trackers] status names to ${join(workspaceDir, "workspace.toml")}`,
       );
       log("   3. Run 'devintern <TASK-KEY>' to start working on tasks");
     }
   } finally {
-    rl?.close();
+    session.close();
+  }
+}
+
+/**
+ * Save `MARKDOWN_TASKS_DIR` as an absolute path. The worker service runs from
+ * the workspace directory and each task from its checkout, so a relative
+ * folder would point somewhere different for each of them; resolve it from
+ * where the user ran setup, which is what they meant.
+ */
+export function absolutizeMarkdownTasksDir(
+  values: Record<string, string>,
+  cwd: string,
+  log: LogFn,
+): void {
+  const dir = values.MARKDOWN_TASKS_DIR;
+  if (!dir) return;
+  const absolute = isAbsolute(dir) ? dir : resolve(cwd, dir);
+  values.MARKDOWN_TASKS_DIR = absolute;
+  if (absolute !== dir) log(`   Saved as the absolute path ${absolute}`);
+  if (!existsSync(absolute)) {
+    log(`   ℹ️  ${absolute} does not exist yet: create it and add your task files there.`);
   }
 }
 
@@ -255,8 +305,15 @@ export async function runTrackerSetup(
   log: LogFn,
   probe: ProbeFn,
   cwd: string,
-): Promise<{ trackerId: string; values: Record<string, string> } | null> {
+  options: {
+    /** Write the collected env content; returns the written path, or null to refuse. */
+    writeEnv: (envContent: string) => Promise<string | null>;
+    /** Hidden-input prompt for tokens; defaults to `prompt`. */
+    promptSecret?: PromptFn;
+  },
+): Promise<{ trackerId: string; values: Record<string, string>; envPath: string } | null> {
   const projectRoot = findProjectRoot({ startDir: cwd });
+  const promptSecret = options.promptSecret ?? prompt;
   const values: Record<string, string> = {};
   let trackerId: string | undefined;
 
@@ -273,6 +330,7 @@ export async function runTrackerSetup(
         prompt,
         log,
         values,
+        promptSecret,
       });
       if (reused) trackerId = existing.trackerId;
     }
@@ -303,18 +361,19 @@ export async function runTrackerSetup(
   }
 
   if (!reusedExisting) {
-    await promptSteps(steps, prompt, log, values);
+    await promptSteps(steps, prompt, log, values, promptSecret);
   }
 
   if (trackerId === "markdown") {
+    absolutizeMarkdownTasksDir(values, cwd, log);
     log("\nℹ️  No credentials needed for the markdown tracker.");
   } else {
     await validateConnection(
       trackerId,
       values,
       steps,
-      { prompt, probe, log },
-      ".devintern-code/.env",
+      { prompt, probe, log, promptSecret },
+      "this repo's env file in ~/.devintern/",
     );
   }
 
@@ -324,14 +383,12 @@ export async function runTrackerSetup(
       "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
     );
     log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-    await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values);
+    await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
   }
 
   const envContent = renderEnvFile(trackerId, values);
-  if (!scaffoldProject({ cwd, envContent })) {
-    return null;
-  }
-  return { trackerId, values };
+  const envPath = await options.writeEnv(envContent);
+  return envPath ? { trackerId, values, envPath } : null;
 }
 
 /**
@@ -342,17 +399,20 @@ export async function runTrackerSetup(
  * Values are merged with {@link upsertEnvVars} instead of rewriting the file,
  * so comments, custom vars, and previously-skipped optionals survive.
  */
-export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
-  const cwd = deps.cwd ?? process.cwd();
+export async function runInitUpgrade(
+  deps: InitWizardDeps & {
+    /** Env file to update (the repo's `env_file` in the workspace). */
+    envPath: string;
+  },
+): Promise<void> {
   const log = deps.log ?? console.log;
   const probe = deps.probe ?? defaultProbe;
-  const envPath = resolve(cwd, ".devintern-code", ".env");
+  const cwd = deps.cwd ?? process.cwd();
+  const envPath = deps.envPath;
+  const envLabel = envPath;
 
   if (!existsSync(envPath)) {
-    // Config dir exists but no .env: keep the scaffold's guidance (it never
-    // overwrites) rather than guessing at a half-written setup.
     log(`⚠️  ${envPath} not found — nothing to upgrade.`);
-    scaffoldProject({ cwd });
     return;
   }
 
@@ -361,13 +421,8 @@ export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
   const currentTracker = (existing.TASK_TRACKER || "jira").toLowerCase();
   const currentName = TRACKER_CAPABILITIES[currentTracker]?.displayName ?? currentTracker;
 
-  let rl: import("node:readline/promises").Interface | undefined;
-  let prompt = deps.prompt;
-  if (!prompt) {
-    const { createInterface } = await import("node:readline/promises");
-    rl = createInterface({ input: process.stdin, output: process.stdout });
-    prompt = (question: string) => rl!.question(question);
-  }
+  const session = await resolveWizardPrompts(deps);
+  const { prompt, promptSecret } = session;
 
   try {
     log("🔧 Existing devintern configuration found.");
@@ -407,7 +462,8 @@ export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
       const docs = TRACKER_DOCS[currentTracker];
       if (docs) log(`\n📖 Setup guide: ${docs}`);
       const values: Record<string, string> = {};
-      await promptSteps(prefill(steps), prompt, log, values);
+      await promptSteps(prefill(steps), prompt, log, values, promptSecret);
+      absolutizeMarkdownTasksDir(values, cwd, log);
 
       // Optional PR-integration token, kept from config when present.
       if (currentTracker !== "github" && !existing.GITHUB_TOKEN) {
@@ -415,7 +471,7 @@ export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
           "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
         );
         log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-        await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values);
+        await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
       }
 
       if (currentTracker !== "markdown") {
@@ -423,13 +479,13 @@ export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
           currentTracker,
           { ...existing, ...values },
           steps,
-          { prompt, probe, log },
-          ".devintern-code/.env",
+          { prompt, probe, log, promptSecret },
+          envLabel,
         );
       }
 
-      writeFileSync(envPath, upsertEnvVars(originalContent, values), "utf8");
-      log(`\n✅ Updated ${join(".devintern-code", ".env")}`);
+      writeSecretFile(envPath, upsertEnvVars(originalContent, values));
+      log(`\n✅ Updated ${envLabel}`);
       return;
     }
 
@@ -449,7 +505,8 @@ export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
     if (docs) log(`\n📖 Setup guide (tokens, permissions, examples): ${docs}`);
 
     const values: Record<string, string> = {};
-    await promptSteps(prefill(steps), prompt, log, values);
+    await promptSteps(prefill(steps), prompt, log, values, promptSecret);
+    absolutizeMarkdownTasksDir(values, cwd, log);
     if (trackerId !== "github" && existing.GITHUB_TOKEN) {
       // Carry the PR token over so GitHub integration keeps working.
       values.GITHUB_TOKEN = existing.GITHUB_TOKEN;
@@ -458,7 +515,7 @@ export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
         "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
       );
       log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-      await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values);
+      await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
     }
 
     if (trackerId !== "markdown") {
@@ -466,22 +523,21 @@ export async function runInitUpgrade(deps: InitWizardDeps = {}): Promise<void> {
         trackerId,
         values,
         steps,
-        { prompt, probe, log },
-        ".devintern-code/.env",
+        { prompt, probe, log, promptSecret },
+        envLabel,
       );
     }
 
-    writeFileSync(
+    writeSecretFile(
       envPath,
       upsertEnvVars(originalContent, { TASK_TRACKER: trackerId, ...values }),
-      "utf8",
     );
     log(
       `\n✅ Switched to ${
         TRACKER_CAPABILITIES[trackerId]?.displayName ?? trackerId
-      } in ${join(".devintern-code", ".env")}`,
+      } in ${envLabel}`,
     );
   } finally {
-    rl?.close();
+    session.close();
   }
 }

@@ -1,0 +1,9 @@
+{
+  "plugins": ["./steps/transient-retry.ts"],
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    { "use": "transient-retry", "failures": 1 },
+    { "use": "finalize" }
+  ]
+}

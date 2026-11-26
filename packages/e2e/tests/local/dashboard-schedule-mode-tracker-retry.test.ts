@@ -15,6 +15,11 @@
  * - The poller itself never re-runs the failed ticket: the run's own failure
  *   comment and transition are not a human change, and after the retry
  *   succeeds the actioned gate keeps it out of later sweeps.
+ * - While the row is pending or running the poller holds the ticket
+ *   (`heldTaskKeys` in `task-polling.ts`), even though the retry's own
+ *   transition and comment bump its stamp before the actioned marker lands.
+ *   A missed hold shows up as a third run (`attempt: 3`, origin `task`) after
+ *   a `[poll:jira] picking up` line in the worker log.
  */
 
 import { expect, test } from "bun:test";

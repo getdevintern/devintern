@@ -47,6 +47,49 @@ interface FakeJiraIssue {
   updated: string;
 }
 
+/**
+ * Jira issue link type as `GET /rest/api/3/issue/{key}` returns it under
+ * `fields.issuelinks[].type` (Jira Cloud's built-in "Blocks" and "Relates").
+ */
+export interface FakeJiraLinkType {
+  id: string;
+  name: string;
+  /** Description read from the inward side (`is blocked by`). */
+  inward: string;
+  /** Description read from the outward side (`blocks`). */
+  outward: string;
+}
+
+/** Jira Cloud's default "Blocks" link type: `<outward> blocks <inward>`. */
+export const JIRA_BLOCKS_LINK: FakeJiraLinkType = {
+  id: "10000",
+  name: "Blocks",
+  inward: "is blocked by",
+  outward: "blocks",
+};
+
+/** Jira Cloud's default "Relates" link type, which never blocks. */
+export const JIRA_RELATES_LINK: FakeJiraLinkType = {
+  id: "10003",
+  name: "Relates",
+  inward: "relates to",
+  outward: "relates to",
+};
+
+/**
+ * One issue link: `outwardKey <type.outward> inwardKey` ("BLK blocks DEP").
+ *
+ * Jira returns the link on both issues, each time naming only the other end:
+ * the inward issue (DEP) sees `inwardIssue: BLK` ("is blocked by BLK"), the
+ * outward issue (BLK) sees `outwardIssue: DEP` ("blocks DEP").
+ */
+interface FakeJiraIssueLink {
+  id: string;
+  type: FakeJiraLinkType;
+  outwardKey: string;
+  inwardKey: string;
+}
+
 /** Workflow statuses the fake exposes through its transitions endpoint. */
 export interface FakeJiraStatuses {
   todo: string;
@@ -175,12 +218,23 @@ export class FakeJiraTracker implements TrackerFixture {
    */
   readonly transitions: Array<{ key: string; status: string }> = [];
 
+  /**
+   * Issue keys of blocker reads, in arrival order: `GET /rest/api/3/issue/{key}`
+   * whose `fields` parameter asks for `issuelinks`
+   * (`JiraTaskTrackerClient.getBlockers`). Failed reads are recorded too.
+   */
+  readonly blockerReads: string[] = [];
+
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
   private readonly issues = new Map<string, FakeJiraIssue>();
   private handledRequests = 0;
   private nextIssueNumber = 1;
   private nextCommentId = 10_000;
+  private nextLinkId = 20_000;
+  private readonly links: FakeJiraIssueLink[] = [];
+  private failBlockerReadsValue = false;
+  private readonly rejectedSearches: Array<{ fragment: string; message: string }> = [];
   private now = Date.parse("2026-01-01T00:00:00.000Z");
   private readonly wallClock: boolean;
 
@@ -369,6 +423,13 @@ export class FakeJiraTracker implements TrackerFixture {
 
     const issueMatch = path.match(/^\/rest\/api\/3\/issue\/([^/]+)$/);
     if (issueMatch?.[1] && method === "GET") {
+      const fields = (url.searchParams.get("fields") ?? "").split(",").map((field) => field.trim());
+      if (fields.includes("issuelinks")) {
+        this.blockerReads.push(issueMatch[1].toUpperCase());
+        if (this.failBlockerReadsValue) {
+          return json({ errorMessages: ["Fake Jira injected blocker read failure"] }, 500);
+        }
+      }
       return this.getIssue(issueMatch[1]);
     }
     if (issueMatch?.[1] && method === "PUT") {
@@ -404,6 +465,10 @@ export class FakeJiraTracker implements TrackerFixture {
   private search(url: URL): Response {
     const jql = url.searchParams.get("jql") ?? "";
     this.searches.push(jql);
+    const rejection = this.rejectedSearches.find((rule) => jql.includes(rule.fragment));
+    if (rejection) {
+      return json({ errorMessages: [rejection.message], warningMessages: [] }, 400);
+    }
     const startAt = Number(url.searchParams.get("startAt") ?? 0);
     const maxResults = Number(url.searchParams.get("maxResults") ?? 50);
     const matches = this.matchingIssues(jql);
@@ -462,6 +527,58 @@ export class FakeJiraTracker implements TrackerFixture {
     if (input.title !== undefined) issue.summary = input.title;
     if (input.body !== undefined) issue.description = textToAdf(input.body);
     issue.updated = this.timestamp();
+  }
+
+  /**
+   * Link two issues the way the Jira UI does: `outwardKey <type.outward>
+   * inwardKey`, so `linkIssues(JIRA_BLOCKS_LINK, BLK, DEP)` reads "BLK blocks
+   * DEP" and "DEP is blocked by BLK". Both issues' `updated` stamps move, as in
+   * Jira.
+   *
+   * @returns The link id
+   */
+  linkIssues(type: FakeJiraLinkType, outwardKey: string, inwardKey: string): string {
+    const outward = this.requireIssue(outwardKey);
+    const inward = this.requireIssue(inwardKey);
+    const id = String(this.nextLinkId++);
+    this.links.push({ id, type, outwardKey: outward.key, inwardKey: inward.key });
+    const timestamp = this.timestamp();
+    outward.updated = timestamp;
+    inward.updated = timestamp;
+    return id;
+  }
+
+  /**
+   * Move an issue to one of the fake's workflow statuses without a REST call,
+   * as a human would on the board. The status category follows the status
+   * (see {@link FakeJiraTracker.statusCategory}).
+   */
+  setStatus(ticketKey: string, status: string): void {
+    const issue = this.requireIssue(ticketKey);
+    if (!this.allStatusNames().includes(status)) {
+      throw new Error(`Unknown fake Jira status: ${status}`);
+    }
+    issue.status = status;
+    issue.updated = this.timestamp();
+  }
+
+  /**
+   * Reject every later `GET /rest/api/3/search/jql` whose JQL contains
+   * `fragment` with HTTP 400 and a Jira-style `errorMessages` body, the way
+   * Jira answers a query naming an unknown status or field. Rejected searches
+   * are still recorded in {@link FakeJiraTracker.searches}; other queries are
+   * unaffected.
+   */
+  rejectSearchesContaining(fragment: string, message: string): void {
+    this.rejectedSearches.push({ fragment, message });
+  }
+
+  /**
+   * Make blocker reads (`GET /rest/api/3/issue/{key}?fields=issuelinks`) fail
+   * with HTTP 500 until switched off. Other issue reads keep working.
+   */
+  failBlockerReads(fail: boolean): void {
+    this.failBlockerReadsValue = fail;
   }
 
   /** Current `updated` stamp, for asserting that an edit re-armed polling. */
@@ -592,7 +709,6 @@ export class FakeJiraTracker implements TrackerFixture {
   }
 
   private issuePayload(issue: FakeJiraIssue): Record<string, unknown> {
-    const statusId = this.statusId(issue.status);
     return {
       id: issue.id,
       key: issue.key,
@@ -602,11 +718,8 @@ export class FakeJiraTracker implements TrackerFixture {
         summary: issue.summary,
         description: issue.description,
         issuetype: { id: "10001", name: "Task", subtask: false },
-        status: {
-          id: statusId,
-          name: issue.status,
-          statusCategory: { key: "new", name: "To Do" },
-        },
+        status: this.statusPayload(issue.status),
+        issuelinks: this.issueLinksPayload(issue.key),
         priority: { id: "3", name: "Medium" },
         assignee: { displayName: "E2E Assignee", emailAddress: FAKE_EMAIL },
         reporter: { displayName: "E2E Reporter", emailAddress: FAKE_EMAIL },
@@ -618,6 +731,56 @@ export class FakeJiraTracker implements TrackerFixture {
       },
       renderedFields: { description: adfToHtml(issue.description) },
     };
+  }
+
+  /**
+   * Status with its category, as Jira returns it: `new` for To Do,
+   * `indeterminate` for in-flight statuses, `done` for the terminal status.
+   * `extractIssueBlockers` (`packages/task-trackers/src/jira/issue-utils.ts`)
+   * treats only category `done` as a finished blocker.
+   */
+  private statusPayload(status: string): Record<string, unknown> {
+    const category =
+      status === this.statuses.done
+        ? { id: 3, key: "done", colorName: "green", name: "Done" }
+        : status === this.statuses.todo
+          ? { id: 2, key: "new", colorName: "blue-gray", name: "To Do" }
+          : { id: 4, key: "indeterminate", colorName: "yellow", name: "In Progress" };
+    return { id: this.statusId(status), name: status, statusCategory: category };
+  }
+
+  /**
+   * `fields.issuelinks` in Jira Cloud's shape: each link names only the other
+   * issue, as `inwardIssue` when this issue is the link's inward side ("is
+   * blocked by") and as `outwardIssue` when it is the outward side ("blocks").
+   * The linked issue carries its summary, status (with category), priority,
+   * and issue type, read live so a status change shows on the next read.
+   * Parsed by `JiraTaskTrackerClient.getBlockers` through
+   * `extractIssueBlockers`.
+   */
+  private issueLinksPayload(key: string): Array<Record<string, unknown>> {
+    return this.links
+      .filter((link) => link.outwardKey === key || link.inwardKey === key)
+      .map((link) => {
+        const inwardSide = link.inwardKey === key;
+        const other = this.requireIssue(inwardSide ? link.outwardKey : link.inwardKey);
+        return {
+          id: link.id,
+          self: `${this.baseUrl}/rest/api/3/issueLink/${link.id}`,
+          type: { ...link.type, self: `${this.baseUrl}/rest/api/3/issueLinkType/${link.type.id}` },
+          [inwardSide ? "inwardIssue" : "outwardIssue"]: {
+            id: other.id,
+            key: other.key,
+            self: `${this.baseUrl}/rest/api/3/issue/${other.id}`,
+            fields: {
+              summary: other.summary,
+              status: this.statusPayload(other.status),
+              priority: { id: "3", name: "Medium" },
+              issuetype: { id: "10001", name: "Task", subtask: false },
+            },
+          },
+        };
+      });
   }
 
   private commentPayload(comment: FakeJiraComment): Record<string, unknown> {

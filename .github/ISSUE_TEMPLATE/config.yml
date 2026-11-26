@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private bug report (recommended for run failures)
+    url: https://devintern.com/docs/code/reporting-bugs
+    about: Run `devintern report` or use "Report a bug" in the dashboard. It attaches redacted run details and logs, and stays private.
+  - name: Documentation
+    url: https://devintern.com/docs
+    about: Setup guides, configuration reference, and troubleshooting.
