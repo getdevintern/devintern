@@ -34,6 +34,8 @@ import type { createGatedFleetTaskExecutor, FleetTask, RepoManagerLike } from ".
 import { JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { MAX_CONCURRENCY_PER_REPO_ENV } from "../utils/review-worktree";
+import { isBotAuthored, mentionTriggerKey } from "../review/mention-trigger";
+import type { MentionKind, MentionTrigger } from "../review/mention-trigger";
 
 /**
  * Supervisor exclusive key for one GitHub PR (`owner/repo#123`, lowercased
@@ -95,6 +97,8 @@ export interface FleetEventDeps {
       cwd: string;
       env: Record<string, string | undefined>;
       signal?: AbortSignal;
+      /** The @mention that triggered the run, addressed as feedback itself. */
+      mention?: MentionTrigger;
     },
   ) => Promise<TaskExecutionResult>;
   /** CI-fix runner (injected for tests; defaults to the CLI subprocess). */
@@ -118,7 +122,12 @@ export interface FleetEventDeps {
   supervisor?: TaskSupervisor;
 }
 
-type AddressPr = (slug: string, prNumber: number) => Promise<TaskExecutionResult>;
+/** Address a PR's feedback; `mention` is the @mention that triggered the run, if any. */
+export type AddressPr = (
+  slug: string,
+  prNumber: number,
+  mention?: MentionTrigger,
+) => Promise<TaskExecutionResult>;
 
 /**
  * Serialize feedback handling per PR and collapse events received while a run
@@ -130,37 +139,58 @@ type AddressPr = (slug: string, prNumber: number) => Promise<TaskExecutionResult
  * otherwise the last outcome is reported, so a follow-up run that succeeded
  * clears an earlier `"deferred"`. A `"skipped"` outcome (retry gate) passes
  * through like any other non-failure.
+ *
+ * Mentions are never collapsed away: each distinct @mention that arrives
+ * while a run is active gets its own follow-up run (a mention run also
+ * collects the PR's regular review feedback, so it satisfies a plain rerun).
  */
 export function coalescePrFeedbackRuns(addressPr: AddressPr): AddressPr {
   const active = new Map<
     string,
-    { rerunRequested: boolean; promise: Promise<TaskExecutionResult> }
+    {
+      rerunRequested: boolean;
+      pendingMentions: MentionTrigger[];
+      seenMentions: Set<string>;
+      promise: Promise<TaskExecutionResult>;
+    }
   >();
 
-  return async (slug, prNumber) => {
+  return async (slug, prNumber, mention) => {
     const key = `${slug.toLowerCase()}#${prNumber}`;
     const existing = active.get(key);
     if (existing) {
-      existing.rerunRequested = true;
+      if (mention) {
+        const mentionKey = mentionTriggerKey(mention);
+        if (!existing.seenMentions.has(mentionKey)) {
+          existing.seenMentions.add(mentionKey);
+          existing.pendingMentions.push(mention);
+        }
+      } else {
+        existing.rerunRequested = true;
+      }
       return existing.promise;
     }
 
     const state = {
       rerunRequested: false,
+      pendingMentions: [] as MentionTrigger[],
+      seenMentions: new Set<string>(mention ? [mentionTriggerKey(mention)] : []),
       promise: Promise.resolve(false as TaskExecutionResult),
     };
     state.promise = (async () => {
       try {
         let ok: TaskExecutionResult = true;
+        let next: MentionTrigger | undefined = mention;
         do {
           state.rerunRequested = false;
-          const outcome = await addressPr(slug, prNumber);
+          const outcome = await addressPr(slug, prNumber, next);
           if (outcome === false || ok === false) {
             ok = false;
           } else {
             ok = outcome;
           }
-        } while (state.rerunRequested);
+          next = state.pendingMentions.shift();
+        } while (next || state.rerunRequested);
         return ok;
       } finally {
         active.delete(key);
@@ -204,7 +234,7 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
   const { config, workspaceDir, repoManager } = deps;
   const runReview = deps.runReview ?? runAddressReviewViaCli;
 
-  return async (slug, prNumber) => {
+  return async (slug, prNumber, mention) => {
     const repo = repoBySlug(config, slug);
     if (!repo) {
       console.warn(
@@ -218,6 +248,7 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
         cwd: base,
         env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir)),
         signal,
+        ...(mention ? { mention } : {}),
       });
     };
     try {
@@ -460,31 +491,51 @@ export function createFleetCiFix(
   };
 }
 
+/** The comment or review that @mentioned the bot, as the mention handler sees it. */
+export interface FleetMention {
+  /** Comment or review id; when present the run addresses the mention itself. */
+  id?: number;
+  body?: string | null;
+  user: { login: string; type?: string };
+}
+
+/** Fleet mention handler built by {@link createFleetMentionHandler}. */
+export type FleetMentionHandler = (
+  slug: string,
+  comment: FleetMention,
+  prNumber: number,
+  kind?: MentionKind,
+) => Promise<TaskExecutionResult>;
+
 /**
  * Build the fleet mention handler: permission-gate the mentioning user, then
- * run the review pipeline for that PR.
+ * run the review pipeline for that PR with the mention as feedback.
  *
- * A confirmed denial returns `"skipped"` (an intentional no-op). A permission
- * API error propagates: the relay classifies it as transient and retries it
- * within its bounded budget, and the polling sweep retries it through its
- * attempt ledger. A 5xx or rate limit must not permanently drop a valid
- * @mention.
+ * Comments and reviews written by the bot or the worker itself are skipped
+ * (bot-loop safety). A confirmed denial returns `"skipped"` (an intentional
+ * no-op). A permission API error propagates: the relay classifies it as
+ * transient and retries it within its bounded budget, and the polling sweep
+ * retries it through its attempt ledger. A 5xx or rate limit must not
+ * permanently drop a valid @mention.
  *
  * @returns The review run outcome, or `"skipped"` when the actor lacks access.
  */
 export function createFleetMentionHandler(
   deps: FleetEventDeps,
   sharedAddressPr?: AddressPr,
-): (
-  slug: string,
-  comment: { user: { login: string } },
-  prNumber: number,
-) => Promise<TaskExecutionResult> {
+): FleetMentionHandler {
   const addressPr = sharedAddressPr ?? coalescePrFeedbackRuns(createFleetAddressPr(deps));
 
-  return async (slug, comment, prNumber) => {
+  return async (slug, comment, prNumber, kind = "issue_comment") => {
     const [owner, name] = slug.split("/") as [string, string];
     const actor = comment.user.login;
+
+    if (isBotAuthored(comment)) {
+      console.log(
+        `⏭️  [fleet] Ignoring mention on ${slug}#${prNumber} by @${actor}: written by the bot itself`,
+      );
+      return "skipped";
+    }
 
     const hasAccess = await deps.userHasPushAccess(owner, name, actor);
     if (!hasAccess) {
@@ -496,7 +547,11 @@ export function createFleetMentionHandler(
     }
 
     console.log(`📌 [fleet] @mention on ${slug}#${prNumber} by @${actor}`);
-    return addressPr(slug, prNumber);
+    return addressPr(
+      slug,
+      prNumber,
+      comment.id !== undefined ? { kind, id: comment.id } : undefined,
+    );
   };
 }
 

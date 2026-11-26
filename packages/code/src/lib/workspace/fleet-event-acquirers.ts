@@ -498,13 +498,7 @@ export async function buildFleetEventAcquirers(
   const hasGitHubCreds = hasFleetGitHubCredentials(config, workspaceDir, slugs, usesHostedApp);
   let githubFor: ((slug: string) => FleetGitHubClient) | undefined;
   let addressPr: ((repo: string, prNumber: number) => Promise<TaskExecutionResult>) | undefined;
-  let handleMention:
-    | ((
-        repo: string,
-        comment: { user: { login: string } },
-        prNumber: number,
-      ) => Promise<TaskExecutionResult>)
-    | undefined;
+  let handleMention: import("./fleet-events").FleetMentionHandler | undefined;
 
   // Built whenever credentials exist — even with zero GitHub repos today —
   // so a repo added to the config at runtime gets full event coverage.
@@ -653,7 +647,8 @@ export async function buildFleetEventAcquirers(
     // namespaced by slug). The permission gate runs in the fleet handler.
     // Sweeps are map-managed so live config reloads can attach sweeps for
     // newly added repos and stop them for removed ones.
-    const { MentionSweepAcquirer } = await import("../acquirers/mention-sweep");
+    const { MentionSweepAcquirer, collectReviewsSince } =
+      await import("../acquirers/mention-sweep");
     type MentionSweep = import("../acquirers/mention-sweep").MentionSweepAcquirer;
     const mentionSweeps = new Map<string, MentionSweep>();
     const createMentionSweep = (slug: string): MentionSweep => {
@@ -712,8 +707,11 @@ export async function buildFleetEventAcquirers(
           postComment: async (prNumber, body) => {
             await gh(slug).postPullRequestComment(repoOwner, repoName, prNumber, body);
           },
+          fetchReviewsSince: (sinceIso) =>
+            collectReviewsSince(reviewFeedGitHub(gh(slug), slug), sinceIso),
         },
-        handleMention: (comment, prNumber) => fleetHandleMention(slug, comment, prNumber),
+        handleMention: (comment, prNumber, kind) =>
+          fleetHandleMention(slug, comment, prNumber, kind),
         verbose,
       });
     };
@@ -795,7 +793,18 @@ export async function buildFleetEventAcquirers(
       const relayWorker = await startRelayWorkerIdentity(options, relayUrl, relayToken);
       await startRelayAutoVerify(options, relayUrl, relayToken);
       const { RelayAcquirer } = await import("../relay/acquirer");
-      const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
+      const { createRelayMentionHandlers } = await import("../relay/mention-handlers");
+      const relayGitHub = githubFor;
+      const relayHandleMention = handleMention;
+      const relayMentions =
+        relayGitHub && relayHandleMention
+          ? createRelayMentionHandlers({
+              queue: state.queue,
+              handleMention: relayHandleMention,
+              verbose,
+              github: (repo) => relayMentionGitHub(relayGitHub(repo), repo),
+            })
+          : undefined;
       const relayTaskSources = taskSources.map((source) => {
         const execute = createGatedFleetTaskExecutor(
           {
@@ -852,7 +861,7 @@ export async function buildFleetEventAcquirers(
               return false;
             },
             handlePrComment: async (repo, prNumber, commentId) => {
-              if (!githubFor || !handleMention) {
+              if (!relayMentions) {
                 if (verbose) {
                   console.log(
                     `   [relay] ignoring comment on ${repo}#${prNumber}: no GitHub credentials ` +
@@ -861,21 +870,18 @@ export async function buildFleetEventAcquirers(
                 }
                 return "skipped";
               }
-              const [repoOwner, repoName] = repo.split("/") as [string, string];
-              const { data: comment } = await githubFor(repo).conditionalGet<{
-                id: number;
-                body: string | null;
-                user: { login: string; type: string };
-                created_at: string;
-                html_url: string;
-              }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
-              if (!comment) return "skipped";
-              const botName = await githubFor(repo).getBotUsername(repoOwner, repoName);
-              const botNames = botMentionCandidates(botName);
-              if (botNames.length === 0 || !mentionsAnyBot(comment.body, botNames)) {
+              return relayMentions.handlePrComment(repo, prNumber, commentId);
+            },
+            handlePrReview: async (repo, prNumber, submittedAt) => {
+              if (!relayMentions) {
+                if (verbose) {
+                  console.log(
+                    `   [relay] ignoring review on non-agent PR ${repo}#${prNumber}: no GitHub credentials.`,
+                  );
+                }
                 return "skipped";
               }
-              return handleMention(repo, comment, prNumber);
+              return relayMentions.handlePrReview(repo, prNumber, submittedAt);
             },
             evaluateTask,
             reconcileCodeHost: async (envelope) => {
@@ -902,6 +908,84 @@ export async function buildFleetEventAcquirers(
   }
 
   return acquirers;
+}
+
+/** One submitted review as the mention feeds read it. */
+interface RawReview {
+  id: number;
+  body: string | null;
+  user: { login: string; type?: string } | null;
+  submitted_at?: string | null;
+  html_url?: string;
+}
+
+/** List a PR's submitted reviews (first 100). */
+async function listPrReviews(
+  client: FleetGitHubClient,
+  slug: string,
+  prNumber: number,
+): Promise<RawReview[]> {
+  const [owner, name] = slug.split("/") as [string, string];
+  const result = await client.conditionalGet<RawReview[]>(
+    `/repos/${slug}/pulls/${prNumber}/reviews?per_page=100`,
+    owner,
+    name,
+  );
+  return result.data ?? [];
+}
+
+/** GitHub reads for the mention sweep's reviews feed on one repository. */
+function reviewFeedGitHub(
+  client: FleetGitHubClient,
+  slug: string,
+): import("../acquirers/mention-sweep").ReviewFeedGitHub {
+  const [owner, name] = slug.split("/") as [string, string];
+  return {
+    listOpenPrsByUpdated: async () =>
+      (
+        await client.conditionalGet<Array<{ number: number; updated_at: string; url: string }>>(
+          `/repos/${slug}/pulls?state=open&sort=updated&direction=desc&per_page=30`,
+          owner,
+          name,
+        )
+      ).data ?? [],
+    listReviews: (prNumber) => listPrReviews(client, slug, prNumber),
+  };
+}
+
+/** GitHub reads for the relay mention handlers on one repository. */
+function relayMentionGitHub(
+  client: FleetGitHubClient,
+  slug: string,
+): import("../relay/mention-handlers").RelayMentionGitHub {
+  const [owner, name] = slug.split("/") as [string, string];
+  type Item = import("../relay/mention-handlers").RelayMentionItem;
+  return {
+    getIssueComment: async (commentId) => {
+      try {
+        const result = await client.conditionalGet<Item>(
+          `/repos/${slug}/issues/comments/${commentId}`,
+          owner,
+          name,
+        );
+        return result.data;
+      } catch (error) {
+        const { isGitHubNotFound } = await import("../code-host/github/github-errors");
+        if (isGitHubNotFound(error)) return null;
+        throw error;
+      }
+    },
+    listReviews: (prNumber) => listPrReviews(client, slug, prNumber),
+    listReviewComments: async (prNumber, reviewId) =>
+      (
+        await client.conditionalGet<Item[]>(
+          `/repos/${slug}/pulls/${prNumber}/reviews/${reviewId}/comments?per_page=100`,
+          owner,
+          name,
+        )
+      ).data ?? [],
+    getBotUsername: () => client.getBotUsername(owner, name),
+  };
 }
 
 /**

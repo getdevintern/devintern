@@ -128,7 +128,7 @@ A run fails, and no PR is created, when it leaves nothing to publish (no changes
 ## Reading logs and run data
 
 - The dashboard's **Logs** tab shows recent worker output ([details](./dashboard.md)).
-- The worker also writes `worker.stdout.log` and `worker.stderr.log` in the workspace home, including startup failures such as a failed license check. `devintern worker service logs` prints the service manager's log: the journal under systemd, `worker.launchd.log` under launchd.
+- The worker also writes `worker.stdout.log` and `worker.stderr.log` in the workspace home, including startup failures such as a failed license check and the output of its PR jobs (review feedback, `@mentions`, conflict resolution, CI fixes, auto-merge), each line prefixed with the job and PR. `devintern worker service logs` prints the service manager's log: the journal under systemd, `worker.launchd.log` under launchd.
 - For scripts and sandboxed agents, `devintern worker runs`, `stats`, `automations`, `queue`, `status`, and `logs` print the same data; add `--json` for machine-readable output ([details](./dashboard.md#read-dashboard-data-from-the-command-line)).
 
 ## `worker status` says `unknown` inside a sandbox

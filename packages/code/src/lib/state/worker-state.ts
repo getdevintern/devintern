@@ -68,7 +68,12 @@ const CODE_HOST_PROVIDERS = [
 /** `worker_meta` key holding the epoch ms of the last executed task drain. */
 export const TASK_POLL_LAST_DRAIN_KEY = "task-poll:last-drain-at";
 
-export type AddressedCommentType = "review" | "conversation";
+/**
+ * `review` = inline review comment, `conversation` = PR issue comment,
+ * `review_body` = a review's own body (addressed when the review @mentioned
+ * the bot).
+ */
+export type AddressedCommentType = "review" | "conversation" | "review_body";
 
 export interface AgentPr {
   provider: CodeHostProvider;

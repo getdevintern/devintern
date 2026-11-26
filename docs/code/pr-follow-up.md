@@ -4,7 +4,7 @@ sidebarLabel: "PR Follow-up"
 description: "Use when the worker should keep its pull requests moving: addressing review feedback, resolving merge conflicts, fixing CI, auto-merging safe PRs, and answering @mentions."
 section: "Automation"
 order: 2.2
-dateModified: 2026-11-25
+dateModified: 2026-11-26
 ---
 
 # PR Follow-up: Reviews, Conflicts, CI, and Auto-merge
@@ -221,9 +221,13 @@ A fine-grained token (or a customer-owned App) needs **Actions: Read** and **Com
 
 ## Mention the bot on any PR
 
-Teammates can direct the agent on any PR, not only the agent's own, with a comment such as `@devintern address the review feedback`. In the standard setup the worker recognizes `@devintern-ai` through the relay and the central App; without the relay, configure a [customer-owned App](./configuration.md#advanced-customer-owned-github-app).
+Teammates can direct the agent on any PR, including PRs a person opened, by mentioning the bot, for example `@devintern-ai add a test for the empty case`. In the standard setup the worker recognizes `@devintern-ai` through the relay and the central App; without the relay, configure a [customer-owned App](./configuration.md#advanced-customer-owned-github-app).
+
+The mention itself is the instruction: the agent works on what the comment asks, together with any open `changes_requested` review on the PR, then pushes to the PR branch and adds a 🎉 reaction to the comments it handled. A mention works in a PR conversation comment, an inline review comment, or the body of a submitted review (for example `gh pr review --comment`). A review that does not mention the bot is not acted on unless the PR is the agent's own.
 
 - Only users with write, maintain, or admin access can direct the agent.
+- Comments posted by the bot or by the worker itself are never acted on.
+- Each mention is handled once, even when both the relay and polling see it.
 - Fork PRs are skipped unless they allow maintainer edits.
 - Mentions posted before the worker first started are ignored.
 - A mention that fails is retried up to `WORKER_FEEDBACK_MAX_ATTEMPTS` times (default 3). Mentions interrupted by shutdown or usage limits are retried without counting as an attempt.
