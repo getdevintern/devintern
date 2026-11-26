@@ -50,6 +50,15 @@ function isRefLockError(message: string | undefined): boolean {
   return /cannot lock ref|unable to (create|lock)|\.lock'?: File exists/i.test(message ?? "");
 }
 
+/** Directory-name prefix of a task's worktrees (`<safe-key>-<ms>-<uuid>`). */
+function taskWorktreePrefix(taskKey: string): string {
+  return taskKey.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export class RepoManager {
   private workspaceDir: string;
   private readonly adminTails = new Map<string, Promise<void>>();
@@ -327,10 +336,9 @@ export class RepoManager {
   async createTaskWorktree(repo: RepoConfig, taskKey: string): Promise<string> {
     return this.withAdminLock(repo.name, async () => {
       const branch = await this.resolveDefaultBranch(repo);
-      const safeKey = taskKey.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
       const path = join(
         this.repoWorktreesDir(repo.name),
-        `${safeKey}-${Date.now()}-${randomUUID()}`,
+        `${taskWorktreePrefix(taskKey)}-${Date.now()}-${randomUUID()}`,
       );
       await this.addWorktreeUnlocked(repo.name, path, `origin/${branch}`);
       return path;
@@ -353,6 +361,50 @@ export class RepoManager {
     const cwd = this.bareClonePath(repoName);
     await Utils.executeGitCommand(["worktree", "remove", "--force", worktreePath], { cwd });
     await Utils.executeGitCommand(["worktree", "prune"], { cwd });
+  }
+
+  /**
+   * Bound the worktrees kept "for debugging" for one task.
+   *
+   * A task that keeps failing (an agent CLI that cannot start, say) keeps one
+   * worktree per attempt until the TTL sweep, which can mean dozens of copies
+   * of the repository. Keep only the newest `keep` of them; a worktree in
+   * `inUse` (a run still owns it) or marked as holding unsaved work
+   * (`utils/worktree-keep.ts`) is never removed and does not count.
+   *
+   * @param repoName - Workspace repo
+   * @param taskKey - Task whose worktrees to prune
+   * @param options.keep - Newest debug worktrees to keep (at least 1)
+   * @param options.inUse - Worktree paths still owned by a run
+   * @returns Paths that were removed
+   */
+  async pruneTaskWorktrees(
+    repoName: string,
+    taskKey: string,
+    options: { keep: number; inUse?: ReadonlySet<string> },
+  ): Promise<string[]> {
+    const dir = this.repoWorktreesDir(repoName);
+    if (!existsSync(dir)) return [];
+    const pattern = new RegExp(
+      `^${escapeRegExp(taskWorktreePrefix(taskKey))}-(\\d+)-[0-9a-f-]{36}$`,
+    );
+    const candidates = readdirSync(dir)
+      .map((entry) => ({ entry, match: pattern.exec(entry) }))
+      .filter((item): item is { entry: string; match: RegExpExecArray } => item.match !== null)
+      .map(({ entry, match }) => ({ path: join(dir, entry), createdAt: Number(match[1]) }))
+      .filter(({ path }) => !options.inUse?.has(path))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    const removable: string[] = [];
+    for (const { path } of candidates) {
+      if (await worktreeKeepReason(path)) continue;
+      removable.push(path);
+    }
+    const removed: string[] = [];
+    for (const path of removable.slice(Math.max(1, options.keep))) {
+      await this.removeTaskWorktree(repoName, path);
+      if (!existsSync(path)) removed.push(path);
+    }
+    return removed;
   }
 
   /**

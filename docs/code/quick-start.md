@@ -1,72 +1,114 @@
 ---
 title: "DevIntern Code Quick Start"
 sidebarLabel: "Quick Start"
-description: "Use when installing DevIntern Code for the first time and running your first markdown task or tracker ticket through a coding agent."
+description: "Use when installing DevIntern Code for the first time: set up a worker that turns ready tracker tickets into pull requests, or run one task by hand."
 section: "Automation"
 order: 0
-dateModified: 2026-11-18
-tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
+dateModified: 2026-11-26
+tags: ["devintern/code", "quick start", "worker", "jira", "github", "cli"]
 ---
 
 # DevIntern Code Quick Start
 
-DevIntern Code runs your AI coding agent on a task: a local markdown file or a ticket from Jira, Linear, Trello, Asana, Azure DevOps, GitHub Issues, or GitLab Issues. It creates a feature branch, commits the changes, and can open a pull request.
+DevIntern Code runs your AI coding agent on tickets from Jira, Linear, Trello, Asana, Azure DevOps, GitHub Issues, or GitLab Issues, or on local markdown files. It creates a feature branch, commits the changes, and opens a pull request.
+
+The recommended setup is a **worker**: a background service that picks up ready tickets, opens PRs, and follows up on review comments. It suits one repository as well as many. To try a single task by hand first, see [Run one task by hand](#run-one-task-by-hand).
 
 Prefer to set up from a chat? Install the [devintern-setup skill](agent-skills.md) and ask your coding agent to do it.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh)
-- An AI agent CLI, such as Claude Code, Codex, OpenCode, or Cursor
-- A git repository for your project
-- A task tracker account with API access, or a markdown file
+- A Linux or macOS machine that will run the worker, with `git`
+- A clone of your project's repository on that machine
+- A task tracker account with API access, or a folder of markdown tasks
+- A token for your source-control host so the worker can push and open PRs. For GitHub, see [GitHub authentication](./configuration.md#github-authentication)
 
 ## 1. Install
 
+Install [Bun](https://bun.sh). On Debian and Ubuntu, the Bun installer needs `unzip`:
+
 ```bash
-curl -fsSL https://bun.sh/install | bash   # if Bun is not installed
+sudo apt-get install -y unzip   # Debian/Ubuntu only
+curl -fsSL https://bun.sh/install | bash
+```
+
+The installer adds `~/.bun/bin` to your shell profile, which only takes effect in a new shell. Open a new terminal, or run `exec $SHELL -l`. Then install DevIntern and a coding agent:
+
+```bash
 bun install -g @getdevintern/code
+bun install -g @anthropic-ai/claude-code   # Claude Code, the default agent
+claude                                      # sign in once, then exit
 ```
 
-## 2. Initialize
+`devintern --version` confirms the install. To use Codex, Cursor, OpenCode, or another agent instead, install and sign in to its CLI and see [Agent Harness](./agent-harness.md).
 
-In your project directory:
+## 2. Set up the worker
+
+In your project's checkout:
 
 ```bash
-devintern init
+devintern worker init
 ```
 
-The wizard asks for your tracker, links to the page where you create its token, and validates the connection. It also detects installed agent CLIs and ends with a readiness checklist. Your answers go to `~/.devintern/env/<repo>.env`, outside the repository, and the repository is registered in `~/.devintern/workspace.toml`; nothing is written into your checkout.
+You don't need to run `devintern init` first; if you already did, the wizard reuses the tracker settings it saved. The wizard asks for:
 
-No tracker account yet? Choose **Markdown files**. Tasks are read from `./tasks` and need no credentials. See [Markdown File Tasks](./markdown-tasks.md).
+1. Your tracker and its token. It links to the page where you create the token and checks the connection.
+2. The ready-tasks query: which tickets the worker picks up, for example `is:open label:devintern` on GitHub Issues. Keep it narrow at first.
+3. "Use the recommended worker settings?": no CI repair, automatic conflict resolution, task pickup at any hour, and no Sentry project. Answer `n` to choose each one.
+4. Sign-in, which starts the [14-day free Worker Pilot](./worker.md#worker-pilot-and-licenses) (no card required) when you have no license. While it waits for the browser, press Enter to skip and sign in later with `devintern worker login github`.
+5. [Relay](./relay.md) pairing when you are signed in, so PR reviews reach the worker in seconds. Without it the worker polls.
+6. Installing the background service (step 3 below).
 
-Run `devintern init` again to update credentials or switch trackers. For scripts and CI, `devintern init --yes` writes a commented template instead of prompting.
+Your answers are saved in `~/.devintern/`; nothing is written into your checkout. Re-run `devintern worker init` at any time: it keeps your answers as defaults and finishes a setup that stopped partway, including one you stopped with Ctrl+C.
 
-## 3. Run one task
+No tracker account yet? Choose **Markdown files**. Tasks are read from a folder and need no credentials. See [Markdown File Tasks](./markdown-tasks.md).
 
-Check that everything is wired up:
+## 3. Start the worker in the background
+
+If you skipped the wizard's last step, install the service now:
 
 ```bash
-devintern doctor
+devintern worker service install
 ```
 
-Then run a task. With Markdown, add `TASK-1.md` to your task directory and pass its name without the extension:
+It runs the [`worker doctor`](./worker.md#checking-readiness-worker-doctor) checks, installs a systemd user service (Linux) or launchd agent (macOS), starts it, and waits until the worker is running. It then prints the dashboard address. If a check fails, it lists the fix and installs nothing.
+
+From then on the worker polls your tracker every 60 seconds for tickets that match your query. On Linux, run `sudo loginctl enable-linger $USER` once so the worker keeps running after you log out and starts at boot; `service install` warns you when this is needed.
+
+## 4. Watch the first task run
+
+Make a ticket match your query, for example by adding the `devintern` label to a GitHub issue. Within a minute or two the worker picks it up. Follow it in:
+
+- The dashboard at `http://localhost:4400`. On a remote machine, forward it first: `ssh -L 4400:127.0.0.1:4400 you@host`
+- `devintern worker runs` for the run list, and `devintern worker logs --level warn` for problems
+- `devintern worker prs` for the pull requests it opened
+
+The run checks the ticket is clear enough, implements it, and opens a PR. Review the PR and leave comments; the worker pushes follow-up commits to the same branch. A ticket that is too vague gets questions on the tracker instead of a PR.
+
+Nothing picked up after a few minutes? Run `devintern worker doctor` and see [Worker Troubleshooting](./worker-troubleshooting.md).
+
+## Run one task by hand
+
+To try one task without a worker, run the per-repository setup in your checkout. Interactive runs are free and need no sign-in.
 
 ```bash
-devintern TASK-1
+devintern init      # connect a tracker, or choose Markdown files
+devintern doctor    # check that everything is wired up
 ```
 
-With a tracker, pass the task reference:
+Then run a task. With a tracker, pass the task reference. With Markdown, add `TASK-1.md` to your task folder and pass its name without the extension:
 
 ```bash
 devintern PROJ-123 --create-pr
+devintern TASK-1
 ```
 
-Opening a pull request needs a source-control token; see [Configuration](./configuration.md#github-authentication).
+`devintern init` saves your answers to `~/.devintern/env/<repo>.env` and registers the repository as manual-only, so a worker skips it. To hand it to a worker later, run `devintern worker init` in the checkout: it reuses those settings and turns the repository into a worker repository.
 
 ## Next steps
 
-- [Set up the worker](./worker.md#quick-start) so tasks are picked up, implemented, and turned into PRs automatically. Start with `devintern worker init`. This is the recommended setup for ongoing use, even with one repository.
+- [Worker](./worker.md): options, readiness checks, service management, and licenses.
 - Open the guide for your tracker: [Jira](./jira-integration.md), [Linear](./linear-integration.md), [Trello](./trello-integration.md), [Asana](./asana-integration.md), [Azure DevOps](./azure-devops-integration.md), [GitHub Issues](./github-issues-integration.md), or [GitLab](./gitlab-integration.md).
+- [Workspaces](./workspaces.md): add more repositories and teams to the same worker.
 - [CLI reference](./usage.md): flags, batch queries, and git behavior.
 - [Reporting Bugs](./reporting-bugs.md): if a failure looks like a DevIntern defect, `devintern report` files a redacted report.

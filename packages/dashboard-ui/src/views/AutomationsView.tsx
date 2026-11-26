@@ -184,6 +184,16 @@ function AutomationRow({
                 <RunResult run={lastRun} />
               </span>
             ) : null}
+            {/* Auto-merge checks say why a PR was left open (e.g. no CI checks). */}
+            {kind === "auto_merge" && lastRun.status !== "succeeded" && lastRun.outcomeReason ? (
+              <span
+                data-slot="auto-merge-reason"
+                className="max-w-xs truncate text-xs text-muted-foreground"
+                title={lastRun.outcomeReason}
+              >
+                {lastRun.outcomeReason}
+              </span>
+            ) : null}
           </div>
         ) : (
           <span className="text-muted-foreground">–</span>

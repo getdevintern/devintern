@@ -136,6 +136,65 @@ describe("startPendingLogin", () => {
     expect(second.method).toBe("google");
     expect(second.codeVerifier).not.toBe(parsePendingLogin(first)!.codeVerifier);
   });
+
+  test("starting the same method again reuses the waiting sign-in and its address", async () => {
+    const start = Date.parse("2026-11-26T10:00:00Z");
+    const first = await startPendingLogin(
+      config,
+      { method: "github" },
+      { port: 17865, now: () => start },
+    );
+    const saved = readFileSync(pendingLoginPath(config), "utf8");
+    const again = await startPendingLogin(
+      config,
+      { method: "github" },
+      { port: 17865, now: () => start + 60_000 },
+    );
+    expect(again).toEqual({ ...first, reused: true });
+    // The verifier behind the shown address is untouched, so it still completes.
+    expect(readFileSync(pendingLoginPath(config), "utf8")).toBe(saved);
+  });
+
+  test("a waiting sign-in close to expiry, or `fresh`, starts a new one", async () => {
+    const start = Date.parse("2026-11-26T10:00:00Z");
+    const first = await startPendingLogin(
+      config,
+      { method: "github" },
+      { port: 17865, now: () => start },
+    );
+    const late = await startPendingLogin(
+      config,
+      { method: "github" },
+      { port: 17865, now: () => start + PENDING_LOGIN_TTL_MS - 60_000 },
+    );
+    expect(late.reused).toBeUndefined();
+    expect(late.url).not.toBe(first.url);
+    const fresh = await startPendingLogin(
+      config,
+      { method: "github" },
+      { port: 17865, now: () => start + PENDING_LOGIN_TTL_MS - 50_000, fresh: true },
+    );
+    expect(fresh.reused).toBeUndefined();
+    expect(fresh.url).not.toBe(late.url);
+  });
+
+  test("email reuse needs the same address and does not send another link", async () => {
+    await startPendingLogin(config, { method: "email", email: "me@example.com" }, { port: 17865 });
+    const again = await startPendingLogin(
+      config,
+      { method: "email", email: "me@example.com" },
+      { port: 17865 },
+    );
+    expect(again.reused).toBe(true);
+    expect(requests.filter((r) => r.path.startsWith("/auth/v1/otp"))).toHaveLength(1);
+    const other = await startPendingLogin(
+      config,
+      { method: "email", email: "you@example.com" },
+      { port: 17865 },
+    );
+    expect(other.reused).toBeUndefined();
+    expect(requests.filter((r) => r.path.startsWith("/auth/v1/otp"))).toHaveLength(2);
+  });
 });
 
 describe("completePendingLogin", () => {

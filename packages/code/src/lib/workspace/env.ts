@@ -400,7 +400,7 @@ function teamEnvNamespace(teamName: string): string {
  * `JIRA_API_TOKEN` for team `platform`. `JIRA_PLATFORM_URL` is also accepted
  * as the concise alias for the existing `JIRA_BASE_URL` setting.
  */
-function namespacedTeamEnv(
+export function namespacedTeamEnv(
   workspaceEnv: Record<string, string>,
   team: TeamConfig,
 ): Record<string, string> {

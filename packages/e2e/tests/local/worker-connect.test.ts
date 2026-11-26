@@ -544,7 +544,9 @@ cliTest(
         result: "action_required",
       });
       expect(doc.nextSteps[0]).toMatchObject({ id: "sign-in" });
-      expect(doc.nextSteps[0]!.command).toContain("worker login <method> --no-wait --json");
+      expect(doc.nextSteps[0]!.command).toMatch(
+        /worker login( --workspace \S+)? github --no-wait --json$/,
+      );
       expect(fixture.recorder.requests).toEqual([]);
 
       const status = await fixture.run(["worker", "connect", "github", "--status", "--json"]);

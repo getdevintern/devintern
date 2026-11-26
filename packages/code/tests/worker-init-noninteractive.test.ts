@@ -193,7 +193,10 @@ describe("runNonInteractiveWorkerInit", () => {
       name: "app",
       remote: "git@github.com:acme/app.git",
       added: true,
+      defaultBranch: "main",
+      branch: "main",
     });
+    expect(config.repos[0]?.defaultBranch).toBe("main");
     expect(report.filesWritten).toEqual([
       join(workspaceDir, ".env"),
       join(workspaceDir, "workspace.toml"),
@@ -209,7 +212,14 @@ describe("runNonInteractiveWorkerInit", () => {
     const env = readFileSync(join(workspaceDir, ".env"), "utf8");
     expect(env).toContain("JIRA_API_TOKEN=ATATT-very-secret-token");
     expect(statSync(join(workspaceDir, ".env")).mode & 0o777).toBe(0o600);
-    expect(report.nextSteps.map((step) => step.id)).toEqual(["connect", "start", "service"]);
+    // The background service comes first; nothing blocks an agent waiting for a browser.
+    expect(report.nextSteps.map((step) => step.id)).toEqual(["service", "connect"]);
+    expect(report.nextSteps.map((step) => step.command)).toEqual([
+      `DEVINTERN_WORKSPACE_DIR=${workspaceDir} devintern worker service install --json`,
+      `devintern worker connect github --no-wait --json --workspace ${join(workspaceDir, "workspace.toml")}`,
+    ]);
+    expect(report.changed).toBe(true);
+    expect(report.persisted).toBe(true);
     // Nothing secret in the report.
     expect(JSON.stringify(report)).not.toContain(JIRA_ENV.JIRA_API_TOKEN);
     expect(existsSync(join(workspaceDir, WORKER_INIT_LOCK_FILE))).toBe(false);
@@ -485,7 +495,7 @@ describe("runNonInteractiveWorkerInit", () => {
       expect(signIn.id).toBe("sign-in");
       // A concrete command with a method, for this (non-default) workspace.
       expect(signIn.command).toBe(
-        `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")} github`,
+        `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")} github --no-wait --json`,
       );
       expect(signIn.message).toContain("14-day free Worker Pilot, no card required");
       expect(report.signIn).toBeUndefined();
@@ -597,7 +607,11 @@ describe("runNonInteractiveWorkerInit", () => {
         "url",
       ]);
       expect(report.result).toBe("action_required");
-      expect(report.nextSteps[0]).toMatchObject({ id: "sign-in", command: complete });
+      expect(report.nextSteps[0]).toMatchObject({
+        id: "complete-sign-in",
+        command: complete,
+        url: "https://example.supabase.co/auth/v1/authorize?provider=github",
+      });
       const text = renderNonInteractiveReport(report).join("\n");
       expect(text).toContain(
         "🔑 Sign in to begin your 14-day free Worker Pilot, no card required:",
@@ -782,6 +796,9 @@ describe("runNonInteractiveWorkerInit", () => {
       name: "app",
       remote: "https://gitlab.com/acme/app.git",
       added: true,
+      // `git init -b main` with no origin/HEAD: the checked-out branch is recorded.
+      defaultBranch: "main",
+      branch: "main",
     });
     const config = loadWorkspaceConfig(join(workspaceDir, "workspace.toml"));
     expect(config.repos.map((repo) => repo.remote)).toEqual(["https://gitlab.com/acme/app.git"]);

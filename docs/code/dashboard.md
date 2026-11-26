@@ -155,11 +155,11 @@ Every read-only dashboard view is also a `devintern worker` subcommand. These co
 | `devintern worker automations`            | Automations with next and last run                                    |
 | `devintern worker prs`                    | PRs and MRs opened by the agent: open (default) or recently merged (`--state open\|merged`; `--limit N`, 1..500, default 50) |
 | `devintern worker queue`                  | Queued work that has not started                                      |
-| `devintern worker status`                 | Worker liveness, queue counts, poll cursors                           |
+| `devintern worker status`                 | Worker liveness, relay identity, queue counts, poll cursors           |
 | `devintern worker overview`               | Capacity, harness health, tracker freshness                           |
 | `devintern worker logs`                   | Recent worker log entries (`--lines N`, default 500; `--level`)       |
 
-With `--json`, a command prints exactly the body of the matching dashboard API route (for example `worker runs` matches `GET /api/runs`), so scripts that used `curl` can switch unchanged:
+With `--json`, a command prints exactly the body of the matching dashboard API route (for example `worker runs` matches `GET /api/runs`), so scripts that used `curl` can switch unchanged. `worker status --json` and `worker overview --json` also add `schema` (`devintern.worker-status`, `devintern.worker-overview`), `version` (1), and `result` (the worker's liveness, `worker.status`: for example `running` or `stopped`) in front of the body:
 
 ```bash
 devintern worker stats --window 7d --json | jq '.stats.successRate'

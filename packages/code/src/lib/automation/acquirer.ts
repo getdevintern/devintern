@@ -21,11 +21,7 @@ import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import type { RunOrigin } from "../state/run-recorder";
 import { readRunOutcomeHint, RUN_OUTCOME_FILE_ENV } from "../worker/run-outcome-protocol";
 import type { RunOutcomeHint } from "../worker/run-outcome-protocol";
-import {
-  getWorkerFailover,
-  harnessBlockedReason,
-  HARNESS_UNAVAILABLE_COOLDOWN_MS,
-} from "../worker/failover";
+import { getWorkerFailover, harnessBlockedReason } from "../worker/failover";
 import {
   HARNESS_UNAVAILABLE_EXIT_CODE,
   readUsageLimitHint,
@@ -934,10 +930,7 @@ export function spawnAutomationProcess(
                   readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]),
                   env.AGENT_HARNESS ?? failover.activeName,
                 )
-              : failover.manager.reportHarnessUnavailable(
-                  Date.now() + HARNESS_UNAVAILABLE_COOLDOWN_MS,
-                  env.AGENT_HARNESS ?? failover.activeName,
-                );
+              : failover.reportStartFailure(env.AGENT_HARNESS ?? failover.activeName);
           if (outcome.kind !== "exhausted") {
             cleanupHint();
             const nextEnv = pinAutomationEnv(options.env, options.harnessPin);

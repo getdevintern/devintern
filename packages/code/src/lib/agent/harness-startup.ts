@@ -383,12 +383,15 @@ export function detectHarnessStartupFailure(
   // check must also gate this heuristic and its reason.
   const allOutputIsCompilerDiagnostics = combined.trim() !== "" && startupText.trim() === "";
   if (fastExit && noAssistantOutput && !allOutputIsCompilerDiagnostics) {
+    // No startup-shaped line: name the exit and carry the stderr tail
+    // (`Invalid API key · Please run /login`), so the operator sees why the
+    // CLI quit instead of a bare exit code. Both helpers redact.
+    const actionable = firstActionableLine("", startupText);
+    if (actionable) return { unavailable: true, reason: redactAgentOutput(actionable) };
+    const tail = describeAgentExitFailure("", startupText);
     return {
       unavailable: true,
-      reason: redactAgentOutput(
-        firstActionableLine("", startupText) ??
-          `exited with code ${signals.exitCode} before producing output`,
-      ),
+      reason: `exited with code ${signals.exitCode} before producing output${tail ? `: ${tail}` : ""}`,
     };
   }
 

@@ -215,6 +215,20 @@ async function runCLI(
   }
 }
 
+/**
+ * Assert a CLI run exited 0, failing with its captured output otherwise. A bare
+ * `expect(exitCode).toBe(0)` hides why a run failed, which leaves an
+ * intermittent CI failure undiagnosable.
+ */
+function expectExitZero(result: CLIResult): void {
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `CLI exited ${result.exitCode}, expected 0.\n` +
+        `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  }
+}
+
 function makeTestDir(): string {
   const dir = join(tmpdir(), `md-test-${Date.now()}-${Math.random().toString(36).substring(7)}`);
   mkdirSync(dir, { recursive: true });
@@ -402,7 +416,7 @@ describe.concurrent("Markdown file path detection", () => {
       expect(output).not.toContain("Missing required JIRA environment variables");
       expect(output).not.toContain("Unsupported task tracker");
       expect(output).toContain("Processing markdown file");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
     } finally {
       cleanup(testDir);
     }
@@ -419,7 +433,7 @@ describe.concurrent("Markdown file path detection", () => {
       const output = result.stdout + result.stderr;
       expect(output).not.toContain("Missing required JIRA environment variables");
       expect(output).toContain("Processing markdown file");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
     } finally {
       cleanup(testDir);
     }
@@ -470,7 +484,7 @@ describe.concurrent("Markdown file path detection", () => {
       );
       const output = result.stdout + result.stderr;
       expect(output).not.toContain("Missing required JIRA environment variables");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
     } finally {
       cleanup(testDir);
     }
@@ -486,7 +500,7 @@ describe.concurrent("Markdown file path detection", () => {
         testDir,
       );
       expect(result.stdout).toContain("My Awesome Feature");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
     } finally {
       cleanup(testDir);
     }
@@ -503,7 +517,7 @@ describe.concurrent("Markdown file path detection", () => {
       );
       const output = result.stdout + result.stderr;
       expect(output).toContain("Processing markdown file");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
     } finally {
       cleanup(testDir);
     }
@@ -531,7 +545,7 @@ Description.
         testDir,
       );
       expect(result.stdout).toContain("Key: my-custom-key");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
     } finally {
       cleanup(testDir);
     }
@@ -550,7 +564,7 @@ Description.
           DEVINTERN_OUTPUT_DIR: outputDir,
         },
       );
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       expect(existsSync(outputDir)).toBe(true);
     } finally {
       cleanup(testDir);
@@ -570,7 +584,7 @@ Description.
           DEVINTERN_OUTPUT_DIR: outputDir,
         },
       );
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       const taskDetailsDir = join(outputDir, "my-task");
       if (existsSync(taskDetailsDir)) {
         const taskDetails = readFileSync(join(taskDetailsDir, "task-details.md"), "utf8");
@@ -597,7 +611,7 @@ Description.
           DEVINTERN_OUTPUT_DIR: outputDir,
         },
       );
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       const taskDetailsDir = join(outputDir, "my-task");
       if (existsSync(taskDetailsDir)) {
         const taskDetails = readFileSync(join(taskDetailsDir, "task-details.md"), "utf8");
@@ -636,7 +650,7 @@ Description.
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       const updated = readFileSync(mdFile, "utf8");
       // Status must have transitioned away from "To Do" (to "In Progress" or "Done")
       expect(updated).not.toContain("status: To Do");
@@ -667,7 +681,7 @@ Description.
         testDir,
       );
       expect(result.stdout).toContain("In Progress");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
     } finally {
       cleanup(testDir);
     }
@@ -691,7 +705,7 @@ Description.
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       const after = readFileSync(mdFile, "utf8");
       expect(after).not.toContain("status:");
     } finally {
@@ -709,7 +723,7 @@ Description.
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       const after = readFileSync(mdFile, "utf8");
       expect(after).toBe(originalContent);
     } finally {
@@ -735,7 +749,7 @@ describe.concurrent("Unstructured markdown files", () => {
       );
       const output = result.stdout + result.stderr;
 
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       expect(output).toContain("Processing markdown file");
       expect(output).toContain("Key: backlog-item");
       expect(output).toContain("Summary: backlog-item");
@@ -773,7 +787,7 @@ Extract shared middleware package.
 
       expect(result.stdout).toContain("Key: refactor-auth");
       expect(result.stdout).toContain("Summary: refactor-auth");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       expect(readFileSync(mdFile, "utf8")).toBe(originalContent);
     } finally {
       cleanup(testDir);
@@ -802,7 +816,7 @@ Random note: wire up webhook retries with exponential backoff.
       expect(output).toContain("Key: obsidian-note");
       expect(output).toContain("Status: Unknown");
       expect(output).not.toContain("Updating status");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       expect(readFileSync(mdFile, "utf8")).toBe(originalContent);
     } finally {
       cleanup(testDir);
@@ -826,7 +840,7 @@ Random note: wire up webhook retries with exponential backoff.
       );
       const output = result.stdout + result.stderr;
 
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
       expect(output).toContain("Processing 2 task(s)");
       expect(output).toContain("Key: one");
       expect(output).toContain("Key: two");
@@ -876,7 +890,7 @@ Description.
       expect(output).not.toContain("File not found");
       expect(output).toContain("Key: 2026-06-06t09-42-23-kfg5");
       expect(output).toContain("Enable agent harness selection");
-      expect(result.exitCode).toBe(0);
+      expectExitZero(result);
     } finally {
       cleanup(testDir);
     }

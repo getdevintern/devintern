@@ -4,21 +4,21 @@ sidebarLabel: "PR Follow-up"
 description: "Use when the worker should keep its pull requests moving: addressing review feedback, resolving merge conflicts, fixing CI, auto-merging safe PRs, and answering @mentions."
 section: "Automation"
 order: 2.2
-dateModified: 2026-11-18
+dateModified: 2026-11-25
 ---
 
 # PR Follow-up: Reviews, Conflicts, CI, and Auto-merge
 
 After the [worker](./worker.md) opens a pull request, it keeps watching it. This page covers what it does with the PRs it created, and with teammates' PRs when you opt in. Everything works by polling; the [relay](./relay.md) only makes it faster. GitHub is fully supported; GitLab support is noted per feature.
 
-| Feature                                                     | Default | Setting                                    |
-| ----------------------------------------------------------- | ------- | ------------------------------------------ |
-| [Address review feedback](#review-feedback-on-the-agents-prs) | on      | always on for the agent's PRs              |
-| [Resolve merge conflicts](#merge-conflicts-on-the-agents-prs) | on      | `[workspace].conflict_resolution`          |
-| [Sync teammates' PRs](#syncing-teammates-open-prs)          | off     | `[[repos]].sync_team_prs`                  |
-| [Auto-merge safe PRs](#auto-merging-safe-prs)               | off     | `[workspace].auto_merge`                   |
-| [Fix failing CI](#ci-failures-on-the-agents-prs)            | off     | `[workspace].ci_failure_fix`               |
-| [Respond to `@mentions`](#mention-the-bot-on-any-pr)        | on      | needs the relay or a customer-owned App    |
+| Feature                                                       | Default | Setting                                 |
+| ------------------------------------------------------------- | ------- | --------------------------------------- |
+| [Address review feedback](#review-feedback-on-the-agents-prs) | on      | always on for the agent's PRs           |
+| [Resolve merge conflicts](#merge-conflicts-on-the-agents-prs) | on      | `[workspace].conflict_resolution`       |
+| [Sync teammates' PRs](#syncing-teammates-open-prs)            | off     | `[[repos]].sync_team_prs`               |
+| [Auto-merge safe PRs](#auto-merging-safe-prs)                 | off     | `[workspace].auto_merge`                |
+| [Fix failing CI](#ci-failures-on-the-agents-prs)              | off     | `[workspace].ci_failure_fix`            |
+| [Respond to `@mentions`](#mention-the-bot-on-any-pr)          | on      | needs the relay or a customer-owned App |
 
 All of these settings apply without a restart. The worker never force-pushes: if someone pushed to the branch meanwhile, its push is rejected instead of overwriting their work.
 
@@ -44,11 +44,11 @@ On GitLab, conflict resolution supports `auto` mode and the manual command. `sch
 
 Each resolution is an agent run. `[workspace].conflict_resolution` controls when they happen:
 
-| Value                | Behavior                                                                                       |
-| -------------------- | ---------------------------------------------------------------------------------------------- |
-| `"auto"` (default)   | Resolve as soon as a conflict is detected.                                                     |
-| `"scheduled"`        | Queue conflicts and resolve them in an off-peak window.                                        |
-| `"disabled"`         | Do not watch for conflicts. PRs stay conflicted until resolved by hand or with `resolve-conflicts`. |
+| Value              | Behavior                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------- |
+| `"auto"` (default) | Resolve as soon as a conflict is detected.                                                          |
+| `"scheduled"`      | Queue conflicts and resolve them in an off-peak window.                                             |
+| `"disabled"`       | Do not watch for conflicts. PRs stay conflicted until resolved by hand or with `resolve-conflicts`. |
 
 ```toml
 [workspace]
@@ -79,11 +79,11 @@ After `WEBHOOK_MAX_RETRIES` failed attempts, the worker stops trying on that PR.
 
 ### Tuning
 
-| Variable                         | Default | Description                                                         |
-| -------------------------------- | ------- | ------------------------------------------------------------------- |
-| `WEBHOOK_MAX_RETRIES`            | `3`     | Attempts per conflict before the worker stops trying (see above)    |
-| `WORKER_BASE_SYNC_QUIET_SECONDS` | `30`    | How long the PR head must stay unchanged before the worker acts     |
-| `WORKER_RESOLVE_TIMEOUT_SECONDS` | `1800`  | Time limit per resolution run; `0` disables                         |
+| Variable                         | Default | Description                                                      |
+| -------------------------------- | ------- | ---------------------------------------------------------------- |
+| `WEBHOOK_MAX_RETRIES`            | `3`     | Attempts per conflict before the worker stops trying (see above) |
+| `WORKER_BASE_SYNC_QUIET_SECONDS` | `30`    | How long the PR head must stay unchanged before the worker acts  |
+| `WORKER_RESOLVE_TIMEOUT_SECONDS` | `1800`  | Time limit per resolution run; `0` disables                      |
 
 ## Syncing teammates' open PRs
 
@@ -113,7 +113,9 @@ auto_merge_review_paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/skills/**"]  # al
 auto_merge_review = true                         # agent reviews PRs outside the safe paths
 auto_merge_method = "squash"                     # merge | squash | rebase
 auto_merge_review_label = "needs-human-review"   # label for PRs left open; "" disables
+auto_merge_require_checks = false               # true: code PRs also need a passing CI check
 auto_merge_policy = "standard"                   # strict (default) | standard | relaxed | custom
+auto_merge_recheck_on_push = false               # true: agent-review again after every new commit
 # auto_merge_model = "sonnet"                    # also auto_merge_harness / auto_merge_effort
 
 [[repos]]
@@ -125,12 +127,29 @@ auto_merge_review_instructions = "Changes under billing/ always need a human."
 
 Each PR passes these gates in order. Any "no" leaves it open for a human:
 
-1. **Ready.** Open, not a draft, not from a fork, checks passing, no conflicts, and no outstanding "changes requested" review. Branch protection still applies. The head commit must be unchanged for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`).
+1. **Ready.** Open, not a draft, not from a fork, no conflicts, and no outstanding "changes requested" review. Branch protection still applies. The head commit must be unchanged for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`). CI on the head commit (check runs and commit statuses) must have no failing check (`failure`, `error`, `timed_out`, `cancelled`, `action_required`), and no pending check. `skipped` and `neutral` checks never block. A commit with no checks at all passes, so a repository without CI merges on the remaining gates; with `auto_merge_require_checks = true`, a code PR also needs at least one `success` (see [CI checks](#ci-checks)).
 2. **Deny paths.** A changed file matching `auto_merge_deny_paths` or a built-in deny path (`.github/**`, `**/CODEOWNERS`) blocks the merge.
 3. **Safe paths.** If every changed file matches `auto_merge_safe_paths` and none matches `auto_merge_review_paths`, the PR merges with no agent run.
 4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reviews the diff and the PR merges only on an explicit "safe" verdict. With `auto_merge_review = false`, the PR stays open.
 
-Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths`, `auto_merge_policy`, `auto_merge_rules` / `auto_merge_rules_file`, and `auto_merge_review_instructions` replace the workspace values. The merge is pinned to the commit that passed the gates. A PR left open is checked again after new commits or a policy change.
+Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths`, `auto_merge_require_checks`, `auto_merge_policy`, `auto_merge_rules` / `auto_merge_rules_file`, and `auto_merge_review_instructions` replace the workspace values. The merge is pinned to the commit that passed the gates.
+
+By default (`auto_merge_recheck_on_push = false`) the agent review runs once per PR. When it leaves a PR open, new commits, for example from review fixes or conflict resolution, do not start another review, so the merge-safety review does not spend tokens on every update. Changing the auto-merge policy (safe paths, deny paths, review paths, `auto_merge_review`, `auto_merge_require_checks`, `auto_merge_policy`, the custom rules, or `auto_merge_review_instructions`) checks it again. A PR left open without an agent run (a deny path, a size limit, or review disabled) is checked again after new commits, since that check is free. Set `auto_merge_recheck_on_push = true` to review again after every new commit.
+
+### CI checks
+
+A PR with a failing check stays open with the label, and its status comment names the failing check. A PR whose checks are still running gets a status comment saying so, but no label, because it usually merges on its own once they pass. If the checks then pass but branch protection still blocks the merge (for example, a required approval), the status comment changes to say it is waiting for GitHub, and the label is removed. The same reason shows on the dashboard's **Auto-merge** entry and in `devintern auto-merge <pr-url> --dry-run`. If the check status cannot be read, the PR is not merged and the check is retried like any other failure; the status comment says so if the last retry fails too. On the dashboard's run list, a PR waiting on failing or missing CI counts as escalated (handed to a human) until it merges; a PR waiting on running checks does not.
+
+A repository without CI merges code PRs on the remaining gates (deny paths and the agent review). To make code PRs wait until CI reports at least one passing check, which also guards against CI that registers its checks late, turn on `auto_merge_require_checks`:
+
+```toml
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+auto_merge_require_checks = true   # default false; also settable in [workspace]
+```
+
+With it on, a code PR with no passing check stays open with `auto_merge_review_label`, and its status comment says "No CI checks reported for this commit; auto-merge needs at least one passing check." The worker keeps checking the same commit, up to once an hour while nothing changes, and merges once a check passes. Safe-path-only PRs never need a passing check.
 
 ### Review paths
 
@@ -149,22 +168,23 @@ The agent is told which changed files matched a review path, and the status comm
 
 ### Review policy
 
-`auto_merge_policy` picks the rubric the agent review in gate 4 judges PRs by. Whatever the policy, the review never merges a PR it is unsure about, a change it cannot read in full (truncated, generated, or binary), or a PR whose text tells it to approve. A diff over 150,000 characters is too large to include in the prompt, so the agent pages through it from the PR checkout with `git diff`. That review is a longer, costlier agent run, once per new head commit. Diffs over 400,000 characters always stay open for a human. A large diff also stays open if the agent cannot read the whole change (for example, one very long generated or minified file), or if a changed file name contains anything other than letters, digits, and `. _ / @ + = , : -` (this includes spaces and non-ASCII names) or has a path segment that starts with `-`.
+`auto_merge_policy` picks the rubric the agent review in gate 4 judges PRs by. Whatever the policy, the review never merges a PR it is unsure about, a change it cannot read in full (truncated, generated, or binary), or a PR whose text tells it to approve. A diff over 150,000 characters is too large to include in the prompt, so the agent pages through it from the PR checkout with `git diff`. That review is a longer, costlier agent run. Diffs over 400,000 characters always stay open for a human. A large diff also stays open if the agent cannot read the whole change (for example, one very long generated or minified file), or if a changed file name contains anything other than letters, digits, and `. _ / @ + = , : -` (this includes spaces and non-ASCII names) or has a path segment that starts with `-`.
 
-| Policy               | Leaves open for a human                                                                                                                                                                                                                                                                                                                  | Use when                                                                           |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `strict` (default)   | Any runtime behavior change, security surface, irreversible effect, or weakened test or check. In practice only docs, tests, and provably behavior-preserving refactors merge.                                                                                                                                                           | You are starting out, or every behavior change should get a human look.            |
-| `standard`           | Changes to auto-merge itself; CI, build, release, version bumps, and published manifest fields; weakened tests or checks; auth, credentials, redaction, webhook signatures, fail-open changes; sandbox or agent permissions; destructive data changes; default flips without opt-in; new or major-upgraded dependencies; untested behavior changes. | Tested feature and bug-fix PRs should merge, but risky categories need a human.   |
-| `relaxed`            | Changes to auto-merge itself; CI, release, and publishing; weakened tests; auth, credentials, fail-open changes; sandbox or agent permissions; deleting data the PR did not create; behavior changes with no test covering them.                                                                                                         | A well-tested repo where dependency upgrades, migrations, and documented default changes may merge too. |
-| `custom`             | Whatever your own rules say (`auto_merge_rules` or `auto_merge_rules_file`).                                                                                                                                                                                                                                                             | None of the presets fits your repository.                                          |
+| Policy             | Leaves open for a human                                                                                                                                                                                                                                                                                                                             | Use when                                                                                                |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `strict` (default) | Any runtime behavior change, security surface, irreversible effect, or weakened test or check. In practice only docs, tests, and provably behavior-preserving refactors merge.                                                                                                                                                                      | You are starting out, or every behavior change should get a human look.                                 |
+| `standard`         | Changes to auto-merge itself; CI, build, release, version bumps, and published manifest fields; weakened tests or checks; auth, credentials, redaction, webhook signatures, fail-open changes; sandbox or agent permissions; destructive data changes; default flips without opt-in; new or major-upgraded dependencies; untested behavior changes. | Tested feature and bug-fix PRs should merge, but risky categories need a human.                         |
+| `relaxed`          | Changes to auto-merge itself; CI, release, and publishing; weakened tests; auth, credentials, fail-open changes; sandbox or agent permissions; deleting data the PR did not create; behavior changes with no test covering them.                                                                                                                    | A well-tested repo where dependency upgrades, migrations, and documented default changes may merge too. |
+| `custom`           | Whatever your own rules say (`auto_merge_rules` or `auto_merge_rules_file`).                                                                                                                                                                                                                                                                        | None of the presets fits your repository.                                                               |
 
-| Setting                          | Default  | What it does                                                                                                                                                                                                                       |
-| -------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auto_merge_review_paths`        | none     | Globs that always go to the agent review, even when they also match a safe path. See [Review paths](#review-paths).                                                                                                               |
-| `auto_merge_policy`              | `strict` | `strict`, `standard`, `relaxed`, or `custom`.                                                                                                                                                                                      |
-| `auto_merge_rules`               | none     | The rubric for `custom`, inline. Up to 20,000 characters.                                                                                                                                                                         |
+| Setting                          | Default  | What it does                                                                                                                                                                                                                                |
+| -------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auto_merge_require_checks`      | `false`  | Code PRs need at least one passing CI check on the head commit, so a commit with no checks waits. Failing or pending checks block either way. See [CI checks](#ci-checks).                                                                  |
+| `auto_merge_review_paths`        | none     | Globs that always go to the agent review, even when they also match a safe path. See [Review paths](#review-paths).                                                                                                                         |
+| `auto_merge_policy`              | `strict` | `strict`, `standard`, `relaxed`, or `custom`.                                                                                                                                                                                               |
+| `auto_merge_rules`               | none     | The rubric for `custom`, inline. Up to 20,000 characters.                                                                                                                                                                                   |
 | `auto_merge_rules_file`          | none     | The rubric for `custom`, in a file. Relative paths are taken from the workspace home (`~/.devintern`); `~` is expanded. The file is read on every review, so edits apply right away and re-check PRs it left open. Up to 20,000 characters. |
-| `auto_merge_review_instructions` | none     | Extra rules added after the rubric for any policy, including `custom`, for example paths that always need a human. They can only make the review stricter. Set `""` in a `[[repos]]` entry to drop the workspace text for that repo. |
+| `auto_merge_review_instructions` | none     | Extra rules added after the rubric for any policy, including `custom`, for example paths that always need a human. They can only make the review stricter. Set `""` in a `[[repos]]` entry to drop the workspace text for that repo.        |
 
 `custom` needs exactly one of `auto_merge_rules` and `auto_merge_rules_file`, and those keys are rejected under any other policy. A `[[repos]]` entry that sets either key replaces the workspace's rules for that repo. Rules come only from `workspace.toml` or the file it names, never from the repository being reviewed. If the rules file is missing, empty, unreadable, or too long, the review does not run: the PR stays open, and the status comment names the problem.
 
@@ -179,17 +199,17 @@ Answer "safe": false for any change to billing/, payments/, or database migratio
 Tested changes elsewhere may merge. Documentation and test-only changes are safe.
 ```
 
-Changing the policy, the rules, the instructions, or the review paths re-checks PRs that were left open. A PR an earlier version left open for a diff over 150,000 characters is re-checked when new commits are pushed to it. All of these keys apply on reload, without a restart.
+Changing the policy, the rules, the instructions, or the review paths re-checks PRs that were left open. A PR an earlier version left open for a diff over 150,000 characters is re-checked when new commits are pushed to it (that hold ran no agent review). All of these keys apply on reload, without a restart.
 
-The worker explains each decision in one status comment on the PR, edited in place (an agent hold names the policy it ran under, such as `standard` or `custom: merge-rules.md`), and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
+The worker explains each decision in one status comment on the PR, edited in place (an agent hold names the policy it ran under, such as `standard` or `custom: merge-rules.md`), and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. A failed check does not count as the PR's one agent review. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately, except commits and PRs that already have a decision under the current policy.
 
-The GitHub credential needs `Pull requests: Read and write` and `Contents: Read and write`. To test the gates on one PR without merging:
+The GitHub credential needs the auto-merge permissions listed under [GitHub authentication](./configuration.md#github-authentication), including read access to `Commit statuses` (and `Checks` for a GitHub App). To test the gates on one PR without merging:
 
 ```bash
 devintern auto-merge <pr-url> --safe-path '**/*.md' --dry-run
 ```
 
-Other flags: `--deny-path` and `--review-path` (repeatable), `--no-review`, `--method`, `--policy <strict|standard|relaxed|custom>`, `--rules=<text>`, `--rules-file <path>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
+Other flags: `--deny-path` and `--review-path` (repeatable), `--no-review`, `--require-checks`, `--method`, `--policy <strict|standard|relaxed|custom>`, `--rules=<text>`, `--rules-file <path>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
 
 ## CI failures on the agent's PRs
 

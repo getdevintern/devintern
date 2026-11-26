@@ -17,6 +17,12 @@ If `devintern worker init` was interrupted (Ctrl+C or Ctrl+D), run it again. It 
 
 If `worker doctor` reports `Markdown tasks directory not found: ./tasks`, the folder was saved as a relative path by an older version. Set `MARKDOWN_TASKS_DIR` in `~/.devintern/.env` to the folder's absolute path.
 
+If `worker doctor` reports `Agent harness — <harness>: AGENT_CLI_PATH=<path> (set in <file>) does not exist` (or `is not executable`), the agent CLI path in that file is wrong. Fix it there, or remove the line to use the CLI on your `PATH`. Doctor checks the same files a worker task reads: `~/.devintern/.env`, then the repository's `env_file` (for example `~/.devintern/env/<repo>.env`) and `[repos.env]`, then, for tasks a team picks up, that team's `env_file` and `[teams.env]`, with later ones winning. A problem that only affects one team's tasks is reported as `repo "<repo>" (team "<team>")`.
+
+If it warns `worker failover: Harness "<harness>" is not installed`, the worker skips that `AGENT_HARNESS` entry. The worker chooses its failover entries using `~/.devintern/.env` only, so set that harness's `<HARNESS>_CLI_PATH` there, not in a repository `env_file` or `[repos.env]`.
+
+If it warns `<harness>: after failover the task runs AGENT_CLI_PATH=<path>`, worker tasks that fail over to that harness would start the primary's CLI. Replace `AGENT_CLI_PATH` with the primary harness's own path key (for example `CLAUDE_CODE_CLI_PATH`).
+
 ## The service keeps failing
 
 Run `devintern worker service status`. It shows the service state and, when the last start failed, the reason the worker printed.
@@ -31,6 +37,19 @@ Run `devintern worker service status`. It shows the service state and, when the 
 Startup failures are written to `worker.stderr.log` in the workspace home, so `devintern worker logs` and the dashboard show them too. Output from before the worker could log at all (for example a missing Bun runtime) is only in the service manager's log: `devintern worker service logs`.
 
 If `worker service install` says the worker would not start, it did not install anything. Fix the checks it lists and run it again. `--force` installs anyway, and the service then fails until the checks pass.
+
+## The agent CLI fails to start
+
+When the agent CLI exits right away without output (an invalid API key, a missing login, a broken install), the worker does not count it as a task attempt. It retries the task with growing waits (1, 2, 4, 8 minutes, up to 30). After 5 failed starts in a row, the task's run is marked `failed`, and you get a notification. The service still says `running` during all this, so check:
+
+- `devintern worker status`, `devintern worker service status`, and `devintern worker queue` list each affected task under `Agent start` with the agent's error and a fix, for example `Fix: run claude once in a terminal to log in, or check ANTHROPIC_API_KEY`.
+- `devintern worker logs --level error` has the full message.
+
+Fix the agent as the user the worker runs as (log in, or set the API key in `~/.devintern/.env`). Then retry any task that gave up: use the dashboard's Retry, update the ticket, or run `devintern worker add --resume <task>` for an ad-hoc task. To try again right away instead of waiting out the backoff, run `devintern worker service restart`.
+
+| Setting                             | Default | Meaning                                                           |
+| ----------------------------------- | ------- | ----------------------------------------------------------------- |
+| `DEVINTERN_AGENT_START_MAX_ATTEMPTS` | `5`     | Failed starts in a row before a task is marked `failed`           |
 
 ## The worker stops when you log out
 

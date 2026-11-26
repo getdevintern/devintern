@@ -870,6 +870,8 @@ describe("default repository access check", () => {
   } as Parameters<ReturnType<typeof createDefaultRepoAccessCheck>>[0];
   const env = { GITHUB_TOKEN: "fake-token" };
   const apiOk = async () => new Response("{}", { status: 200 });
+  // Never the real dry-run push: it would reach github.com with a fake token.
+  const pushOk = async () => ({ status: "ok" as const });
 
   const gitRefused = async () => ({
     ok: false as const,
@@ -880,6 +882,7 @@ describe("default repository access check", () => {
     const check = createDefaultRepoAccessCheck(1_000, {
       fetch: apiOk,
       lsRemote: gitRefused,
+      pushDryRun: pushOk,
       hasHelper: () => false,
     });
     const result = await check(repo, env);
@@ -898,6 +901,7 @@ describe("default repository access check", () => {
     const check = createDefaultRepoAccessCheck(1_000, {
       fetch: apiOk,
       lsRemote: gitRefused,
+      pushDryRun: pushOk,
       hasHelper: () => true,
     });
     const result = await check(repo, env);
@@ -906,7 +910,7 @@ describe("default repository access check", () => {
     expect(result.reason).toContain("takes precedence over GITHUB_TOKEN");
   });
 
-  test("passes when both the API and git can read the repository", async () => {
+  test("passes when the API and git can read the repository and a dry-run push is accepted", async () => {
     const remotes: string[] = [];
     const check = createDefaultRepoAccessCheck(1_000, {
       fetch: apiOk,
@@ -914,14 +918,66 @@ describe("default repository access check", () => {
         remotes.push(remote);
         return { ok: true, detail: "remote reachable" };
       },
+      pushDryRun: async (remote) => {
+        remotes.push(`push ${remote}`);
+        return { status: "ok" };
+      },
     });
-    expect(await check(repo, env)).toEqual({ ok: true, detail: "GitHub acme/backend readable" });
-    expect(remotes).toEqual([repo.remote]);
+    expect(await check(repo, env)).toEqual({
+      ok: true,
+      detail: "GitHub acme/backend readable and writable (push verified)",
+    });
+    expect(remotes.sort()).toEqual([repo.remote, `push ${repo.remote}`]);
+  });
+
+  test("a token that can read but not push fails with the fix", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: async () => ({ ok: true, detail: "remote reachable" }),
+      pushDryRun: async () => ({
+        status: "denied",
+        reason: "remote: Permission to acme/backend.git denied to someone.",
+      }),
+    });
+    const result = await check(repo, env);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain(
+      "GITHUB_TOKEN can read acme/backend but cannot push branches or open pull requests",
+    );
+    expect(result.reason).toContain("Permission to acme/backend.git denied");
+  });
+
+  test("the API's permissions.push=false fails even when the dry run is inconclusive", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: async () =>
+        new Response(JSON.stringify({ permissions: { pull: true, push: false } }), {
+          status: 200,
+        }),
+      lsRemote: async () => ({ ok: true, detail: "remote reachable" }),
+      pushDryRun: async () => ({ status: "unknown", reason: "timed out after 1s" }),
+    });
+    const result = await check(repo, env);
+    expect(result).toMatchObject({ ok: false });
+  });
+
+  test("an inconclusive dry run with push permission passes and says so", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: async () =>
+        new Response(JSON.stringify({ permissions: { push: true } }), { status: 200 }),
+      lsRemote: async () => ({ ok: true, detail: "remote reachable" }),
+      pushDryRun: async () => ({ status: "unknown", reason: "timed out after 1s" }),
+    });
+    expect(await check(repo, env)).toEqual({
+      ok: true,
+      detail: "GitHub acme/backend readable; push not verified (timed out after 1s)",
+    });
   });
 
   test("an API rejection is reported before the git result", async () => {
     const check = createDefaultRepoAccessCheck(1_000, {
       fetch: async () => new Response("{}", { status: 404 }),
+      pushDryRun: pushOk,
       lsRemote: async () => ({ ok: true, detail: "remote reachable" }),
     });
     expect(await check(repo, env)).toEqual({

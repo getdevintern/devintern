@@ -279,7 +279,7 @@ describe.concurrent("CLI Argument Handling", () => {
 
   test("should handle init command", async () => {
     const result = await runCLI(["init"]);
-    expect(result.stdout).toContain("Initializing @devintern/code");
+    expect(result.stdout).toContain("Initializing @getdevintern/code");
     expect(result.exitCode).toBe(0);
   });
 
@@ -639,7 +639,7 @@ describe.concurrent("CLI Init Command", () => {
   test("init should not be treated as a task key", async () => {
     const result = await runCLI(["init"]);
     expect(result.stdout).not.toContain("Fetching JIRA task: init");
-    expect(result.stdout).toContain("Initializing @devintern/code");
+    expect(result.stdout).toContain("Initializing @getdevintern/code");
     expect(result.exitCode).toBe(0);
   });
 

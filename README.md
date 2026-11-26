@@ -74,20 +74,27 @@ Interactive runs are free with no signup. Unattended automation starts with a 14
 
 ## Set up your worker
 
-Start in a Git repository on the machine that will run the worker. You need [Bun](https://bun.sh), an installed and authenticated coding agent, and access to your tracker and source-control host.
+Start in a Git repository on the machine that will run the worker. You need access to your tracker and source-control host. First install [Bun](https://bun.sh) (on Debian and Ubuntu, `sudo apt-get install -y unzip` first):
 
 ```bash
-# Install Bun if needed
 curl -fsSL https://bun.sh/install | bash
-bun install -g @getdevintern/code
-
-# Guided setup: connect your tracker, choose ready tickets, activate automation
-devintern worker init
-# If the wizard did not start a service, start manually:
-# devintern worker
+exec $SHELL -l   # new shell, so bun is on your PATH
 ```
 
-The wizard configures your ready-tasks query and operating policy, checks automation access, and offers to install and start a background service. Without a paid license, it offers sign-in for the 14-day Worker Pilot.
+Then install DevIntern and a coding agent, and run the guided setup:
+
+```bash
+bun install -g @getdevintern/code
+bun install -g @anthropic-ai/claude-code   # or Codex, Cursor, OpenCode
+claude                                      # sign the agent in once
+
+# Connect your tracker, choose ready tickets, install the background service
+devintern worker init
+# If you skipped the service step:
+# devintern worker service install
+```
+
+The wizard configures your ready-tasks query and operating policy, checks automation access, and installs the worker as a background service. Without a paid license, it offers sign-in for the 14-day Worker Pilot. You don't need to run `devintern init` first. The [quick start](docs/code/quick-start.md) walks through each step.
 
 Start with a narrow queue of well-specified tasks. Watch the runs in the local dashboard at `http://localhost:4400`, review the resulting PRs, and leave feedback on their branches. The worker picks up that feedback and pushes follow-up commits.
 
@@ -227,7 +234,7 @@ The skills are instructions for your agent. They do not install the CLI, connect
 Source is under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE.md) (FSL-1.1-ALv2). You can read it, audit it, self-build, and self-host. Each release converts to Apache-2.0 two years after publication.
 
 - **Interactive use** → free forever
-- **Worker Pilot** → 14 days with no task-count limit, no card required; `devintern login` required
+- **Worker Pilot** → 14 days with no task-count limit, no card required; sign-in with `devintern worker login` required
 - **Worker (unattended)** → Supporter ($99 once for one person's own repos and freelance client work, not an employer's repos) or a Team/Business subscription
 
 Details: [devintern.com/pricing](https://devintern.com/pricing/)

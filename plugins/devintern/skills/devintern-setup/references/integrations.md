@@ -16,13 +16,13 @@ For other code hosts, consult [configuration](https://devintern.com/docs/code/co
 
 ## Configure the task source
 
-Choose the tracker independently from the code host. Configure API access, the intended project/board/repository, a narrow query, and workflow states. Credential presence is not authentication: verify with a read-only API call in the intended scope. Inspect actual statuses/lists/labels before mapping them in the repository's `.devintern-code/settings.json`; do not guess names from another tracker. Browser-created workflow labels or provider settings should be limited to the requested integration.
+Choose the tracker independently from the code host. Configure API access, the intended project/board/repository, a narrow query, and workflow states. Credential presence is not authentication: verify with a read-only API call in the intended scope. Inspect actual statuses/lists/labels before mapping them under `[trackers]` in `workspace.toml` (for example `[trackers.github.projects."owner/repo"]` with `in_progress_status`, `pr_status`, `todo_status`; see the provider guide). The legacy `.devintern-code/settings.json` is only migrated from, never written. Do not guess names from another tracker. Browser-created workflow labels or provider settings should be limited to the requested integration.
 
 | Source | Configuration and provider guide |
 | --- | --- |
 | Jira Cloud | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`; JQL and project-key status mappings. [Jira](https://devintern.com/docs/code/jira-integration). Do not assume Data Center support. |
 | Linear | `LINEAR_API_KEY`; team and workflow states; structured queries use JSON `IssueFilter`. [Linear](https://devintern.com/docs/code/linear-integration). |
-| GitHub Issues | `GITHUB_TOKEN`, `GITHUB_REPO=owner/repo`; issue queries, existing status labels, and `GITHUB_STATUS_LABELS`. The App cannot substitute for the token. [GitHub Issues](https://devintern.com/docs/code/github-issues-integration). |
+| GitHub Issues | `GITHUB_TOKEN`, `GITHUB_REPO=owner/repo`; issue search queries (`is:open label:<label>`), existing status labels mapped under `[trackers.github.projects."owner/repo"]`, and `GITHUB_STATUS_LABELS`. Token: fine-grained limited to the repo with Contents, Pull requests, Issues Read and write and Metadata Read, or classic `repo`. The App cannot substitute for the token. [GitHub Issues](https://devintern.com/docs/code/github-issues-integration). |
 | GitLab Issues | `GITLAB_TOKEN`, `GITLAB_PROJECT`, optional `GITLAB_BASE_URL`; project-scoped issue queries, existing labels, and `GITLAB_STATUS_LABELS`. [GitLab](https://devintern.com/docs/code/gitlab-integration). |
 | Azure DevOps | `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_PROJECT`; Work Items read/write and WIQL queries. [Azure DevOps](https://devintern.com/docs/code/azure-devops-integration). |
 | Asana | `ASANA_API_TOKEN`, project selection such as `ASANA_DEFAULT_PROJECT_GID`, and project section mappings. [Asana](https://devintern.com/docs/code/asana-integration). |
@@ -45,13 +45,15 @@ Check `devintern worker connect --help`. Commands support `--workspace /path/to/
 | `devintern worker connect jira` | Prints a private ingest URL and Jira admin webhook instructions; it does not configure or validate Jira API access. |
 | `devintern worker connect status` | Reports relay state and workspace repositories awaiting verification. |
 
+Each worker workspace has its own relay identity, and each repository, GitLab project, or tracker team registration is served by one worker of the account. When `worker connect` fails with `code` `registration_owned_by_other_worker`, another worker already serves it: report the `conflicts` entries (`ownerLabel`, `lastSeenAt`) to the user and ask before rerunning with `--takeover`, which moves its events to this worker. Never pass `--takeover` by default. A worker silent for 7 days loses its registrations automatically.
+
 When multiple teams use the same tracker, select `--team <name>` explicitly; with exactly one matching team the CLI can infer it. `--team` is not valid for GitHub/GitLab code-host pairing or status. GitHub Issues has no separate tracker connect step: distinguish its token/query setup from GitHub App pairing. Tracker registration does not replace local API credentials. Jira/Trello/Azure private ingest URLs act as authentication material; keep them out of committed files and summaries.
 
 `devintern worker connect sentry --repo <registered-name>` (or `--org`/`--project`/`--env-file` flags without a terminal) is a separate, directly polled error-monitor setup, not relay pairing. Use the [Sentry guide](https://devintern.com/docs/code/sentry-integration) for the auth token, organization/project, and validation. A Sentry DSN cannot substitute for the polling token.
 
 ## Browser-assisted completion
 
-Use CLI/API operations for deterministic setup and available browser tooling for the provider-only steps: GitHub App repository selection/authorization, Jira admin webhook configuration, or token settings when no suitable credential exists. Follow the URL emitted by the selected CLI flow rather than constructing a callback URL. On a remote worker, keep that CLI flow running while authorization completes in the user's browser.
+Use CLI/API operations for deterministic setup and available browser tooling for the provider-only steps: GitHub App repository selection/authorization, Jira admin webhook configuration, or token settings when no suitable credential exists. Follow the URL emitted by the selected CLI flow rather than constructing a callback URL. On a remote worker, either keep that CLI flow running while authorization completes in the user's browser, or, without a terminal, use the split flows (`worker login <method> --no-wait --json` then `--complete`; `worker connect github --no-wait --json` then `--status --json`).
 
 Use available browser-use, Chrome CDP, or equivalent tools to carry provider setup through to verified completion: inspect the page, navigate to the requested integration, select the intended repositories or project, fill non-secret settings, and complete authorized provider changes. Reuse an existing authorized browser session when available. Do not assume a CDP port or launch Chrome with remote debugging merely because this skill mentions it; use the browser connection provided by the environment. No specific browser package is a prerequisite for DevIntern setup.
 

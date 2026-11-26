@@ -65,6 +65,8 @@ export interface PendingSignIn {
   expiresAt: string;
   /** Command that finishes the sign-in on this host. */
   complete: string;
+  /** True when this is the sign-in already waiting (same address), not a new one. */
+  reused?: boolean;
 }
 
 /**
@@ -83,6 +85,7 @@ export function pendingSignInSummary(
     method: started.method,
     expiresAt: started.expiresAt,
     complete: `${commandName} --complete '<address>'`,
+    ...(started.reused ? { reused: true } : {}),
   };
 }
 
@@ -98,6 +101,9 @@ export function renderPendingSignIn(signIn: PendingSignIn, email?: string): stri
     ? ["Open this address in a browser on any machine and sign in:", `  ${signIn.url}`]
     : [`Sign-in link sent to ${email ?? "your inbox"}. Open it in a browser on any machine.`];
   return [
+    ...(signIn.reused
+      ? ["A sign-in started earlier is still waiting; this is the same address, still valid.", ""]
+      : []),
     ...first,
     "",
     "The browser then lands on a 127.0.0.1 page that does not load. That is expected.",

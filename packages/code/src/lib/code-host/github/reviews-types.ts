@@ -62,6 +62,16 @@ export interface CombinedStatus {
   }>;
 }
 
+/** One check run from `GET /commits/{ref}/check-runs` (Checks API). */
+export interface CheckRun {
+  id: number;
+  name: string;
+  /** `queued`, `in_progress`, `completed`, `waiting`, `requested`, `pending`. */
+  status: string;
+  /** Set once `completed`: `success`, `failure`, `neutral`, `skipped`, ... */
+  conclusion: string | null;
+}
+
 export interface ActionJob {
   id: number;
   name: string;

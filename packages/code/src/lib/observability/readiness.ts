@@ -22,6 +22,8 @@ import type { HarnessEntryReadiness } from "@devintern/agent-harness";
 import type { SupabaseAuthConfig } from "@devintern/auth";
 import { harnessModelEnvKey, resolveAgentModel } from "../agent/model";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
+import { signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
+import { resolveWorkspaceDir, workspaceConfigPath } from "../workspace/paths";
 import { defaultCatalogDir, validateCatalog } from "../automation/catalog";
 
 /**
@@ -55,6 +57,11 @@ export interface ReadinessLicenseLike {
   message: string;
 }
 
+/** `devintern worker login github`, with `--workspace` for a non-default workspace. */
+function defaultSignInCommand(): string {
+  return signInCommand(workerLoginCommandFor(workspaceConfigPath(resolveWorkspaceDir())));
+}
+
 export interface ReadinessDeps {
   /**
    * Environment snapshot to evaluate tracker credentials against.
@@ -70,6 +77,11 @@ export interface ReadinessDeps {
   supabaseConfig?: SupabaseAuthConfig;
   getUser?: (config: SupabaseAuthConfig) => Promise<ReadinessUserLike | null>;
   getLicense?: (config: SupabaseAuthConfig) => Promise<ReadinessLicenseLike>;
+  /**
+   * Sign-in command named in the hint. Defaults to `devintern worker login
+   * github` for the workspace the session lives in.
+   */
+  loginCommand?: string;
   /** Overrides git detection; returns the version string or null. */
   gitVersion?: () => string | null;
   /** Overrides Bun runtime detection; defaults to `process.versions.bun`. */
@@ -163,7 +175,7 @@ function describeEntryModel(name: string, parsed: readonly string[]): string {
  * loaded, so the whole probe must see that snapshot, not a mix of the two.
  * A no-op when `env` is `process.env` itself.
  */
-async function withEnvOverlay<T>(
+export async function withEnvOverlay<T>(
   env: Record<string, string | undefined>,
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -564,7 +576,7 @@ export async function collectReadinessChecks(deps: ReadinessDeps = {}): Promise<
         id: "auth",
         label: "DevIntern sign-in",
         status: "warn",
-        hint: "Run 'devintern login' — required for worker connect and license entitlements",
+        hint: `Run \`${deps.loginCommand ?? defaultSignInCommand()}\` — required for worker connect and license entitlements`,
       });
     } else {
       checks.push({

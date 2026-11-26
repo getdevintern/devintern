@@ -9,8 +9,8 @@ import { join, resolve } from "path";
 /** Sign-in command for the worker workspace. */
 export const WORKER_LOGIN_COMMAND = "devintern worker login";
 
-/** Quote a path for a POSIX shell when it needs it. */
-function shellQuote(value: string): string {
+/** Quote a value for a POSIX shell when it needs it. */
+export function shellQuote(value: string): string {
   return /^[\w./@:+-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
 }
 
@@ -27,6 +27,24 @@ export function workerLoginCommandFor(configPath: string, home: string = homedir
   const absolute = resolve(configPath);
   if (absolute === join(home, ".devintern", "workspace.toml")) return WORKER_LOGIN_COMMAND;
   return `${WORKER_LOGIN_COMMAND} --workspace ${shellQuote(absolute)}`;
+}
+
+/**
+ * ` --workspace <path>` for worker commands that take it (`login`, `connect`,
+ * `doctor`), or empty for the default `~/.devintern/workspace.toml`.
+ */
+export function workspaceFlagFor(configPath: string, home: string = homedir()): string {
+  return workerLoginCommandFor(configPath, home).slice(WORKER_LOGIN_COMMAND.length);
+}
+
+/**
+ * `DEVINTERN_WORKSPACE_DIR=<dir> ` for commands without `--workspace`
+ * (`worker service`, `worker init`), or empty for the default `~/.devintern`.
+ */
+export function workspaceEnvPrefixFor(workspaceDir: string, home: string = homedir()): string {
+  const absolute = resolve(workspaceDir);
+  if (absolute === join(home, ".devintern")) return "";
+  return `DEVINTERN_WORKSPACE_DIR=${shellQuote(absolute)} `;
 }
 
 /** What signing in gets you. */

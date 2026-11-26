@@ -186,7 +186,7 @@ describe("collectReadinessChecks", () => {
     });
     const auth = signedOut.find((c) => c.id === "auth");
     expect(auth?.status).toBe("warn");
-    expect(auth?.hint).toContain("devintern login");
+    expect(auth?.hint).toMatch(/`devintern worker login( --workspace \S+)? github`/);
     expect(signedOut.some((c) => c.id === "license")).toBe(false);
 
     const licensed = await collectReadinessChecks({

@@ -9,7 +9,7 @@ dateModified: 2026-11-26
 
 # DevIntern Code Configuration
 
-DevIntern Code keeps its settings in `~/.devintern`, outside your repositories. `devintern init` registers the current repository in `~/.devintern/workspace.toml` (as a `manual_only` repo, which the [worker](./worker.md) skips) and writes its settings to `~/.devintern/env/<repo>.env`. Each repository has its own file, so several projects can use different trackers and credentials. A repository without a GitHub, GitLab, or Bitbucket `origin` (for example a fresh `git init`) is registered by its directory instead.
+DevIntern Code keeps its settings in `~/.devintern`, outside your repositories. `devintern init` registers the current repository in `~/.devintern/workspace.toml` (as a `manual_only` repo, which the [worker](./worker.md) skips) and writes its settings to `~/.devintern/env/<repo>.env`. To let the worker run tasks there too, run `devintern worker init` or `devintern worker add-repo` in the checkout: either one turns the manual-only entry into a worker repository. Each repository has its own file, so several projects can use different trackers and credentials. A repository without a GitHub, GitLab, or Bitbucket `origin` (for example a fresh `git init`) is registered by its directory instead.
 
 In a terminal, the wizard asks which tracker you use, links to the provider's token page, checks the credentials, and writes the file. With `--yes` (or `--no-interactive`), or when stdin is not a terminal, it writes a commented template for you to fill in instead. Run `devintern init` again in the repository to update the file.
 
@@ -59,7 +59,7 @@ Status transitions and story-point fields go in `[trackers]` in `workspace.toml`
 
 ## GitHub authentication
 
-Set `GITHUB_TOKEN` for CLI runs and for workspace automation. A workspace paired with the hosted [relay](./relay.md) receives events through the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new); the token stays on your machine and you don't create a GitHub App yourself. Unattended runs also need a `LICENSE_KEY` ([pricing](https://devintern.com/pricing/)).
+Set `GITHUB_TOKEN` for CLI runs and for workspace automation. A workspace paired with the hosted [relay](./relay.md) receives events through the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new); the token stays on your machine and you don't create a GitHub App yourself. Unattended runs also need the [Worker Pilot](./worker.md#worker-pilot-and-licenses) or a `LICENSE_KEY` ([pricing](https://devintern.com/pricing/)).
 
 | What you want                                                                     | Need                                                   |
 | --------------------------------------------------------------------------------- | ------------------------------------------------------ |
@@ -69,7 +69,14 @@ Set `GITHUB_TOKEN` for CLI runs and for workspace automation. A workspace paired
 | `@devintern-ai` on any PR                                                         | `GITHUB_TOKEN` + relay + DevIntern AI App installation |
 | Air-gapped mentions, `devintern webhook serve`, or custom `slug[bot]` attribution | Customer-owned GitHub App (below)                      |
 
-**Token permissions.** A classic token needs the `repo` scope. A fine-grained token (recommended) needs `Contents: Read and write` and `Pull requests: Read and write`. Add `Actions: Read` and `Commit statuses: Read` when `[workspace].ci_failure_fix = true`, and `Issues: Read and write` when `TASK_TRACKER=github`. Create tokens at [github.com/settings/tokens](https://github.com/settings/tokens).
+**Token permissions.** Use either kind of personal access token:
+
+| Token                      | Create it at                                                                                  | Grant                                                                                                                                                  |
+| -------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Fine-grained (recommended) | [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) | **Repository access:** only the repositories the worker uses. **Repository permissions:** Contents, Pull requests, and Issues set to Read and write; Metadata Read (added automatically) |
+| Classic                    | [github.com/settings/tokens/new?scopes=repo](https://github.com/settings/tokens/new?scopes=repo&description=devintern) | The `repo` scope                                                                                                                                       |
+
+Issues lets the worker read, label, and comment on issues when GitHub Issues is your tracker (`TASK_TRACKER=github`). Add Commit statuses set to Read when `[workspace].auto_merge = true` (auto-merge reads every PR's CI checks, including PRs that only touch safe paths) or `ci_failure_fix = true`, and Actions set to Read too when `ci_failure_fix = true`. Without Commit statuses Read on a private repository, auto-merge never merges and CI fixes never start. Fine-grained tokens can't be granted Checks and don't need it; status comments then report check runs by count instead of by name, while a GitHub App or a classic token can read their names. `devintern worker doctor` reports a missing permission in its **CI status access** row, and the worker warns at startup. A fine-grained token for an organization's repositories may need approval by an organization owner before it works; set **Resource owner** to that organization.
 
 > `Contents` must be **Read and write**. With read-only Contents, task fetching and PR reads work but `git push` fails with `403`. For `https://github.com` remotes, clones, fetches, and pushes use `GITHUB_TOKEN` when git has no credential helper of its own; the token is passed to git in memory, never written to `.git/config` or a remote URL. A configured helper (for example `gh auth setup-git` or a keychain) is used instead, and `gh` itself serves an exported `GITHUB_TOKEN` ahead of its keyring login. SSH remotes use your SSH keys. The worker test-pushes each GitHub HTTPS remote at startup and warns if the push is rejected.
 
@@ -85,7 +92,7 @@ GITHUB_APP_PRIVATE_KEY_PATH=/secure/path/to/your-app.private-key.pem
 # or, for CI: GITHUB_APP_PRIVATE_KEY_BASE64=$(base64 -w 0 your-app.private-key.pem)
 ```
 
-You need both the ID and a private key. An ID on its own does nothing. Create the App under **Settings → Developer settings → GitHub Apps** with repository permissions **Contents**, **Pull requests**, and **Issues** set to Read and write, plus **Actions** and **Commit statuses** set to Read if automatic CI fixes are on. Generate a private key and install the App on your repositories. The webhook server needs more permissions; see [GitHub Webhooks and PR Automation](./github-integration.md#update-app-permissions).
+You need both the ID and a private key. An ID on its own does nothing. Create the App under **Settings → Developer settings → GitHub Apps** with repository permissions **Contents**, **Pull requests**, and **Issues** set to Read and write, plus **Commit statuses** and **Checks** set to Read if auto-merge or automatic CI fixes are on, and **Actions** set to Read for CI fixes. Generate a private key and install the App on your repositories. The webhook server needs more permissions; see [GitHub Webhooks and PR Automation](./github-integration.md#update-app-permissions).
 
 When both a token and an App are configured, relay workspaces use only `GITHUB_TOKEN`, no-relay workspaces and `devintern webhook serve` prefer the App, and the CLI prefers `GITHUB_TOKEN` when it creates PRs.
 

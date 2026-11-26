@@ -9,11 +9,17 @@ import { join } from "path";
 
 import { loadPendingGitHubPairing } from "../relay/github-pairing";
 import {
+  describeRegistrationRef,
+  describeWorkerConflicts,
+  takeoverCommand,
+} from "../relay/worker-identity";
+import {
   hasGitHubRelayRegistration,
   loadRelayState,
   relayConfigDir,
   verifiedGitHubRelayRepositories,
 } from "../relay/state";
+import type { RelayWorkerIdentity } from "../relay/state";
 import { gitHubSlugFromRemote } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import type { ReadinessCheck } from "./readiness";
@@ -81,6 +87,17 @@ function inspectRelay(workspaceDir: string, config: WorkspaceConfig | undefined)
   }
 
   const paired = verifiedGitHubRelayRepositories(state);
+  const conflicts = state.worker?.conflicts ?? [];
+  if (state.worker && conflicts.length > 0) {
+    return {
+      ...BASE,
+      status: "warn",
+      detail: `worker ${state.worker.label}: ${describeWorkerConflicts(conflicts)
+        .map((line) => line.replace(/; this worker does not receive.*$/, ""))
+        .join("; ")} (this worker receives none of their events)`,
+      hint: `Stop the other worker, or move them here: ${takeoverCommand(conflicts[0]!)}`,
+    };
+  }
   const uncovered = relayExpectedRepos(config).filter(
     (repo) => !hasGitHubRelayRegistration(state, repo),
   );
@@ -95,6 +112,13 @@ function inspectRelay(workspaceDir: string, config: WorkspaceConfig | undefined)
   return {
     ...BASE,
     status: "ok",
-    detail: `paired, ${paired.length} GitHub ${paired.length === 1 ? "repository" : "repositories"} (${state.relayUrl})`,
+    detail: `paired, ${paired.length} GitHub ${paired.length === 1 ? "repository" : "repositories"} (${state.relayUrl})${workerSummary(state.worker)}`,
   };
+}
+
+/** `; worker <label>, owns a, b` for a registered relay worker identity. */
+function workerSummary(worker: RelayWorkerIdentity | undefined): string {
+  if (!worker) return "";
+  const owned = worker.owned ?? [];
+  return `; worker ${worker.label}, owns ${owned.length === 0 ? "nothing yet" : owned.map(describeRegistrationRef).join(", ")}`;
 }

@@ -485,6 +485,42 @@ describe("usage limit without a reset time", () => {
   });
 });
 
+describe("harness start failures", () => {
+  const MINUTE = 60_000;
+
+  test("doubles the cooldown per consecutive start failure, caps it, and resets on success", () => {
+    let now = Date.now();
+    const logs: string[] = [];
+    const failover = new WorkerFailover({
+      checkInstalled: false,
+      raw: "opencode",
+      log: (message) => logs.push(message),
+      now: () => now,
+    });
+    const cooldown = () => {
+      const outcome = failover.reportStartFailure();
+      if (outcome.kind !== "exhausted") throw new Error(`expected exhausted, got ${outcome.kind}`);
+      return outcome.untilMs - now;
+    };
+    try {
+      const cooldowns = [1, 2, 3, 4, 5, 6, 7].map(cooldown);
+      expect(cooldowns).toEqual([1, 2, 4, 8, 16, 30, 30].map((minutes) => minutes * MINUTE));
+      expect(failover.allExhausted()).toBe(true);
+      expect(logs).toContain(
+        "🛠️  opencode failed to start 7 times in a row; not trying it again for 30m.",
+      );
+
+      // A run that started the agent resets the streak: once the open
+      // cooldown is over, the next failure waits one minute again.
+      failover.recordSuccess();
+      now += 31 * MINUTE;
+      expect(cooldown()).toBe(MINUTE);
+    } finally {
+      failover.stop();
+    }
+  });
+});
+
 describe("startWorkerFailover restore", () => {
   let dir: string | null = null;
   afterEach(() => {

@@ -294,8 +294,19 @@ describe("devintern worker read-only dashboard commands", () => {
           stderr: "",
           code: 0,
         });
+        const body = wire(handler()) as Record<string, unknown>;
+        // `status` adds the setup-document envelope around the handler body.
+        const expected =
+          command === "status"
+            ? {
+                schema: "devintern.worker-status",
+                version: 1,
+                result: (body.worker as { status: string }).status,
+                ...body,
+              }
+            : body;
         expect(withoutLiveBusyTime(JSON.parse(result.stdout))).toEqual(
-          withoutLiveBusyTime(wire(handler())),
+          withoutLiveBusyTime(expected),
         );
       }
 
@@ -307,7 +318,12 @@ describe("devintern worker read-only dashboard commands", () => {
         string,
         unknown
       >;
-      expect(cliOverview).toEqual(apiOverview);
+      expect(cliOverview).toEqual({
+        schema: "devintern.worker-overview",
+        version: 1,
+        result: (apiOverview.worker as { status: string }).status,
+        ...apiOverview,
+      });
     } finally {
       setSystemTime();
       data.close();
