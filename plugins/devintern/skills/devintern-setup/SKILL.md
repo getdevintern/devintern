@@ -16,7 +16,7 @@ Read [Integrations](references/integrations.md) when configuring source control,
 - **No prompts.** Run every command with `--non-interactive`, `--json`, or `--no-wait` as given below. Never pipe guessed answers into `devintern worker init` (without `--non-interactive`) or `devintern init`, never drive them through a pseudo-terminal, and never run a command that waits for a browser: bare `devintern worker login <method>`, bare `devintern worker connect`, or foreground `devintern worker`.
 - **Secrets stay out of chat and flags.** Credentials go in an owner-only env file the user writes on the worker host; report only presence and validation results. Never print `.env`, session, or relay files. The one exception is the sign-in callback address in step 4.
 - **Reuse and preserve.** Keep working configuration, authentication, repository and team names, delivery choices, and file permissions. The default workspace is `~/.devintern/workspace.toml`; honor `DEVINTERN_WORKSPACE_DIR` and pass `--workspace <path>` for a nondefault one.
-- **Read JSON, not prose.** Each `--json` command prints one document on stdout. Treat an unknown `result` value as not ready. Every failure has a `code`; branch on it, not on `error` text. Each `nextSteps[]` entry is `{id, message, command, url?}`, and `command` runs as given without a terminal; when `url` is set, a person opens it in a browser.
+- **Read JSON, not prose.** Each `--json` command prints one document on stdout. Treat an unknown `result` value as not ready. Every failure has a `code`; branch on it, not on `error` text. Each `nextSteps[]` entry is `{id, message, command, url?}`, and `command` runs without a terminal once its placeholders are filled: `<path>` is the env file from step 2, `'<query>'` the query from step 0.3, and `'<address>'` the address from step 4.3. Never run a command that still contains `<…>`. The `sign-in` command always names `github`: swap in the method from step 0.5 (step 4.1). A command with `--yes` needs the user's confirmation first when the workspace existed before this session (see Re-runs). When `url` is set, a person opens it in a browser.
 - **Trial runs need consent.** A task run edits files, moves tickets, posts comments, and opens PRs. Do not run `devintern --query` as a connection test.
 
 ## Runbook
@@ -76,7 +76,7 @@ Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 | Field | Meaning |
 | --- | --- |
 | `result` | `success` (exit 0, ready), `unchanged` (exit 0, the workspace already had exactly this setup), `action_required` (exit 2, saved and nothing broken; only sign-in is left), `failure` (exit 1). `action_required` is not a broken setup |
-| `code` | Set on every failure, for example `missing_input`, `invalid_query`, `workspace_exists`, `credentials_rejected`, `query_rejected`, `repo_access_denied`, `agent_missing` |
+| `code` | Set on every failure, for example `missing_input`, `env_file_unreadable`, `invalid_query`, `workspace_exists`, `credentials_rejected`, `query_rejected`, `repo_access_denied`, `agent_missing` |
 | `error` | Input problem; with `missing_input`, `missing[]` names every missing flag and variable |
 | `checks[]` | `name`, `label`, `status` (`pass`, `warn`, `action`, `fail`, `skipped`), `message`, `hint`. A `query` warn with 0 matches is fine when nothing is labelled yet |
 | `signIn` | `url`, `method`, `expiresAt`, `complete`, `reused`; present when `--sign-in` started a sign-in (step 4) |
@@ -87,10 +87,10 @@ Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 | Next-step id | Where | What it is |
 | --- | --- | --- |
 | `complete-sign-in` | init | Finish the sign-in that `--sign-in` started (step 4) |
-| `sign-in` | init, doctor | Start a sign-in with `worker login ... --no-wait --json` (step 4) |
+| `sign-in` | init, doctor | Start a sign-in with `worker login github --no-wait --json`; replace `github` with the method from step 0.5 before running it (step 4) |
 | `install-agent` | init, doctor | The agent CLI is missing; install it (step 1.4), sign it in, then run the doctor command it names |
-| `fix-credentials` | init, doctor | Tracker or code-host credentials were rejected; the user corrects the env file and you re-run setup |
-| `fix-query` | init, doctor | The tracker rejected the query, or it is in the wrong language; re-run setup with `--task-query` |
+| `fix-credentials` | init, doctor | Tracker or code-host credentials were rejected; the user corrects the env file and you run `command` with `<path>` replaced by that file |
+| `fix-query` | init, doctor | The tracker rejected the query, or it is in the wrong language; agree a new query with the user and run `command` with it in place of `<query>` |
 | `fix-repo-access` | init, doctor | The token cannot reach or push to the repository; `message` names the permissions to grant, `url` the token settings |
 | `fix-sandbox` | init, doctor | The sandbox is not set up; `devintern sandbox` shows how |
 | `fix-entitlement` | init, doctor | No Worker Pilot or license applies; tell the user, and never buy a license yourself |
@@ -102,11 +102,11 @@ Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 
 `service` and `connect` are withheld while a check fails.
 
-**Re-runs.** Rerunning with identical flags is safe: it returns `unchanged`. Different flags on an existing workspace return `failure` with `code` `workspace_exists` and an `update` next step; confirm with the user before running it, because `--yes` updates the tracker, query, and repository entries (other settings are kept).
+**Re-runs.** Rerunning with the same flags is safe: it returns `unchanged`, or `action_required` again while sign-in is pending. Once a run reports `envFileRemoved: true`, drop `--env-file` and `--remove-env-file` from every re-run: the values are in the workspace `.env` now, and naming the deleted file fails with `code` `env_file_unreadable`. Different flags on an existing workspace return `failure` with `code` `workspace_exists` and an `update` next step; confirm with the user before running it, because `--yes` updates the tracker, query, and repository entries (other settings are kept). The same applies to any next-step command containing `--yes` (`fix-credentials`, `fix-query`, `add-repo`) when the workspace existed before this session.
 
 **Failures.** A rejected credential, query, or repository is never saved: init restores the files it wrote and says so in `warnings`. A host-only gap (agent CLI, sandbox, license) keeps the configuration, so fix it and confirm with `devintern worker doctor --json`.
 
-**Env file.** Init saves the values into the workspace `.env` (`~/.devintern/.env`). With `--remove-env-file` it deletes `~/devintern.env` afterwards (`envFileRemoved: true`); without it, a warning says the file can be deleted. It is never deleted after a failure.
+**Env file.** Init saves the values into the workspace `.env` (`~/.devintern/.env`). With `--remove-env-file` it deletes `~/devintern.env` afterwards (`envFileRemoved: true`); without it, a warning says the file can be deleted. It is never deleted after a failure. Re-runs after a removal leave both flags out (see Re-runs).
 
 **PR target branch.** `--repo-from-cwd` records the remote's default branch as `default_branch`. When the checkout is on another branch, a warning names it and the `--pr-target-branch` fix. When PRs should target a branch other than the repository default, edit `~/.devintern/workspace.toml` and add `--pr-target-branch <branch>` to `[defaults].worker_task_args`, keeping `--create-pr`:
 
@@ -121,7 +121,7 @@ worker_task_args = "--create-pr --pr-target-branch develop"
 
 The 14-day free Worker Pilot (no card required) belongs to the user's DevIntern account, so the worker host needs a sign-in even with no one at it. A paid `LICENSE_KEY` in the workspace `.env` replaces it, but relay pairing still needs a sign-in.
 
-1. Use `signIn` from step 3, or run `devintern worker login <method> --no-wait --json` (`result` `pending` with `url`, `expiresAt`, `complete`).
+1. Use `signIn` from step 3, or run `devintern worker login <method> --no-wait --json` (`result` `pending` with `url`, `expiresAt`, `complete`) with the method from step 0.5 (`github`, `google`, `x`, or `email <address>`). A `sign-in` next step always says `github`; replace it with that method, because a different method starts a new sign-in and invalidates the link the user already has.
 2. Hand-off: show the user `url` (for email there is none: the link arrives in their inbox) and `expiresAt`. Tell them that after signing in the browser lands on a `127.0.0.1` page that does not load, which is expected, and to copy that page's full address.
 3. Either the user runs the `complete` command on the worker host with the address in single quotes, or they paste the address to you and you run `devintern worker login --complete '<address>' --json` at once. Pasting it is allowed: it holds a single-use code that works only with the verifier stored owner-only on this host. Use it only in that command, and never ask for anything else (tokens, session files, `.env` values).
 4. `result` `signed_in` (exit 0) finishes it. The pending sign-in expires 30 minutes after it starts. Rerunning `--no-wait` (or init with `--sign-in`) with the same method while more than 5 minutes remain returns the same URL with `reused: true`, so the link the user has stays valid. On `failure` (expired, used, wrong host), start again from 4.1.
