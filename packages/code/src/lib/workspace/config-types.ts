@@ -92,11 +92,6 @@ export interface AutoMergeSettings {
   /** Merge-safety review strictness (`auto_merge_policy`, default `strict`). */
   policy: MergeSafetyPolicy;
   /**
-   * Review diffs too large to inline from the PR checkout
-   * (`auto_merge_review_large_diffs`, default false: they stay open).
-   */
-  reviewLargeDiffs: boolean;
-  /**
    * Operator rules appended to the merge-safety prompt
    * (`auto_merge_review_instructions`). Omitted when unset or empty.
    */

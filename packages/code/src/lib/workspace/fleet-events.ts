@@ -333,8 +333,6 @@ export function fleetAutoMergePolicyFingerprint(
       ? {}
       : { reviewPolicy: review.reviewPolicy }),
     ...(review.reviewInstructions ? { reviewInstructions: review.reviewInstructions } : {}),
-    // Only when on, so workspaces that leave it off hash as before.
-    ...(settings.reviewLargeDiffs ? { reviewLargeDiffs: true } : {}),
     ...(rules === undefined ? {} : { rules }),
   });
   return Bun.hash(material).toString(16);
@@ -375,7 +373,6 @@ export function createFleetAutoMerge(
           ...autoMergePathsFor(settings, repo),
           ...autoMergeReviewFor(settings, repo, workspaceDir),
           review: settings.review,
-          reviewLargeDiffs: settings.reviewLargeDiffs,
           method: settings.method,
           reviewLabel: settings.reviewLabel,
         },

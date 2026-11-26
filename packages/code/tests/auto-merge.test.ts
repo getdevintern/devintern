@@ -9,7 +9,6 @@ import {
   autoMergePr,
   buildMergeSafetyPrompt,
   ensureBaseCommit,
-  MAX_CHECKOUT_REVIEW_DIFF_CHARS,
   MAX_REVIEW_DIFF_CHARS,
   OPERATOR_RULES_BEGIN,
   OPERATOR_RULES_END,
@@ -510,7 +509,6 @@ describe("autoMergePr", () => {
 
   describe("diffs over the inline limit", () => {
     const BASE = "b".repeat(40);
-    const largeDiffPolicy: AutoMergePolicy = { ...basePolicy, reviewLargeDiffs: true };
     const bigDiff = `diff --git a/src/x.ts b/src/x.ts\n${"+INLINED-LINE\n".repeat(
       Math.ceil(MAX_REVIEW_DIFF_CHARS / 14) + 10,
     )}`;
@@ -523,7 +521,7 @@ describe("autoMergePr", () => {
       return github;
     };
 
-    test("stay open for a human by default: no checkout, no base fetch, no agent", async () => {
+    test("are reviewed from the checkout with the default policy (no opt-in)", async () => {
       const github = bigGitHub();
       let prepared = 0;
       let baseCalls = 0;
@@ -541,41 +539,36 @@ describe("autoMergePr", () => {
         },
       });
       const result = await autoMergePr(URL, opts);
-      expect(result).toMatchObject({ outcome: "rejected", reviewed: false });
-      expect(result.message).toContain(
-        `the diff is ${bigDiff.length} characters, above the ${MAX_REVIEW_DIFF_CHARS}-character review limit`,
-      );
-      expect(prepared).toBe(0);
-      expect(baseCalls).toBe(0);
-      expect(opts.agentCalls).toHaveLength(0);
-      expect(github.merges).toHaveLength(0);
-      expect(github.comments[0]).toContain("could not be evaluated automatically");
+      expect(result).toMatchObject({ outcome: "merged", reviewed: true });
+      expect(prepared).toBe(1);
+      expect(baseCalls).toBe(1);
+      expect(opts.agentCalls).toHaveLength(1);
+      expect(opts.agentCalls[0]).toContain("too large to include");
     });
 
-    test("above the checkout ceiling stay open even when opted in", async () => {
+    test("a very large diff has no upper size limit: it is reviewed, not rejected", async () => {
       const github = bigGitHub();
-      const huge = "+".repeat(MAX_CHECKOUT_REVIEW_DIFF_CHARS + 1);
+      const huge = `diff --git a/src/x.ts b/src/x.ts\n${"+".repeat(1_000_000)}`;
       github.getDiff = async () => huge;
       let baseCalls = 0;
       const opts = options(github, {
-        policy: largeDiffPolicy,
         baseCommit: async () => {
           baseCalls++;
           return { success: true };
         },
       });
       const result = await autoMergePr(URL, opts);
-      expect(result).toMatchObject({ outcome: "rejected", reviewed: false });
-      expect(result.message).toContain(
-        `above the ${MAX_CHECKOUT_REVIEW_DIFF_CHARS}-character review limit`,
-      );
-      expect(baseCalls).toBe(0);
-      expect(opts.agentCalls).toHaveLength(0);
+      expect(result).toMatchObject({ outcome: "merged", reviewed: true });
+      expect(result.message).not.toContain("review limit");
+      expect(baseCalls).toBe(1);
+      expect(opts.agentCalls).toHaveLength(1);
+      const prompt = opts.agentCalls[0] ?? "";
+      expect(prompt).toContain(`The diff is ${huge.length} characters, too large to include`);
+      expect(prompt.length).toBeLessThan(MAX_REVIEW_DIFF_CHARS);
     });
 
     test("the checkout prompt opens with the untrusted-output rule", async () => {
       const opts = options(bigGitHub(), {
-        policy: largeDiffPolicy,
         baseCommit: async () => ({ success: true }),
       });
       await autoMergePr(URL, opts);
@@ -599,7 +592,6 @@ describe("autoMergePr", () => {
         baseRef: string;
       }> = [];
       const opts = options(github, {
-        policy: largeDiffPolicy,
         baseCommit: async (workDir, refs) => {
           baseCalls.push({ workDir, ...refs });
           return { success: true };
@@ -682,7 +674,6 @@ describe("autoMergePr", () => {
         github.listFiles = async () => [file("src/x.ts"), file(evil)];
         let baseCalls = 0;
         const opts = options(github, {
-          policy: largeDiffPolicy,
           baseCommit: async () => {
             baseCalls++;
             return { success: true };
@@ -703,7 +694,6 @@ describe("autoMergePr", () => {
         file("src/x.ts"),
       ];
       const opts = options(github, {
-        policy: largeDiffPolicy,
         baseCommit: async () => ({ success: true }),
       });
       const result = await autoMergePr(URL, opts);
@@ -715,7 +705,6 @@ describe("autoMergePr", () => {
       const github = bigGitHub();
       github.listFiles = async () => [file("src/x.ts", "src/$(id).ts")];
       const opts = options(github, {
-        policy: largeDiffPolicy,
         baseCommit: async () => ({ success: true }),
       });
       const result = await autoMergePr(URL, opts);
@@ -753,7 +742,6 @@ describe("autoMergePr", () => {
       const github = bigGitHub();
       const removed: string[] = [];
       const opts = options(github, {
-        policy: largeDiffPolicy,
         baseCommit: async () => ({ success: false, error: "could not fetch base commit" }),
         worktree: {
           prepare: async () => ({ success: true, path: "/tmp/fake-worktree" }),
@@ -777,7 +765,6 @@ describe("autoMergePr", () => {
       const github = bigGitHub([pr({ base: { ref: "main", sha: "main; rm -rf /" } })]);
       let prepared = 0;
       const opts = options(github, {
-        policy: largeDiffPolicy,
         baseCommit: async () => ({ success: true }),
         worktree: {
           prepare: async () => {

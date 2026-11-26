@@ -57,12 +57,6 @@ export interface AutoMergePolicy extends MergePathPolicy {
    * appended in a marked section that can only add restrictions.
    */
   reviewInstructions?: string;
-  /**
-   * Review diffs over {@link MAX_REVIEW_DIFF_CHARS} from the checkout
-   * (`auto_merge_review_large_diffs`, default off). Off leaves them open for
-   * a human. Diffs over {@link MAX_CHECKOUT_REVIEW_DIFF_CHARS} always stay open.
-   */
-  reviewLargeDiffs?: boolean;
   /** `custom` policy: inline rubric text (`auto_merge_rules`). */
   rules?: string;
   /**
@@ -175,18 +169,12 @@ export interface PullRequestRefs {
 }
 
 /**
- * Diffs above this size are not inlined in the prompt: the agent inspects
- * them with `git diff` in the review checkout instead.
+ * Inline-vs-checkout threshold, not a size limit: diffs above it are not
+ * inlined in the prompt, and the agent inspects them with `git diff` in the
+ * review checkout instead. There is no upper bound; a change the agent
+ * cannot read in full fails closed through the prompt's instructions.
  */
 export const MAX_REVIEW_DIFF_CHARS = 150_000;
-
-/**
- * Hard ceiling for a checkout review: diffs above it always stay open for a
- * human, even with `auto_merge_review_large_diffs` on. Kept near what one
- * agent context can hold (~100k tokens), so paging the whole diff does not
- * rely on the harness keeping hundreds of thousands of tokens of output.
- */
-export const MAX_CHECKOUT_REVIEW_DIFF_CHARS = 400_000;
 
 /** Upper bound for one base-commit fetch into the review checkout. */
 const FETCH_TIMEOUT_MS = 120_000;
@@ -578,17 +566,10 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
     rules = loaded.text;
   }
   const diff = await github.getDiff();
-  // Too large to inline: left open, unless the policy opts in to a checkout
-  // review where the agent diffs base...head itself.
+  // Too large to inline: a checkout review where the agent diffs
+  // base...head itself.
   let refs: PullRequestRefs | undefined;
   if (diff.length > MAX_REVIEW_DIFF_CHARS) {
-    if (!policy.reviewLargeDiffs || diff.length > MAX_CHECKOUT_REVIEW_DIFF_CHARS) {
-      const limit = policy.reviewLargeDiffs
-        ? MAX_CHECKOUT_REVIEW_DIFF_CHARS
-        : MAX_REVIEW_DIFF_CHARS;
-      const detail = `the diff is ${diff.length} characters, above the ${limit}-character review limit`;
-      return leaveOpen(detail, { kind: "not-evaluable", detail });
-    }
     if (!COMMIT_SHA.test(pr.base.sha) || !COMMIT_SHA.test(pr.head.sha)) {
       const detail =
         "the diff is too large to inline and GitHub did not report valid base and head commits";
