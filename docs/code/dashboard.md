@@ -70,7 +70,7 @@ A run that failed, escalated, or was abandoned has an outcome class. The runs li
 | **Waiting on review** | A review or auto-merge rule wants a human to approve, for example a version bump or a deny pattern. Nothing is broken. | Review the PR, then merge or close it.                                       |
 | **Agent stopped**     | The agent could not complete the task: it gave up, tests kept failing, or the ticket was unclear. | Clarify the ticket or fix the blocker, then retry.                           |
 | **DevIntern problem** | A DevIntern step failed rather than the agent's work: verification, git or worktree operations, PR creation, or a crash. | Retry. If it happens again, choose **Report problem** on the banner; the report is pre-filled with the step and error. |
-| **Environment**       | Credentials, sign-in, network, a rate limit, or a missing tool stopped the run.          | Fix the setup (see [Configuration](configuration.md)), then retry.           |
+| **Environment**       | Credentials, sign-in, network, a rate limit, a missing tool, or a code host that refuses the PR for a setup reason (for example missing code-host settings) stopped the run. | Fix the setup (see [Configuration](configuration.md)), then retry.           |
 
 The banner also shows the work status: **Work saved on branch** (a retry continues from it), **Work kept in worktree** with its path on the worker machine, or **Work discarded** when the changes could not be saved. Runs from before this feature have no class, except escalated auto-merge runs, which show as **Waiting on review**.
 

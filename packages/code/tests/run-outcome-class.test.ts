@@ -15,7 +15,10 @@ import {
   failureStageName,
   formatFailureCause,
   isEnvironmentError,
+  tagOutcomeClass,
+  taggedOutcomeClass,
 } from "../src/lib/state/run-outcome";
+import { baseSyncFailure } from "../src/lib/acquirers/review-polling";
 import {
   RunStore,
   beginRun,
@@ -56,6 +59,11 @@ describe("outcome-class helpers", () => {
     ]) {
       expect(failureFromError(error, "publish").outcomeClass).toBe("environment");
     }
+    // An SSH key git rejects, at the end of the text or mid-message.
+    expect(isEnvironmentError(new Error("git@github.com: Permission denied (publickey)."))).toBe(
+      true,
+    );
+    expect(isEnvironmentError("Permission denied (publickey)")).toBe(true);
     // A line number that happens to be 429 is not a rate limit.
     expect(isEnvironmentError(new Error("TypeError at src/a.ts:429"))).toBe(false);
   });
@@ -119,6 +127,40 @@ describe("outcome-class helpers", () => {
       outcomeClass: "environment",
       stage: "publish",
     });
+    // Permanent (missing config, 4xx validation): the user's setup must change.
+    expect(
+      deliveryDispositionFailure("failed", "A pull request already exists for x:y", true),
+    ).toEqual({ outcomeClass: "environment", stage: "publish" });
+  });
+
+  test("a tagged error keeps its class through a generic catch block", () => {
+    const exited = tagOutcomeClass(new Error("Agent exited with code 1: overloaded"), "agent");
+    expect(taggedOutcomeClass(exited)).toBe("agent");
+    expect(failureFromError(exited, "implementation").outcomeClass).toBe("agent");
+    // An untagged error still falls back to internal.
+    expect(failureFromError(new Error("boom"), "implementation").outcomeClass).toBe("internal");
+    // A credential problem in an agent's failure is still the environment…
+    const auth = tagOutcomeClass(new Error("Agent exited with code 1: HTTP 401"), "agent");
+    expect(failureFromError(auth, "implementation").outcomeClass).toBe("environment");
+    // …unless the tag is definite: hook output can print ECONNREFUSED itself.
+    const hook = tagOutcomeClass(
+      new Error("push failed: pre-push: connect ECONNREFUSED 127.0.0.1:5432"),
+      "agent",
+      { definite: true },
+    );
+    expect(failureFromError(hook, "publish").outcomeClass).toBe("agent");
+  });
+
+  test("a base sync the conflict agent could not resolve is the agent's", () => {
+    expect(
+      baseSyncFailure({ outcome: "failed", message: "merge aborted", failureKind: "aborted" }),
+    ).toMatchObject({ outcomeClass: "agent", stage: "base_sync" });
+    expect(
+      baseSyncFailure({ outcome: "failed", message: "base fetch failed", failureKind: "setup" }),
+    ).toMatchObject({ outcomeClass: "internal" });
+    expect(
+      baseSyncFailure({ outcome: "failed", message: "could not resolve host github.com" }),
+    ).toMatchObject({ outcomeClass: "environment" });
   });
 
   test("preserved work maps to a work status", () => {

@@ -240,24 +240,26 @@ export function deliveryRunDisposition(
 
 /**
  * Class of a run that delivered: an agent-reported `blocked` outcome is the
- * agent's; a PR the code host would not create is DevIntern's publish step
- * (or the environment). No cause is attached, so the reason keeps its
+ * agent's. A PR the code host would not create is the environment when the
+ * failure names credentials or the network, or when it is permanent (missing
+ * code-host config, a 4xx validation error such as an existing PR): a re-run
+ * cannot fix those, the user's setup must change. Anything else is
+ * DevIntern's publish step. No cause is attached, so the reason keeps its
  * queryable prefix (`pushed but PR creation failed: …`).
  *
  * @param status - Disposition status
  * @param prFailure - PR creation failure message, when one happened
+ * @param permanent - The PR creation failure was marked permanent
  */
 export function deliveryDispositionFailure(
   status: "succeeded" | "escalated" | "failed",
   prFailure: string | undefined,
+  permanent = false,
 ): RunFailure | undefined {
   if (status === "escalated") return { outcomeClass: "agent", stage: "implementation" };
   if (status !== "failed") return undefined;
-  return {
-    outcomeClass:
-      prFailure !== undefined && isEnvironmentError(prFailure) ? "environment" : "internal",
-    stage: "publish",
-  };
+  const environmental = prFailure !== undefined && (permanent || isEnvironmentError(prFailure));
+  return { outcomeClass: environmental ? "environment" : "internal", stage: "publish" };
 }
 
 /** Prompt instruction describing the marker; appended to the summary request. */

@@ -128,6 +128,33 @@ describe("internal_error", () => {
     expect(open("internal_error")).toEqual([]);
   });
 
+  test("a self-retrying origin's internal failure resolves on its own next success", () => {
+    const failed = runs.createRun({ origin: "estimate", taskKey: "TASK-1", repo: "acme/web" });
+    runs.finishRun(failed, "failed", "x", VERIFY_FAILURE("e"));
+    expect(open("internal_error")).toHaveLength(1);
+    const ok = runs.createRun({ origin: "estimate", taskKey: "TASK-1", repo: "acme/web" });
+    runs.finishRun(ok, "succeeded");
+    expect(open("internal_error")).toEqual([]);
+  });
+
+  test("another origin's success on the same task does not resolve it", () => {
+    const failed = runs.createRun({ origin: "estimate", taskKey: "TASK-2", repo: "acme/web" });
+    runs.finishRun(failed, "failed", "x", VERIFY_FAILURE("e"));
+    finish("TASK-2", "succeeded");
+    expect(open("internal_error")).toHaveLength(1);
+  });
+
+  test("stays open while a task whose run fell out of the row's links is still broken", () => {
+    const oldRun = finish("local-old", "escalated", "x", VERIFY_FAILURE("old"));
+    // Enough repeats to push local-old's run out of the capped link list.
+    for (let i = 0; i < 60; i++) finish(`local-n${i}`, "failed", "x", VERIFY_FAILURE(`n${i}`));
+    expect(open("internal_error")[0]?.links.some((link) => link.runId === oldRun)).toBe(false);
+    for (let i = 0; i < 60; i++) finish(`local-n${i}`, "succeeded");
+    expect(open("internal_error")).toHaveLength(1);
+    finish("local-old", "succeeded");
+    expect(open("internal_error")).toEqual([]);
+  });
+
   test("a success of an unrelated task resolves nothing", () => {
     finish("local-a", "escalated", "x", VERIFY_FAILURE("a"));
     finish("local-z", "succeeded");
@@ -144,6 +171,23 @@ describe("other classes", () => {
     expect(open("source_unhealthy")[0]?.severity).toBe("high");
     expect(open("retries_exhausted")).toEqual([]);
     finish("local-e", "succeeded");
+    expect(open("source_unhealthy")).toEqual([]);
+  });
+
+  test("a grouped environment row stays open until every affected task recovered", () => {
+    const revoked = {
+      failure: {
+        outcomeClass: "environment" as const,
+        stage: "publish",
+        cause: "HTTP 401 Bad credentials",
+      },
+    };
+    finish("local-ea", "failed", "x", revoked);
+    finish("local-eb", "failed", "x", revoked);
+    expect(open("source_unhealthy")).toHaveLength(1);
+    finish("local-eb", "succeeded");
+    expect(open("source_unhealthy")).toHaveLength(1);
+    finish("local-ea", "succeeded");
     expect(open("source_unhealthy")).toEqual([]);
   });
 

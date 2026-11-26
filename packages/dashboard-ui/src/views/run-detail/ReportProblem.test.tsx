@@ -8,6 +8,7 @@ import {
   canPreview,
   canSend,
   INITIAL_REPORT_FLOW,
+  initialReportFlow,
   isReportBusy,
   isReportDraftDirty,
   reportFlowReducer,
@@ -168,6 +169,15 @@ describe("report flow", () => {
       false,
     );
     expect(isReportDraftDirty(run(DRAFTED))).toBe(true);
+
+    // A pre-filled report: unchanged or cleared is not worth a discard prompt.
+    const start = initialReportFlow({ title: "verify failed", description: "Run #953 failed" });
+    const prefilled = start.draft;
+    expect(isReportDraftDirty(start, prefilled)).toBe(false);
+    const cleared = run([{ type: "edit", draft: { title: "", description: "" } }], start);
+    expect(isReportDraftDirty(cleared, prefilled)).toBe(false);
+    const edited = run([{ type: "edit", draft: { title: "verify crashed" } }], start);
+    expect(isReportDraftDirty(edited, prefilled)).toBe(true);
 
     const previewing = run([...DRAFTED, { type: "previewStart" }]);
     expect(isReportBusy(previewing)).toBe(true);

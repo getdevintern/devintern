@@ -128,7 +128,7 @@ const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([
  * a missing file) is a pipeline problem, not the environment.
  */
 const ENVIRONMENT_MESSAGE =
-  /\b(?:unauthori[sz]ed|bad credentials|authentication (?:failed|required)|invalid (?:api )?(?:token|key|credentials)|token (?:has )?expired|permission denied \(publickey\)|could not read username|requires authentication|rate limit(?:ed)?|too many requests|secondary rate limit|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|getaddrinfo|could not resolve host|network is unreachable|socket hang up|certificate (?:has expired|verify failed)|command not found|executable not found|spawn \S+ ENOENT)\b|\b(?:HTTP|status(?: code)?)[\s:]*(?:401|403|407|429)\b|\b(?:401|407) (?:unauthori[sz]ed|proxy)|\b429 too many\b/i;
+  /\b(?:unauthori[sz]ed|bad credentials|authentication (?:failed|required)|invalid (?:api )?(?:token|key|credentials)|token (?:has )?expired|could not read username|requires authentication|rate limit(?:ed)?|too many requests|secondary rate limit|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|getaddrinfo|could not resolve host|network is unreachable|socket hang up|certificate (?:has expired|verify failed)|command not found|executable not found|spawn \S+ ENOENT)\b|\b(?:HTTP|status(?: code)?)[\s:]*(?:401|403|407|429)\b|\b(?:401|407) (?:unauthori[sz]ed|proxy)|\b429 too many\b|\bpermission denied \(publickey\)/i;
 
 /**
  * Whether a caught error is an environment problem (credentials, network,
@@ -146,14 +146,78 @@ export function isEnvironmentError(error: unknown): boolean {
   return ENVIRONMENT_MESSAGE.test(error.message);
 }
 
+/** Property an error carries when the code that threw it knows its class. */
+const OUTCOME_CLASS_PROPERTY = "runOutcomeClass";
+
+interface OutcomeClassTag {
+  outcomeClass: RunOutcomeClass;
+  /** The message is not DevIntern's own (hook or test output): skip the environment check. */
+  definite: boolean;
+}
+
+/**
+ * Mark an error with the outcome class the throwing code knows, e.g. `agent`
+ * for an agent that exited non-zero or timed out. {@link failureFromError}
+ * prefers this tag over its caller's fallback, so an agent failure that
+ * bubbles up to a generic catch block is not reported as a DevIntern bug.
+ *
+ * A message that names credentials or the network still classes as
+ * `environment`, unless `definite` is set: use that when the message embeds
+ * output DevIntern does not control (a git hook's test run can print
+ * `ECONNREFUSED` without the environment being at fault).
+ *
+ * @param error - Error to tag (returned for `throw tagOutcomeClass(…)`)
+ * @param outcomeClass - Class to record
+ * @param options - `definite`: the tag wins over the environment check
+ */
+export function tagOutcomeClass<E extends Error>(
+  error: E,
+  outcomeClass: RunOutcomeClass,
+  options: { definite?: boolean } = {},
+): E {
+  const tag: OutcomeClassTag = { outcomeClass, definite: options.definite === true };
+  Object.defineProperty(error, OUTCOME_CLASS_PROPERTY, {
+    value: tag,
+    enumerable: false,
+    configurable: true,
+  });
+  return error;
+}
+
+function outcomeClassTag(error: unknown): OutcomeClassTag | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const value: unknown = (error as Error & { [OUTCOME_CLASS_PROPERTY]?: unknown })[
+    OUTCOME_CLASS_PROPERTY
+  ];
+  if (typeof value !== "object" || value === null) return undefined;
+  const tag = value as Partial<OutcomeClassTag>;
+  return isRunOutcomeClass(tag.outcomeClass)
+    ? { outcomeClass: tag.outcomeClass, definite: tag.definite === true }
+    : undefined;
+}
+
+/** The class {@link tagOutcomeClass} put on an error, if any. */
+export function taggedOutcomeClass(error: unknown): RunOutcomeClass | undefined {
+  return outcomeClassTag(error)?.outcomeClass;
+}
+
+function classifyError(error: unknown, fallback: RunOutcomeClass): RunOutcomeClass {
+  const tag = outcomeClassTag(error);
+  if (tag?.definite) return tag.outcomeClass;
+  if (isEnvironmentError(error)) return "environment";
+  return tag?.outcomeClass ?? fallback;
+}
+
 /**
  * Classify a failure caught at a DevIntern step: `environment` when the error
- * names credentials, network, rate limits, or a missing tool; otherwise the
- * caller's fallback (`internal` for pipeline machinery).
+ * names credentials, network, rate limits, or a missing tool (unless a
+ * definite tag says otherwise); otherwise the class the error was tagged
+ * with ({@link tagOutcomeClass}), or the caller's fallback (`internal` for
+ * pipeline machinery).
  *
  * @param error - Caught error (or its message)
  * @param stage - Stage or step that failed
- * @param fallback - Class when the error is not environmental
+ * @param fallback - Class when the error is neither environmental nor tagged
  */
 export function failureFromError(
   error: unknown,
@@ -163,7 +227,7 @@ export function failureFromError(
   const message = error instanceof Error ? error.message : String(error ?? "");
   const cause = formatFailureCause(message);
   return {
-    outcomeClass: isEnvironmentError(error) ? "environment" : fallback,
+    outcomeClass: classifyError(error, fallback),
     ...(stage ? { stage: failureStageName(stage) } : {}),
     ...(cause ? { cause } : {}),
   };

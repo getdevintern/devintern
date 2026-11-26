@@ -379,6 +379,7 @@ export async function settleImplementationRun(input: {
       failure: deliveryDispositionFailure(
         disposition.status,
         runContext.activeTaskContext?.prDeliveryFailure?.message,
+        runContext.activeTaskContext?.prDeliveryFailure?.permanent === true,
       ),
     });
     // A later reopen of the ticket starts with a clean retry slate.

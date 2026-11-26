@@ -28,7 +28,7 @@ import { createHarnessLogSink } from "../observability/harness-logs";
 import { redactSecrets, stripAnsi } from "../observability/worker-logs";
 import { beginRun, currentRunStep, endRun, recordRunStage } from "../state/run-recorder";
 import type { RunOrigin } from "../state/run-recorder";
-import { failureFromError } from "../state/run-outcome";
+import { failureFromError, tagOutcomeClass } from "../state/run-outcome";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
 import { GIT_CLEAN_ARGS, Utils } from "../utils";
@@ -454,11 +454,15 @@ async function commitWithHookRetry(params: {
       console.log(`\n❌ Max retries (${params.hookRetries}) exceeded for git hook fixes`);
     }
     console.error(`\n❌ Failed to commit changes: ${commitResult.message}`);
-    throw new Error(`Commit failed: ${commitResult.message}`);
+    // A commit only fails on a hook (lint, tests) or the agent's tree; the
+    // hook output must not read as an environment problem.
+    throw tagOutcomeClass(new Error(`Commit failed: ${commitResult.message}`), "agent", {
+      definite: commitResult.hookError !== undefined,
+    });
   }
 
   if (!commitSuccess) {
-    throw new Error("Failed to commit changes after retries");
+    throw tagOutcomeClass(new Error("Failed to commit changes after retries"), "agent");
   }
 }
 
@@ -515,7 +519,13 @@ async function pushWithHookRetry(params: {
       console.log(`\n❌ Max retries (${params.hookRetries}) exceeded for git hook fixes`);
     }
     console.error(`\n❌ Failed to push changes: ${pushResult.message}`);
-    throw new Error(`Push failed: ${pushResult.message}`);
+    const error = new Error(`Push failed: ${pushResult.message}`);
+    // `hookError` is set for every push failure but divergence; only a repo
+    // with a pre-push hook can have had the hook (the agent's work) reject it.
+    if (pushResult.hookError && (await Utils.hasPrePushHook(params.workDir))) {
+      throw tagOutcomeClass(error, "agent", { definite: true });
+    }
+    throw error;
   }
 
   if (!pushSuccess) {
@@ -593,7 +603,7 @@ function stopIfNoChanges(
   console.log("\n⚠️  No changes were made by @devintern/code");
   console.log(`   View PR: ${prUrl}`);
   if (ciFeedback) {
-    throw new Error("CI fix agent made no changes");
+    throw tagOutcomeClass(new Error("CI fix agent made no changes"), "agent");
   }
   endRun("succeeded", "agent made no changes");
   return true;
@@ -649,14 +659,15 @@ export function describeAgentFailure(result: AgentRunResult): string {
 function assertAgentSucceeded(agentResult: AgentRunResult): void {
   if (agentResult.maxTurnsReached) {
     console.error("\n❌ Agent reached max turns limit without completing the task");
-    throw new Error(
-      "Agent reached max turns limit. Increase CLAUDE_MAX_TURNS environment variable.",
+    throw tagOutcomeClass(
+      new Error("Agent reached max turns limit. Increase CLAUDE_MAX_TURNS environment variable."),
+      "agent",
     );
   }
   if (!agentResult.success) {
     const message = describeAgentFailure(agentResult);
     console.error(`\n❌ ${message}`);
-    throw new Error(message);
+    throw tagOutcomeClass(new Error(message), "agent");
   }
   console.log("\n✅ Agent completed successfully");
 }

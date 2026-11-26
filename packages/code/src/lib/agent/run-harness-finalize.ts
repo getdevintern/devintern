@@ -24,7 +24,12 @@ import {
 } from "../review/auto-review-loop";
 import { recordIncompleteAttempt } from "../state/retry-state";
 import { noteRunFailure, recordRunStage } from "../state/run-recorder";
-import { failureFromError, failureStageName, formatFailureCause } from "../state/run-outcome";
+import {
+  failureFromError,
+  failureStageName,
+  formatFailureCause,
+  tagOutcomeClass,
+} from "../state/run-outcome";
 import type { RunFailure } from "../state/run-outcome";
 import { postImplementationComment } from "../task/implementation-comment";
 import { Utils } from "../utils";
@@ -429,18 +434,21 @@ async function prepareArtifactPublication(
 }
 
 /**
- * Classify a failed push: a hook the agent could not satisfy is the agent's
- * work failing; any other push failure is DevIntern's git step (or the
- * environment, for credentials and network).
+ * Classify a failed push: a pre-push hook the agent could not satisfy is the
+ * agent's work failing; any other push failure is DevIntern's git step (or
+ * the environment, for credentials and network).
+ *
+ * `hookError` alone does not prove a hook ran: the push helper sets it for
+ * every failure except divergence, so the repo must also have a pre-push
+ * hook. A hook failure is classed `agent` without the environment check,
+ * because the hook's test output can mention `ECONNREFUSED` or `429`.
  */
-function notePushFailure(result: { message?: string; hookError?: unknown }): void {
-  noteRunFailure(
-    failureFromError(
-      new Error(`push failed: ${result.message ?? "unknown error"}`),
-      "publish",
-      result.hookError ? "agent" : "internal",
-    ),
-  );
+async function notePushFailure(result: { message?: string; hookError?: unknown }): Promise<void> {
+  const error = new Error(`push failed: ${result.message ?? "unknown error"}`);
+  if (result.hookError && (await Utils.hasPrePushHook())) {
+    tagOutcomeClass(error, "agent", { definite: true });
+  }
+  noteRunFailure(failureFromError(error, "publish"));
 }
 
 /** Push, comment, and create a PR after the commit/review phases. */
@@ -460,7 +468,7 @@ export async function publishImplementation(state: DeliveryState): Promise<TaskS
     }
     const pushed = await state.helpers.pushWithHookRetry();
     if (!pushed.success) {
-      notePushFailure(pushed.result);
+      await notePushFailure(pushed.result);
       console.log("   Cannot create PR without pushing branch to remote");
       return { kind: "halt", haltKind: "stop", reason: "Push failed" };
     }

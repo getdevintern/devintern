@@ -9,8 +9,8 @@
  * | `automation_broke`  | an automation run failed right after a succeeded run            | the automation's next success             |
  * | `work_spawned`      | a run delegated ad-hoc tasks and/or filed tracker tickets       | (informational; rolls up child progress)  |
  * | `pr_auto_merged`    | an auto-merge run merged a PR (grouped per repo per day)        | (informational)                           |
- * | `internal_error`    | a run's outcome class is `internal` (grouped by stage + error signature) | every affected task's latest run succeeded |
- * | `source_unhealthy`  | a run's outcome class is `environment` (grouped by stage + signature)    | a later success on the subject            |
+ * | `internal_error`    | a run's outcome class is `internal` (grouped by stage + error signature) | every affected subject's latest run (same origin family) succeeded |
+ * | `source_unhealthy`  | a run's outcome class is `environment` (grouped by stage + signature)    | every affected subject's latest run (same origin family) succeeded |
  *
  * The outcome class routes a non-successful run: `internal` and
  * `environment` runs raise only their own kind (never an `escalated` or
@@ -19,10 +19,13 @@
  * escalated / retries-exhausted rules. A run whose work was discarded says so
  * in its notification body; every run-failure kind is high severity.
  *
- * Not notified: ordinary successful runs, deferrals (they retry), failures of
- * origins that run their own attempt budget and escalate when it is spent
- * (PR mentions, CI fixes, conflict resolution, auto-merge, estimation), and
- * automation failures other than the first after a success.
+ * Not notified: ordinary successful runs, deferrals (they retry), agent and
+ * review-hold failures of origins that run their own attempt budget and
+ * escalate when it is spent (PR mentions, CI fixes, conflict resolution,
+ * auto-merge, estimation), and automation failures other than the first
+ * after a success. `internal` and `environment` failures are notified for
+ * every origin: repeats fold into one grouped row, and a DevIntern bug in a
+ * self-retrying flow would otherwise only show up as its budget running out.
  *
  * Reads go straight to the `runs`, `run_outputs`, `injected_tasks`, and
  * `scheduled_retries` tables of the same database, so this module does not
@@ -37,7 +40,7 @@ import { findInjectedTaskOutputParent, listRunOutputs } from "../state/run-outpu
 import type { TrackerIssueOutput } from "../state/run-outputs";
 import { NotificationEmitter, safely } from "./emitter";
 import { hasTable } from "./store";
-import type { NotificationLink } from "./types";
+import type { Notification, NotificationLink } from "./types";
 
 /** Origins whose watchers retry on their own and escalate once their budget is spent. */
 const SELF_RETRYING_ORIGINS: ReadonlySet<string> = new Set([
@@ -317,6 +320,18 @@ function emitInternalError(emitter: NotificationEmitter, run: RunFacts): void {
   });
 }
 
+/** Prefix of environment-class `source_unhealthy` groups (real source health uses `source:` subjects). */
+const ENVIRONMENT_GROUP_PREFIX = "source_unhealthy:environment:";
+
+/** Environment-problem group: one row per failing stage and normalized error signature. */
+export function environmentGroupKey(
+  run: Pick<RunFacts, "failureStage" | "failureCause" | "outcomeReason">,
+): string {
+  const stage = run.failureStage ?? "run";
+  const cause = normalizeCause(redactText(run.failureCause ?? run.outcomeReason ?? ""));
+  return `${ENVIRONMENT_GROUP_PREFIX}${stage}:${cause}`;
+}
+
 /**
  * Credentials, network, rate limits, or a missing tool stopped a run: the
  * same kind as an unhealthy source, grouped by stage and error signature so a
@@ -324,12 +339,11 @@ function emitInternalError(emitter: NotificationEmitter, run: RunFacts): void {
  */
 function emitEnvironmentProblem(emitter: NotificationEmitter, run: RunFacts): void {
   const stage = run.failureStage ?? "run";
-  const cause = normalizeCause(redactText(run.failureCause ?? run.outcomeReason ?? ""));
   const title = `${runLabel(run)} could not reach a service or tool (${stage})`;
   emitter.emit({
     kind: "source_unhealthy",
     severity: "high",
-    groupKey: `source_unhealthy:environment:${stage}:${cause}`,
+    groupKey: environmentGroupKey(run),
     runId: run.id,
     repo: run.repo,
     subject: runSubject(run),
@@ -437,59 +451,148 @@ function emitAutoMerged(emitter: NotificationEmitter, run: RunFacts, now: number
 /** A success closes what was open about its subject. */
 function resolveOnSuccess(emitter: NotificationEmitter, db: Database, run: RunFacts): void {
   if (run.status !== "succeeded") return;
+  // DevIntern-side rows fold several subjects and origins, so they resolve
+  // by what they rolled up, for every origin (a self-retrying origin's own
+  // success is what proves its DevIntern problem went away).
+  resolveRecoveredDevInternRows(emitter, db, run);
   if (!COMPLETING_ORIGINS.has(run.origin)) return;
-  // Environment problems use `task:`/`automation:` subjects; real source
-  // health rows use `source:` subjects, so this never resolves those.
   emitter.resolve({
-    kinds: ["escalated", "retries_exhausted", "automation_broke", "source_unhealthy"],
+    kinds: ["escalated", "retries_exhausted", "automation_broke"],
     subject: runSubject(run),
   });
-  resolveRecoveredInternalErrors(emitter, db, run);
 }
 
 /**
- * Resolve open `internal_error` rows the succeeded run's task belonged to,
- * once every task the row rolled up has a latest run that succeeded. A row
- * folding one bug across several tasks stays open while any of them is still
- * broken. A row with no task runs (an auto-merge check of a PR) resolves on
- * the next success of its subject instead.
+ * How far before a row opened a run that folded into it may have finished.
+ * A run is recorded finished just before its notification is emitted; the
+ * margin covers clock skew between the recorder and the emitter.
  */
-function resolveRecoveredInternalErrors(
+const GROUP_LOOKBACK_MS = 60 * 60_000;
+
+/** Max failed runs read per open DevIntern-side row. */
+const MAX_AFFECTED_RUNS = 1_000;
+
+/** Group key a DevIntern-side failure emits under, or undefined for any other run. */
+function devInternGroupKey(run: RunFacts): string | undefined {
+  if (!isDevInternSide(run)) return undefined;
+  return run.outcomeClass === "internal" ? internalErrorGroupKey(run) : environmentGroupKey(run);
+}
+
+/**
+ * Origin family for recovery: the completing origins all handle the subject
+ * itself (a `manual` retry fixes what a `task` run broke); any other origin
+ * only proves its own kind of work recovered.
+ */
+function originFamily(origin: string): string {
+  return COMPLETING_ORIGINS.has(origin) ? "completing" : origin;
+}
+
+/** A failure's recovery key: its subject within its origin family. */
+function recoveryKey(run: RunFacts): string {
+  return `${originFamily(run.origin)}|${runSubject(run)}`;
+}
+
+/**
+ * Failed runs that folded into an open DevIntern-side row, rebuilt from the
+ * `runs` table: the row's own links are capped and its `subject` names only
+ * the latest emitter, so neither can say which tasks are still broken.
+ */
+function affectedRuns(db: Database, row: Notification): RunFacts[] {
+  const outcomeClass = row.groupKey.startsWith(ENVIRONMENT_GROUP_PREFIX)
+    ? "environment"
+    : "internal";
+  const candidates = (
+    db
+      .query(
+        `SELECT * FROM runs
+         WHERE outcome_class = ? AND status IN ('failed', 'escalated', 'abandoned')
+           AND COALESCE(finished_at, started_at) >= ?
+         ORDER BY id DESC LIMIT ${MAX_AFFECTED_RUNS}`,
+      )
+      .all(outcomeClass, row.createdAt - GROUP_LOOKBACK_MS) as unknown[]
+  ).flatMap((raw) => {
+    const run = toRunFacts(raw);
+    return run ? [run] : [];
+  });
+  if (row.runId !== undefined && !candidates.some((run) => run.id === row.runId)) {
+    const latest = readRun(db, row.runId);
+    if (latest) candidates.push(latest);
+  }
+  return candidates.filter((run) => devInternGroupKey(run) === row.groupKey);
+}
+
+/** Latest settled run of the same subject and origin family as `run`. */
+function latestSettledLike(db: Database, run: RunFacts): RunFacts | null {
+  let where: string;
+  let key: string;
+  if (run.automationId) {
+    where = "automation_id = ?";
+    key = run.automationId;
+  } else if (run.taskKey) {
+    where = "task_key = ? AND automation_id IS NULL";
+    key = run.taskKey;
+  } else if (run.prUrl) {
+    where = "pr_url = ? AND task_key IS NULL AND automation_id IS NULL";
+    key = run.prUrl;
+  } else {
+    return null;
+  }
+  const family = originFamily(run.origin);
+  const origins = family === "completing" ? [...COMPLETING_ORIGINS] : [run.origin];
+  const placeholders = origins.map(() => "?").join(", ");
+  return toRunFacts(
+    db
+      .query(
+        `SELECT * FROM runs
+         WHERE ${where} AND origin IN (${placeholders})
+           AND status IN ('succeeded', 'failed', 'escalated', 'abandoned')
+         ORDER BY started_at DESC, id DESC LIMIT 1`,
+      )
+      .get(key, ...origins),
+  );
+}
+
+/**
+ * Resolve open `internal_error` and environment `source_unhealthy` rows the
+ * succeeded run belonged to, once every subject they rolled up (per origin
+ * family) has a latest run that succeeded. A row folding one bug across
+ * several tasks stays open while any of them is still broken; a run with no
+ * subject to re-run (`run:<id>`) keeps its row open until a human resolves it.
+ */
+function resolveRecoveredDevInternRows(
   emitter: NotificationEmitter,
   db: Database,
   run: RunFacts,
 ): void {
-  const taskKey = run.taskKey;
-  const subject = runSubject(run);
-  const open = emitter.store.list({
-    unresolved: true,
-    kind: "internal_error",
-    includeMuted: true,
-    limit: 200,
-  }).notifications;
+  if (!hasTable(db, "runs")) return;
+  const trigger = recoveryKey(run);
+  const open = [
+    ...emitter.store.list({
+      unresolved: true,
+      kind: "internal_error",
+      includeMuted: true,
+      limit: 200,
+    }).notifications,
+    ...emitter.store
+      .list({ unresolved: true, kind: "source_unhealthy", includeMuted: true, limit: 200 })
+      .notifications.filter((row) => row.groupKey.startsWith(ENVIRONMENT_GROUP_PREFIX)),
+  ];
   for (const row of open) {
-    const runIds = [
-      ...new Set(row.links.flatMap((link) => (link.runId === undefined ? [] : [link.runId]))),
-    ];
-    if (row.runId !== undefined && !runIds.includes(row.runId)) runIds.push(row.runId);
-    if (runIds.length === 0) continue;
-    const placeholders = runIds.map(() => "?").join(", ");
-    const tasks = (
-      db
-        .query(
-          `SELECT DISTINCT task_key FROM runs WHERE id IN (${placeholders}) AND task_key IS NOT NULL`,
-        )
-        .all(...runIds) as Array<{ task_key: string }>
-    ).map((entry) => entry.task_key);
-    if (tasks.length === 0) {
-      if (row.subject === subject) {
-        emitter.resolve({ kinds: ["internal_error"], groupKey: row.groupKey });
+    const affected = affectedRuns(db, row);
+    if (affected.length === 0) {
+      // The runs are gone (pruned): fall back to the row's own subject.
+      if (row.subject === runSubject(run)) {
+        emitter.resolve({ kinds: [row.kind], groupKey: row.groupKey });
       }
       continue;
     }
-    if (taskKey === undefined || !tasks.includes(taskKey)) continue;
-    const recovered = tasks.every((key) => latestRunForTask(db, key)?.status === "succeeded");
-    if (recovered) emitter.resolve({ kinds: ["internal_error"], groupKey: row.groupKey });
+    if (!affected.some((failed) => recoveryKey(failed) === trigger)) continue;
+    const pending = new Map<string, RunFacts>();
+    for (const failed of affected) pending.set(recoveryKey(failed), failed);
+    const recovered = [...pending.values()].every(
+      (failed) => latestSettledLike(db, failed)?.status === "succeeded",
+    );
+    if (recovered) emitter.resolve({ kinds: [row.kind], groupKey: row.groupKey });
   }
 }
 
