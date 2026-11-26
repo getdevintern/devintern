@@ -112,11 +112,13 @@ export async function checkRollupForRef(
   });
   if (!http.ok) throw new Error(apiErrorMessage(http.status, http.statusText));
   const response = (await http.json()) as RollupResponse;
-  const commit = response.data?.repository?.object;
-  if (!commit) {
-    const detail = response.errors?.map((error) => error.message).join("; ");
-    throw new Error(`GitHub returned no CI state for ${sha}${detail ? `: ${detail}` : ""}`);
+  // A refused field comes back as null next to an error; never read that as "no checks".
+  if (response.errors?.length) {
+    const detail = response.errors.map((error) => error.message).join("; ");
+    throw new Error(`GitHub refused the CI state for ${sha}: ${detail}`);
   }
+  const commit = response.data?.repository?.object;
+  if (!commit) throw new Error(`GitHub returned no CI state for ${sha}`);
   const rollup = commit.statusCheckRollup;
   return rollup
     ? { state: rollup.state, total: rollup.contexts.totalCount }

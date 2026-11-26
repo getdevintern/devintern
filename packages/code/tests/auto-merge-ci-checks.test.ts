@@ -318,6 +318,21 @@ describe("commit check reads", () => {
     await expect(checkRollupForRef(client(), "o", "r", "abc")).rejects.toThrow("nope");
   });
 
+  test("a refused rollup (null next to an error) throws instead of reading as no checks", async () => {
+    respond(() => ({
+      data: { repository: { object: { statusCheckRollup: null } } },
+      errors: [{ type: "FORBIDDEN", message: "Resource not accessible by personal access token" }],
+    }));
+    await expect(checkRollupForRef(client(), "o", "r", "abc")).rejects.toThrow(
+      "Resource not accessible",
+    );
+  });
+
+  test("an unknown commit with no error still throws", async () => {
+    respond(() => ({ data: { repository: { object: null } } }));
+    await expect(checkRollupForRef(client(), "o", "r", "abc")).rejects.toThrow("no CI state");
+  });
+
   test("reads every page of check runs", async () => {
     const urls = respond((url) => {
       const page = Number(new URL(url).searchParams.get("page"));
