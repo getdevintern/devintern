@@ -14,27 +14,14 @@ import {
 } from "fs";
 import { join } from "path";
 
+import { condenseMessage } from "@devintern/task-trackers";
+
 import { isProcessAlive } from "../utils/repo-git-lock";
+
+export { condenseMessage };
 
 /** Lock file guarding concurrent writes to one workspace. */
 export const WORKER_INIT_LOCK_FILE = ".worker-init.lock";
-
-/** Longest message kept in a check row. */
-const MAX_MESSAGE_LENGTH = 300;
-
-/**
- * One bounded line: an HTML error page body (some trackers return one for
- * 404/5xx) is dropped, whitespace collapsed, and the result truncated.
- */
-export function condenseMessage(message: string): string {
-  const html = message.search(/<(!doctype|html)\b/i);
-  const text = (
-    html >= 0 ? `${message.slice(0, html).replace(/[\s:-]+$/, "")} (HTML error page)` : message
-  )
-    .replace(/\s+/g, " ")
-    .trim();
-  return text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH - 1)}…` : text;
-}
 
 /** Error message without a stack trace, on one bounded line. */
 export function errorMessage(error: unknown): string {

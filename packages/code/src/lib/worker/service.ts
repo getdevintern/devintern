@@ -16,7 +16,7 @@
  * would hide the output from the dashboard.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "fs";
 import { homedir as osHomedir } from "os";
 import { dirname, join } from "path";
 
@@ -60,6 +60,8 @@ export interface WorkerServiceDeps {
   writeFile?: (path: string, content: string) => void;
   mkdir?: (path: string) => void;
   remove?: (path: string) => void;
+  /** Remove a directory only when it is empty (rollback of directories install created). */
+  removeEmptyDir?: (path: string) => void;
   run?: RunCommandFn;
 }
 
@@ -83,6 +85,7 @@ function resolveDeps(deps: WorkerServiceDeps): Required<
     writeFile: deps.writeFile ?? ((path, content) => writeFileSync(path, content, "utf8")),
     mkdir: deps.mkdir ?? ((path) => mkdirSync(path, { recursive: true })),
     remove: deps.remove ?? ((path) => rmSync(path, { force: true })),
+    removeEmptyDir: deps.removeEmptyDir ?? ((path) => rmdirSync(path)),
     run: deps.run ?? defaultRun,
   };
 }
@@ -103,6 +106,60 @@ const defaultRun: RunCommandFn = async (command, args) => {
     return { status: 127, stdout: "", stderr: (error as Error).message };
   }
 };
+
+/** Whether this machine can run the user service, or why not. */
+export type ServiceManagerAvailability = { available: true } | { available: false; reason: string };
+
+/**
+ * Check that the init system the service needs is usable: a systemd user
+ * manager on Linux (absent in most containers and WSL setups without
+ * systemd), launchd on macOS. Read-only.
+ */
+export async function checkServiceManager(
+  deps: WorkerServiceDeps = {},
+): Promise<ServiceManagerAvailability> {
+  const d = resolveDeps(deps);
+  if (d.platform === "darwin") return { available: true };
+  if (d.platform !== "linux") {
+    return { available: false, reason: `no service definition exists for ${d.platform}` };
+  }
+  const result = await d.run("systemctl", ["--user", "show-environment"]);
+  if (result.status === 0) return { available: true };
+  if (result.status === 127) return { available: false, reason: "systemctl is not installed" };
+  return {
+    available: false,
+    reason: `no systemd user session is running (${commandDetail(result)})`,
+  };
+}
+
+/**
+ * Create `dir` and return the directories that did not exist before, deepest
+ * first, so a rollback can remove exactly what the install added.
+ */
+function mkdirTracked(d: ReturnType<typeof resolveDeps>, dir: string): string[] {
+  const created: string[] = [];
+  // Only directories under the home directory are ever candidates for removal.
+  for (
+    let current = dir;
+    current.startsWith(`${d.homedir}/`) && !d.exists(current);
+    current = dirname(current)
+  ) {
+    created.push(current);
+  }
+  d.mkdir(dir);
+  return created;
+}
+
+/** Best-effort removal of directories an install created; non-empty ones stay. */
+function removeCreatedDirs(d: ReturnType<typeof resolveDeps>, created: string[]): void {
+  for (const dir of created) {
+    try {
+      d.removeEmptyDir(dir);
+    } catch {
+      // Not empty or already gone: leave it.
+    }
+  }
+}
 
 /** Collapse a command's streams into one short single-line detail string. */
 function commandDetail(result: RunCommandResult): string {
@@ -318,6 +375,7 @@ async function rollbackSystemd(
     previous: string | null;
     wasActive: boolean;
     wasEnabled: boolean;
+    createdDirs: string[];
   },
 ): Promise<void> {
   try {
@@ -330,6 +388,7 @@ async function rollbackSystemd(
   try {
     if (ctx.previous === null) {
       d.remove(ctx.unitPath);
+      removeCreatedDirs(d, ctx.createdDirs);
     } else {
       d.writeFile(ctx.unitPath, ctx.previous);
     }
@@ -368,8 +427,9 @@ async function installSystemd(
   }
   const wasActive = await systemdActive(d.run);
   const wasEnabled = await systemdEnabled(d.run);
+  let createdDirs: string[] = [];
   try {
-    d.mkdir(dirname(unitPath));
+    createdDirs = mkdirTracked(d, dirname(unitPath));
     d.writeFile(
       unitPath,
       renderSystemdUnit({
@@ -407,7 +467,7 @@ async function installSystemd(
           }),
     };
   } catch (error) {
-    await rollbackSystemd(d, { unitPath, previous, wasActive, wasEnabled });
+    await rollbackSystemd(d, { unitPath, previous, wasActive, wasEnabled, createdDirs });
     return { ok: false, error: (error as Error).message };
   }
 }
@@ -421,6 +481,7 @@ async function rollbackLaunchd(
     previous: string | null;
     wasLoaded: boolean;
     bootstrapped: boolean;
+    createdDirs: string[];
   },
 ): Promise<void> {
   if (ctx.bootstrapped) {
@@ -433,6 +494,7 @@ async function rollbackLaunchd(
   try {
     if (ctx.previous === null) {
       d.remove(ctx.plistPath);
+      removeCreatedDirs(d, ctx.createdDirs);
     } else {
       d.writeFile(ctx.plistPath, ctx.previous);
     }
@@ -472,6 +534,7 @@ async function installLaunchd(
   }
   const wasLoaded = await launchdLoaded(d.run, target);
   let bootstrapped = false;
+  let createdDirs: string[] = [];
   try {
     if (wasLoaded) {
       // bootstrap refuses to run while the label is loaded; unload first.
@@ -480,7 +543,7 @@ async function installLaunchd(
         throw new Error(`launchctl bootout failed: ${commandDetail(bootout)}`);
       }
     }
-    d.mkdir(dirname(plistPath));
+    createdDirs = mkdirTracked(d, dirname(plistPath));
     d.writeFile(
       plistPath,
       renderLaunchdPlist({
@@ -512,6 +575,7 @@ async function installLaunchd(
       previous,
       wasLoaded,
       bootstrapped,
+      createdDirs,
     });
     return { ok: false, error: (error as Error).message };
   }

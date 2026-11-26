@@ -656,8 +656,15 @@ remote = "git@github.com:acme/backend.git"
       "0 repos, 0 teams, 0 automations",
     );
     expect(byId(checks, "work-sources")[0]?.status).toBe("warn");
+    expect(byId(checks, "work-sources")[0]?.detail).toContain("0 tracker queries");
     expect(renderReadinessReport(checks).hasFailures).toBe(false);
     expectHintsOnProblems(checks);
+  });
+
+  test("work sources count one tracker query in the singular", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, passingDeps());
+    expect(byId(checks, "work-sources")[0]?.detail).toContain("1 tracker query,");
   });
 });
 

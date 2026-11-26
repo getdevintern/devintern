@@ -257,17 +257,46 @@ function replaceTomlSection(
   );
 }
 
+/**
+ * Set or remove `key = value` lines in one table body without moving the
+ * comments around them: an existing line is replaced where it is, a
+ * commented-out example (`# key = ...`) is activated in place, and a new key
+ * goes right after the table's last key, before any trailing comments that
+ * belong to the next table. Removing a key leaves its commented examples.
+ */
 function replaceTomlKeys(body: string, values: Record<string, string | undefined>): string {
-  let next = body;
+  const lines = body.split("\n");
+  const isKeyLine = (line: string) => line.trim() !== "" && !line.trim().startsWith("#");
   for (const [key, value] of Object.entries(values)) {
-    const pattern = new RegExp(`^\\s*#?\\s*${key}\\s*=\\s*.*(?:\\n|$)`, "gm");
-    next = next.replace(pattern, "");
-    if (value !== undefined) {
-      const separator = next.length > 0 && !next.endsWith("\n") ? "\n" : "";
-      next += `${separator}${key} = ${value}\n`;
+    const active = new RegExp(`^\\s*${key}\\s*=`);
+    const commented = new RegExp(`^\\s*#\\s*${key}\\s*=`);
+    const first = lines.findIndex((line) => active.test(line));
+    // Drop every active line but the first (it is replaced below).
+    for (let index = lines.length - 1; index > first; index--) {
+      if (active.test(lines[index] ?? "")) lines.splice(index, 1);
     }
+    if (value === undefined) {
+      if (first >= 0) lines.splice(first, 1);
+      continue;
+    }
+    const line = `${key} = ${value}`;
+    if (first >= 0) {
+      lines[first] = line;
+      continue;
+    }
+    const example = lines.findIndex((candidate) => commented.test(candidate));
+    if (example >= 0) {
+      lines[example] = line;
+      continue;
+    }
+    let insertAt = 0;
+    lines.forEach((candidate, index) => {
+      if (isKeyLine(candidate)) insertAt = index + 1;
+    });
+    lines.splice(insertAt, 0, line);
   }
-  return next;
+  const next = lines.join("\n");
+  return next === "" || next.endsWith("\n") ? next : `${next}\n`;
 }
 
 /** Update the worker's consequential operating choices while preserving unrelated TOML. */

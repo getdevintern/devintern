@@ -10,7 +10,7 @@
  */
 
 import type { LogFn } from "@devintern/task-trackers";
-import { isPromptAbort } from "../cli/prompt-abort";
+import { isPromptAbort, promptAbortReason } from "../cli/prompt-abort";
 import { trackSetupDeclined, trackSetupFailed } from "../observability/analytics";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 
@@ -85,7 +85,7 @@ export async function ensureTrackerEnvConfigured(
     answer = await prompt("Run the guided setup now? Takes about a minute. [Y/n] ");
   } catch (error) {
     if (!isPromptAbort(error)) throw error;
-    log("\n❌ Input closed (Ctrl+D); setup skipped. Run `devintern init` to configure.");
+    log(`\n❌ ${promptAbortReason(error)}; setup skipped. Run \`devintern init\` to configure.`);
     return "failed";
   }
   if (answer.trim().toLowerCase() === "n") {
@@ -109,7 +109,7 @@ export async function ensureTrackerEnvConfigured(
     // input closes at the sign-in step) still count, so fall through to the
     // reload and re-check below.
     if (!isPromptAbort(error)) throw error;
-    log("\n❌ Input closed (Ctrl+D); setup stopped. Run `devintern init` to finish.");
+    log(`\n❌ ${promptAbortReason(error)}; setup stopped. Run \`devintern init\` to finish.`);
   }
 
   await deps.reloadEnv?.();

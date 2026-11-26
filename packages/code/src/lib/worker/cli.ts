@@ -7,7 +7,7 @@ import {
   loadEnvironment,
   loadSupabaseConfig,
 } from "../cli/bootstrap";
-import { isPromptAbort } from "../cli/prompt-abort";
+import { isPromptAbort, promptAbortReason } from "../cli/prompt-abort";
 import { flushAnalytics, trackWorkerConnect } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
 import { TaskTrackerManager } from "../trackers/manager";
@@ -333,6 +333,17 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     process.exit(1);
   }
   const trackerManager = new TaskTrackerManager();
+  // Worded for someone setting up the worker in a terminal, and naming the
+  // workspace sign-in command (the worker reads the workspace session).
+  const checkEntitlement = (workspaceDir: string) =>
+    checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
+      requireAutomation: true,
+      allowTrial: true,
+      setup: true,
+      loginCommand: "devintern worker login",
+    });
   let ok = false;
   try {
     const result = await runWorkerInit({
@@ -342,19 +353,30 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
         return result.tasks.length;
       },
       checkAutomationLicense: async (workspaceDir) => {
-        const license = await checkLicense({
-          productKey: "devintern/code",
-          supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
-          requireAutomation: true,
-          allowTrial: true,
-        });
+        const license = await checkEntitlement(workspaceDir);
         return license.valid ? null : license.message;
+      },
+      collectReadiness: async (workspaceDir) => {
+        const { collectWorkerDoctorChecks } = await import("../observability/worker-readiness");
+        // Same environment `worker doctor` sees: the workspace .env on top.
+        const processEnv = { ...process.env };
+        try {
+          applyWorkspaceProcessEnv(workspaceDir);
+        } catch {
+          // Unreadable workspace .env: the config check reports it.
+        }
+        return collectWorkerDoctorChecks(
+          { workspacePath: workspaceConfigPath(workspaceDir) },
+          { processEnv, checkEntitlement },
+        );
       },
     });
     ok = result.ok;
   } catch (error) {
     if (!isPromptAbort(error)) throw error;
-    console.log("\n❌ Input closed (Ctrl+D); setup stopped. Re-run `devintern worker init`.");
+    console.log(
+      `\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern worker init\`.`,
+    );
   }
   await flushAnalytics();
   process.exit(ok ? 0 : 1);

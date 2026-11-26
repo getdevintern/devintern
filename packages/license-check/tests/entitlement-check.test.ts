@@ -329,5 +329,28 @@ describe("checkLicense entitlement API", () => {
     expect(request?.init?.headers).toMatchObject({ Authorization: "Bearer test-access-token" });
   });
 
+  test("setup wording names the worker sign-in instead of detected automation", async () => {
+    authenticated = false;
+    const { checkLicense } = await import(`../src/index.ts?setup=${Date.now()}`);
+    const base = {
+      productKey: "devintern/code",
+      supabaseConfig: freshSupabaseConfig(),
+      requireAutomation: true,
+      allowTrial: true,
+    };
 
+    const runtime = await checkLicense(base);
+    expect(runtime.message).toContain("Automated execution detected (CI / systemd / cron)");
+    expect(runtime.message).toContain("run `devintern login` to start a free Worker Pilot");
+
+    const setup = await checkLicense({
+      ...base,
+      setup: true,
+      loginCommand: "devintern worker login",
+    });
+    expect(setup.valid).toBe(false);
+    expect(setup.message).not.toContain("Automated execution detected");
+    expect(setup.message).toContain("the unattended worker needs one to start");
+    expect(setup.message).toContain("run `devintern worker login` to start a free Worker Pilot");
+  });
 });

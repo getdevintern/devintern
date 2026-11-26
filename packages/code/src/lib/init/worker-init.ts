@@ -39,6 +39,9 @@ import {
   loadGitHubAppRecord,
 } from "../code-host/github/app-setup";
 import { isPromptAbort } from "../cli/prompt-abort";
+import { resolveWizardPrompts } from "../cli/prompt-session";
+import { renderReadinessReport } from "../observability/readiness";
+import type { ReadinessCheck } from "../observability/readiness";
 import { runTrackerSetup } from "./wizard";
 import { PRManager } from "../code-host/index";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
@@ -69,6 +72,7 @@ import { workspaceGitLabRelayProjects } from "./worker-connect";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import type { SentryValidationOptions } from "./worker-sentry-setup";
 import {
+  checkServiceManager,
   detectWorkerService,
   installWorkerService,
   LAUNCHD_PLIST_NAME,
@@ -80,6 +84,7 @@ import {
 import type {
   RunCommandFn,
   ServiceInstallResult,
+  ServiceManagerAvailability,
   ServiceState,
   WorkerServiceDeps,
 } from "../worker/service";
@@ -142,10 +147,14 @@ export function generateWebhookSecret(): string {
 
 export interface WorkerInitResult {
   ok: boolean;
+  /** No failing readiness check (or license problem) is left after setup. */
+  ready?: boolean;
 }
 
 export interface WorkerInitDeps {
   prompt?: PromptFn;
+  /** Hidden-input prompt for tokens; defaults to `prompt` when `prompt` is injected. */
+  promptSecret?: PromptFn;
   log?: LogFn;
   cwd?: string;
   /** Evaluate the ready-tasks query; returns the number of matching tasks. */
@@ -153,7 +162,17 @@ export interface WorkerInitDeps {
   /** Automation license check; returns a human-readable failure, or null when entitled. */
   checkAutomationLicense?: (workspaceDir: string) => Promise<string | null>;
   /** Override tracker-config step. Return tracker id, or null to abort. */
-  ensureTracker?: (ctx: { cwd: string; prompt: PromptFn; log: LogFn }) => Promise<string | null>;
+  ensureTracker?: (ctx: {
+    cwd: string;
+    prompt: PromptFn;
+    promptSecret: PromptFn;
+    log: LogFn;
+  }) => Promise<string | null>;
+  /**
+   * Readiness checks shown at the end (the `worker doctor` checks). Without
+   * it the closing line relies on the license step alone.
+   */
+  collectReadiness?: (workspaceDir: string) => Promise<ReadinessCheck[]>;
   /** Override workspace write. */
   bootstrapWorkspace?: (opts: {
     cwd: string;
@@ -202,6 +221,8 @@ export interface WorkerInitDeps {
   run?: RunCommandFn;
   /** Override installed/running detection for the service step (tests). */
   detectService?: () => Promise<ServiceState>;
+  /** Override the systemd/launchd availability check for the service step (tests). */
+  checkServiceManager?: () => Promise<ServiceManagerAvailability>;
   /** Override the whole install-and-launch action (tests). */
   installService?: (ctx: {
     workspaceDir: string;
@@ -224,6 +245,7 @@ interface InitContext {
   projectRoot: string;
   log: LogFn;
   prompt: PromptFn;
+  promptSecret: PromptFn;
 }
 
 type GitHubAppOutcome = "connected" | "existing" | "skipped" | "unavailable";
@@ -250,6 +272,24 @@ interface ServiceRuntime {
   runtimePath: string;
   environmentPath: string;
   deps: WorkerServiceDeps;
+}
+
+/**
+ * Ask a yes/no question until the answer is y/yes, n/no, or empty (the
+ * default). Anything else re-asks instead of being read as either answer.
+ */
+export async function askYesNo(
+  ctx: { prompt: PromptFn; log: LogFn },
+  question: string,
+  fallback: boolean,
+): Promise<boolean> {
+  for (;;) {
+    const answer = (await ctx.prompt(question)).trim().toLowerCase();
+    if (!answer) return fallback;
+    if (answer === "y" || answer === "yes") return true;
+    if (answer === "n" || answer === "no") return false;
+    ctx.log("   Enter y or n.");
+  }
 }
 
 /** Prompt for the conflict-resolution mode and, when scheduled, its cadence. */
@@ -355,15 +395,7 @@ export async function configureWorkerOperatingPolicy(ctx: {
   log: LogFn;
 }): Promise<void> {
   const current = loadWorkspaceConfig(workspaceConfigPath(ctx.workspaceDir));
-  const yesNo = async (question: string, fallback: boolean): Promise<boolean> => {
-    for (;;) {
-      const answer = (await ctx.prompt(question)).trim().toLowerCase();
-      if (!answer) return fallback;
-      if (answer === "y" || answer === "yes") return true;
-      if (answer === "n" || answer === "no") return false;
-      ctx.log("   Enter y or n.");
-    }
-  };
+  const yesNo = (question: string, fallback: boolean) => askYesNo(ctx, question, fallback);
 
   const ciFailureFix = await yesNo(
     `Automatically repair failing CI on worker-created PRs? [${current.workspace.ciFailureFix ? "Y/n" : "y/N"}]: `,
@@ -418,6 +450,7 @@ function applyEnvFile(envPath: string): Record<string, string> {
 async function defaultEnsureTracker(
   cwd: string,
   prompt: PromptFn,
+  promptSecret: PromptFn,
   log: LogFn,
 ): Promise<string | null> {
   // A legacy checkout `.env` is reused once; `add-repo` merges it into the
@@ -436,6 +469,7 @@ async function defaultEnsureTracker(
 
   log("   No tracker config yet — running that subset of `devintern init`.");
   const result = await runTrackerSetup(prompt, log, defaultProbe, cwd, {
+    promptSecret,
     writeEnv: async (envContent) => {
       mergeIntoSharedEnv(sharedEnvPath, envContent, log);
       return sharedEnvPath;
@@ -609,8 +643,13 @@ async function defaultConnectRelay(
 async function resolveWorkerTracker(ctx: InitContext): Promise<TrackerSetup | null> {
   ctx.log("\n1️⃣  Tracker configuration");
   const trackerType = ctx.deps.ensureTracker
-    ? await ctx.deps.ensureTracker({ cwd: ctx.cwd, prompt: ctx.prompt, log: ctx.log })
-    : await defaultEnsureTracker(ctx.cwd, ctx.prompt, ctx.log);
+    ? await ctx.deps.ensureTracker({
+        cwd: ctx.cwd,
+        prompt: ctx.prompt,
+        promptSecret: ctx.promptSecret,
+        log: ctx.log,
+      })
+    : await defaultEnsureTracker(ctx.cwd, ctx.prompt, ctx.promptSecret, ctx.log);
   if (!trackerType) {
     ctx.log("❌ Tracker setup did not finish. Re-run `devintern worker init`.");
     trackWorkerInitFailed("tracker_setup_incomplete");
@@ -626,6 +665,15 @@ async function resolveWorkerTracker(ctx: InitContext): Promise<TrackerSetup | nu
   const trackerName = capabilities?.displayName ?? trackerType;
   ctx.log(`   Using ${trackerName}.`);
   return { trackerType, trackerName, queryExample: capabilities?.queryExample };
+}
+
+/**
+ * A workspace an interrupted `worker init` left behind: no ready-tasks query
+ * and no teams, so no tracker is polled yet and switching it changes nothing
+ * that runs.
+ */
+function isHalfInitialized(config: WorkspaceConfig): boolean {
+  return !config.defaults.taskQuery && config.teams.length === 0;
 }
 
 /**
@@ -661,14 +709,24 @@ async function bootstrapWorkerWorkspace(
   if (workspace.created === false) {
     const existing = loadWorkspaceConfig(workspaceConfigPath(workspace.workspaceDir));
     if (existing.defaults.tracker !== trackerType) {
+      if (!isHalfInitialized(existing)) {
+        ctx.log(
+          `❌ This workspace uses ${existing.defaults.tracker}, but this repo is configured for ${trackerType}.`,
+        );
+        ctx.log("   One worker workspace has one active tracker; keep its defaults unchanged.");
+        trackWorkerInitFailed("workspace_tracker_mismatch");
+        return null;
+      }
+      // An earlier `worker init` stopped before the query step: nothing
+      // polls the old tracker yet, so finish that setup instead of refusing.
       ctx.log(
-        `❌ This workspace uses ${existing.defaults.tracker}, but this repo is configured for ${trackerType}.`,
+        `ℹ️  Finishing an earlier setup that stopped before the query step: tracker ${existing.defaults.tracker} → ${trackerType}.`,
       );
-      ctx.log("   One worker workspace has one active tracker; keep its defaults unchanged.");
-      trackWorkerInitFailed("workspace_tracker_mismatch");
-      return null;
     }
   }
+  // Record the tracker now, not with the query: setup stopped at the query
+  // prompt must not leave the template's default tracker behind.
+  writeWorkspaceDefaults(workspace.workspaceDir, { tracker: trackerType });
   return { workspaceDir: workspace.workspaceDir, repoName: workspace.repoName };
 }
 
@@ -681,16 +739,26 @@ async function promptReadyQuery(
   ctx: InitContext,
   trackerName: string,
   queryExample: string | undefined,
+  currentQuery: string | undefined,
 ): Promise<string> {
   ctx.log("\n3️⃣  Which tasks should the worker pick up?");
   ctx.log("   The query uses the same language as 'devintern --query' for your tracker.");
-  if (queryExample) {
+  if (currentQuery) {
+    ctx.log("   Press Enter to keep the current query.");
+  } else if (queryExample) {
     ctx.log(`   Example: ${queryExample}`);
   }
 
   let query = "";
   for (;;) {
-    query = (await ctx.prompt("Ready-tasks query: ")).trim();
+    query =
+      (
+        await ctx.prompt(
+          currentQuery ? `Ready-tasks query [${currentQuery}]: ` : "Ready-tasks query: ",
+        )
+      ).trim() ||
+      currentQuery ||
+      "";
     if (!query) {
       ctx.log("❌ A query is required — it defines what 'ready for the agent' means.");
       continue;
@@ -707,10 +775,7 @@ async function promptReadyQuery(
       break;
     } catch (error) {
       ctx.log(`❌ Query failed against ${trackerName}: ${(error as Error).message}`);
-      const retry = (await ctx.prompt("Edit the query and try again? [Y/n]: "))
-        .trim()
-        .toLowerCase();
-      if (retry === "n" || retry === "no") {
+      if (!(await askYesNo(ctx, "Edit the query and try again? [Y/n]: ", true))) {
         ctx.log("   Keeping the query as entered; fix it later in workspace.toml.");
         break;
       }
@@ -727,16 +792,18 @@ async function runSentryStep(
 ): Promise<void> {
   ctx.log("\n5️⃣  Sentry auto-fixes (optional)");
   ctx.log("   Watch recurring production errors and run fixes through the normal PR pipeline.");
-  const answer = (
-    await ctx.prompt("Watch a Sentry project and create fixes for recurring errors? [y/N]: ")
-  )
-    .trim()
-    .toLowerCase();
-  if (answer === "y" || answer === "yes") {
+  if (
+    await askYesNo(
+      ctx,
+      "Watch a Sentry project and create fixes for recurring errors? [y/N]: ",
+      false,
+    )
+  ) {
     await runWorkerSentrySetup({
       workspaceDir,
       repoName,
       prompt: ctx.prompt,
+      promptSecret: ctx.promptSecret,
       log: ctx.log,
       validateSentry: ctx.deps.validateSentry,
     });
@@ -745,9 +812,17 @@ async function runSentryStep(
   }
 }
 
-/** Step 6: license is reported but never aborts setup. */
-async function runLicenseStep(ctx: InitContext, workspaceDir: string): Promise<void> {
-  if (!ctx.deps.checkAutomationLicense) return;
+/**
+ * Step 6: license is reported but never aborts setup.
+ *
+ * @returns The remaining license problem, null when entitled, or undefined
+ *   when it was not checked
+ */
+async function runLicenseStep(
+  ctx: InitContext,
+  workspaceDir: string,
+): Promise<string | null | undefined> {
+  if (!ctx.deps.checkAutomationLicense) return undefined;
   ctx.log("\n6️⃣  Checking your automation license (the worker runs unattended)...");
   try {
     let failure = await ctx.deps.checkAutomationLicense(workspaceDir);
@@ -755,12 +830,13 @@ async function runLicenseStep(ctx: InitContext, workspaceDir: string): Promise<v
       ctx.log("✅ Automation license OK.");
     } else {
       ctx.log(`⚠️  ${failure}`);
-      const loginAnswer = (
-        await ctx.prompt("Sign in now to start a free Worker Pilot (no card required)? [Y/n]: ")
-      )
-        .trim()
-        .toLowerCase();
-      if (loginAnswer !== "n" && loginAnswer !== "no") {
+      if (
+        await askYesNo(
+          ctx,
+          "Sign in now to start a free Worker Pilot (no card required)? [Y/n]: ",
+          true,
+        )
+      ) {
         try {
           const signIn = ctx.deps.signIn ?? defaultSignIn;
           const user = await signIn(ctx.projectRoot, workspaceDir);
@@ -777,16 +853,20 @@ async function runLicenseStep(ctx: InitContext, workspaceDir: string): Promise<v
         ctx.log("✅ Free Worker Pilot available. It starts when the worker is ready.");
       } else {
         ctx.log("   The worker will refuse to start until this is fixed:");
-        ctx.log("   sign in for a free Worker Pilot, or get an automation license at");
-        ctx.log("   https://devintern.com/pricing and set LICENSE_KEY in the workspace .env.");
+        ctx.log("   run `devintern worker login` for a free Worker Pilot, or get an automation");
+        ctx.log(
+          "   license at https://devintern.com/pricing and set LICENSE_KEY in the workspace .env.",
+        );
       }
     }
+    return failure;
   } catch (error) {
     // Ctrl+D at the sign-in prompt stops setup; worker/cli.ts reports it.
     if (isPromptAbort(error)) throw error;
     ctx.log(
       `⚠️  License check errored (${(error as Error).message}); the worker re-checks at startup.`,
     );
+    return undefined;
   }
 }
 
@@ -814,10 +894,7 @@ async function resolveRelayUser(
     return user;
   }
 
-  const loginAnswer = (await ctx.prompt("Sign in now to connect the relay? [Y/n]: "))
-    .trim()
-    .toLowerCase();
-  if (loginAnswer === "n" || loginAnswer === "no") {
+  if (!(await askYesNo(ctx, "Sign in now to connect the relay? [Y/n]: ", true))) {
     return null;
   }
   try {
@@ -844,14 +921,13 @@ async function runRelayStep(
   let relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
   let relayConnect: RelayConnectOutcome = "skipped";
   ctx.log("\n7️⃣  Instant events (optional; polling always stays on)");
-  const answer = (
-    await ctx.prompt(
+  if (
+    !(await askYesNo(
+      ctx,
       "React in seconds through the DevIntern relay, without opening a port? [Y/n]: ",
-    )
-  )
-    .trim()
-    .toLowerCase();
-  if (answer === "n" || answer === "no") {
+      true,
+    ))
+  ) {
     ctx.log("   Relay skipped. Polling will still pick up ready tasks and review feedback.");
     return { relayConnected, relayConnect };
   }
@@ -972,21 +1048,17 @@ async function confirmServiceInstall(
   if (state.installed) {
     const offer = state.active ? "restart and update" : "update";
     const bootSuffix = platform === "linux" ? " and ensure it starts at boot" : "";
-    const answer = (
-      await ctx.prompt(
-        `A devintern-worker service is already installed. ${offer} it${bootSuffix} now? [Y/n]: `,
-      )
-    )
-      .trim()
-      .toLowerCase();
-    return answer !== "n" && answer !== "no";
+    return askYesNo(
+      ctx,
+      `A devintern-worker service is already installed. ${offer} it${bootSuffix} now? [Y/n]: `,
+      true,
+    );
   }
   const action =
     platform === "linux"
       ? "Install and start the background service at boot now? [Y/n]: "
       : "Install and start the background service now? [Y/n]: ";
-  const answer = (await ctx.prompt(action)).trim().toLowerCase();
-  return answer !== "n" && answer !== "no";
+  return askYesNo(ctx, action, true);
 }
 
 /** Write the platform service definition and print the manual install steps. */
@@ -1101,6 +1173,21 @@ async function runServiceStep(ctx: InitContext, workspaceDir: string): Promise<S
     ctx.log("   Skipped (--no-service); `devintern worker` runs the same daemon in a terminal.");
     return { serviceRunning: false, serviceInstall: "skipped" };
   }
+  const serviceDeps: WorkerServiceDeps = {
+    platform,
+    homedir: ctx.deps.homedir,
+    uid: ctx.deps.uid,
+    run: ctx.deps.run,
+  };
+  const manager = await (
+    ctx.deps.checkServiceManager ?? (() => checkServiceManager(serviceDeps))
+  )();
+  if (!manager.available) {
+    ctx.log(`   A background service is not available here: ${manager.reason}.`);
+    ctx.log("   Run the worker in the foreground instead: `devintern worker`");
+    ctx.log("   (inside tmux or screen to keep it running after you disconnect).");
+    return { serviceRunning: false, serviceInstall: "unavailable" };
+  }
 
   const printManual = () =>
     printManualServiceDefinition(
@@ -1115,7 +1202,7 @@ async function runServiceStep(ctx: InitContext, workspaceDir: string): Promise<S
     execPath,
     runtimePath,
     environmentPath,
-    deps: { platform, homedir: ctx.deps.homedir, uid: ctx.deps.uid, run: ctx.deps.run },
+    deps: serviceDeps,
   };
   const state = ctx.deps.detectService
     ? await ctx.deps.detectService()
@@ -1135,23 +1222,87 @@ async function runServiceStep(ctx: InitContext, workspaceDir: string): Promise<S
   }
   return installServiceStep(ctx, workspaceDir, runtime, printManual);
 }
+/**
+ * What still keeps the worker from running, one line each: the failing
+ * readiness checks when they ran, otherwise the license step's result.
+ *
+ * @param checks - `worker doctor` checks, or undefined when they did not run
+ * @param licenseFailure - License step outcome (null when entitled)
+ */
+export function readinessBlockers(
+  checks: ReadinessCheck[] | undefined,
+  licenseFailure: string | null | undefined,
+): string[] {
+  if (checks) {
+    return checks
+      .filter((check) => check.status === "fail")
+      .map((check) => `${check.label}: ${check.hint ?? check.detail ?? "see the check above"}`);
+  }
+  if (licenseFailure) {
+    return [
+      "Automation entitlement: run `devintern worker login` to start the free Worker Pilot, or set LICENSE_KEY in the workspace .env",
+    ];
+  }
+  return [];
+}
+
+/** Run the `worker doctor` checks and print them; undefined when they cannot run. */
+async function logReadiness(
+  ctx: InitContext,
+  workspaceDir: string,
+): Promise<ReadinessCheck[] | undefined> {
+  if (!ctx.deps.collectReadiness) return undefined;
+  ctx.log("\n📋 Readiness (the same checks as `devintern worker doctor`):");
+  try {
+    const checks = await ctx.deps.collectReadiness(workspaceDir);
+    for (const line of renderReadinessReport(checks).lines) ctx.log(`   ${line}`);
+    return checks;
+  } catch (error) {
+    ctx.log(`   ⚠️  Could not run the checks: ${(error as Error).message}`);
+    ctx.log("   Run `devintern worker doctor` to check readiness.");
+    return undefined;
+  }
+}
+
+/** Command that restarts the installed user service after a fix. */
+function serviceRestartCommand(platform: NodeJS.Platform): string {
+  return platform === "darwin"
+    ? `launchctl kickstart -k gui/$(id -u)/com.devintern.worker`
+    : "systemctl --user restart devintern-worker";
+}
 
 /** Print the closing summary and the GitHub App / relay guidance. */
 function logWorkerNextSteps(
   ctx: InitContext,
-  serviceRunning: boolean,
-  githubAppOutcome: GitHubAppOutcome,
-  relayConnected: boolean,
+  outcome: {
+    serviceRunning: boolean;
+    githubAppOutcome: GitHubAppOutcome;
+    relayConnected: boolean;
+    blockers: string[];
+  },
 ): void {
-  ctx.log("\n🎉 Worker setup complete!");
-  ctx.log("\n📝 Next steps:");
-  if (serviceRunning) {
-    ctx.log("   1. The worker is already running as your user service.");
+  const { serviceRunning, githubAppOutcome, relayConnected, blockers } = outcome;
+  if (blockers.length > 0) {
+    ctx.log("\n⚠️  Worker setup saved, but the worker is not ready yet. Next steps:");
+    blockers.forEach((blocker, index) => ctx.log(`   ${index + 1}. ${blocker}`));
+    const platform = ctx.deps.platform ?? process.platform;
+    ctx.log(
+      `   ${blockers.length + 1}. Check again with \`devintern worker doctor\`, then ` +
+        (serviceRunning
+          ? `restart the service: ${serviceRestartCommand(platform)}`
+          : "start it with `devintern worker`."),
+    );
   } else {
-    ctx.log("   1. Run `devintern worker`.");
+    ctx.log("\n🎉 Worker setup complete — the worker is ready.");
+    ctx.log("\n📝 Next steps:");
+    if (serviceRunning) {
+      ctx.log("   1. The worker is already running as your user service.");
+    } else {
+      ctx.log("   1. Run `devintern worker`.");
+    }
+    ctx.log("   2. Open http://localhost:4400 to see worker status and runs.");
+    ctx.log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
   }
-  ctx.log("   2. Open http://localhost:4400 to see worker status and runs.");
-  ctx.log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
   if (githubAppOutcome !== "skipped") return;
 
   if (relayConnected) {
@@ -1172,33 +1323,30 @@ function logWorkerNextSteps(
 /**
  * Run the guided worker setup.
  *
- * @returns ok when setup completed and the workspace was written
+ * @returns ok when setup completed and the workspace was written; ready when
+ *   nothing found by the closing checks keeps the worker from running
  */
 export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerInitResult> {
   const cwd = deps.cwd ?? process.cwd();
   const projectRoot = findProjectRoot({ startDir: cwd });
   const log = deps.log ?? console.log;
-  const abort = { ok: false };
+  const abort = { ok: false, ready: false };
 
-  let rl: import("node:readline/promises").Interface | undefined;
-  let prompt = deps.prompt;
-  if (!prompt) {
-    const { createInterface } = await import("node:readline/promises");
-    rl = createInterface({ input: process.stdin, output: process.stdout });
-    prompt = (question: string) => rl!.question(question);
-  }
+  const session = await resolveWizardPrompts(deps);
+  const { prompt, promptSecret } = session;
 
   try {
     log("👷 Setting up the unattended devintern worker.");
     trackWorkerInitStarted();
 
-    const ctx: InitContext = { deps, cwd, projectRoot, log, prompt };
+    const ctx: InitContext = { deps, cwd, projectRoot, log, prompt, promptSecret };
 
     // 1. Reuse tracker config from `devintern init`, or run that subset.
     const tracker = await resolveWorkerTracker(ctx);
     if (!tracker) return abort;
 
-    // 2. Write a workspace (import this repo). Query lands after the dry run.
+    // 2. Write a workspace (import this repo) with the tracker. Query lands
+    // after the dry run.
     const workspace = await bootstrapWorkerWorkspace(ctx, tracker.trackerType);
     if (!workspace) return abort;
     const { workspaceDir, repoName } = workspace;
@@ -1215,7 +1363,14 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     }
 
     // 3. Ready-tasks query, validated with a live dry run, then task_query.
-    const query = await promptReadyQuery(ctx, tracker.trackerName, tracker.queryExample);
+    // A re-run offers the saved query as the Enter default.
+    const currentQuery = loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).defaults.taskQuery;
+    const query = await promptReadyQuery(
+      ctx,
+      tracker.trackerName,
+      tracker.queryExample,
+      currentQuery,
+    );
     writeWorkspaceDefaults(workspaceDir, { tracker: tracker.trackerType, taskQuery: query });
     log(`💾 Wrote [defaults].task_query to ${join(workspaceDir, "workspace.toml")}`);
 
@@ -1234,7 +1389,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     await runSentryStep(ctx, workspaceDir, repoName);
 
     // 6. Automation license — any SKU; do not special-case workspace.
-    await runLicenseStep(ctx, workspaceDir);
+    const licenseFailure = await runLicenseStep(ctx, workspaceDir);
 
     // 7. Relay: polling remains the correctness layer, while a signed-in
     // worker can receive GitHub/tracker envelopes within seconds.
@@ -1248,7 +1403,16 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     // 9. Offer to install and launch the native user service.
     const service = await runServiceStep(ctx, workspaceDir);
 
-    logWorkerNextSteps(ctx, service.serviceRunning, githubAppOutcome, relay.relayConnected);
+    // Close with the doctor's verdict, so "complete" never hides a worker
+    // that will refuse to start (no license, no agent CLI, missing folder).
+    const checks = await logReadiness(ctx, workspaceDir);
+    const blockers = readinessBlockers(checks, licenseFailure);
+    logWorkerNextSteps(ctx, {
+      serviceRunning: service.serviceRunning,
+      githubAppOutcome,
+      relayConnected: relay.relayConnected,
+      blockers,
+    });
 
     trackWorkerInitCompleted({
       tracker: tracker.trackerType,
@@ -1256,8 +1420,8 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       serviceInstall: service.serviceInstall,
       githubApp: githubAppOutcome,
     });
-    return { ok: true };
+    return { ok: true, ready: blockers.length === 0 };
   } finally {
-    rl?.close();
+    session.close();
   }
 }

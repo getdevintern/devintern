@@ -694,10 +694,10 @@ async function runChecks(
       continue;
     }
     if (check.id === "entitlement" && mapped.status === "fail") {
-      // Sign-in is a next step, not a failure of the setup this command did.
+      // Same verdict as `worker doctor`: the worker will not start without
+      // it. The config is already written, so the fix is one sign-in step.
       checks.push({
         ...mapped,
-        status: "warn",
         message: `sign-in needed: ${mapped.message}`,
         hint: "Run `devintern worker login` to start the free Worker Pilot, or set LICENSE_KEY in the workspace .env",
       });
@@ -724,6 +724,7 @@ async function defaultEntitlement(
     supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
     requireAutomation: true,
     allowTrial: true,
+    loginCommand: "devintern worker login",
   });
 }
 
@@ -902,6 +903,18 @@ const STATUS_ICON: Record<CheckStatus, string> = {
   skipped: "⏭️ ",
 };
 
+/** Last line of the text report: ready, only sign-in left, or failed checks to fix. */
+function closingLine(result: NonInteractiveInitReport["result"], failed: InitCheck[]): string {
+  if (result === "success") return "✅ Worker setup complete. Nothing was started or installed.";
+  if (failed.length > 0 && failed.every((check) => check.name === "entitlement")) {
+    return (
+      "❌ Configuration saved, but the worker will not start until it is signed in: run " +
+      "`devintern worker login` (or set LICENSE_KEY), then `devintern worker doctor`."
+    );
+  }
+  return `❌ Worker setup incomplete: ${failed.length} check(s) failed. Fix them and re-run with --yes, or run \`devintern worker doctor\`.`;
+}
+
 /** Human-readable rendering of the report. */
 export function renderNonInteractiveReport(report: NonInteractiveInitReport): string[] {
   const lines: string[] = [];
@@ -920,12 +933,7 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
       lines.push(`  ${index + 1}. ${step.message}: ${step.command}`);
     });
   }
-  const failed = report.checks.filter((check) => check.status === "fail").length;
-  lines.push(
-    "",
-    report.result === "success"
-      ? "✅ Worker setup complete. Nothing was started or installed."
-      : `❌ Worker setup incomplete: ${failed} check(s) failed. Fix them and re-run with --yes, or run \`devintern worker doctor\`.`,
-  );
+  const failed = report.checks.filter((check) => check.status === "fail");
+  lines.push("", closingLine(report.result, failed));
   return lines;
 }

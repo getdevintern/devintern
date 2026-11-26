@@ -177,6 +177,82 @@ describe("runInitWizard", () => {
     expect(existsSync(join(tempDir, ".devintern-code"))).toBe(false);
   });
 
+  test("tokens go through the hidden-input prompt; other answers do not", async () => {
+    const { prompt, asked } = promptQueue([
+      "jira",
+      "https://acme.atlassian.net",
+      "dev@acme.com",
+      "PROJ",
+      "n", // decline sign-in offer
+    ]);
+    const secretAsked: string[] = [];
+    const secrets = ["secret-token", "ghp_hidden"];
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      promptSecret: (question: string) => {
+        secretAsked.push(question);
+        return Promise.resolve(secrets.shift() ?? "");
+      },
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+    expect(secretAsked).toEqual([
+      "JIRA API token (input hidden): ",
+      "GitHub token for creating pull requests (input hidden; optional, Enter to skip): ",
+    ]);
+    expect(asked.some((question) => question.includes("token"))).toBe(false);
+    const env = readWizardEnv();
+    expect(env).toContain("JIRA_API_TOKEN=secret-token");
+    expect(env).toContain("GITHUB_TOKEN=ghp_hidden");
+  });
+
+  test("every tracker token step is marked secret", () => {
+    const secretKeys = Object.values(TRACKER_SETUP)
+      .flat()
+      .filter((step) => step.secret)
+      .map((step) => step.key)
+      .sort();
+    expect(secretKeys).toEqual([
+      "ASANA_API_TOKEN",
+      "AZURE_DEVOPS_PAT",
+      "GITHUB_TOKEN",
+      "GITLAB_TOKEN",
+      "JIRA_API_TOKEN",
+      "LINEAR_API_KEY",
+      "TRELLO_API_TOKEN",
+    ]);
+  });
+
+  test("an HTML error page from the connection check prints one bounded line", async () => {
+    const logs: string[] = [];
+    const { prompt } = promptQueue([
+      "jira",
+      "https://acme.atlassian.net",
+      "dev@acme.com",
+      "tok",
+      "",
+      "s", // skip validation
+      "",
+      "n",
+    ]);
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () =>
+        Promise.reject(
+          new Error(
+            `JIRA API error: 404 - <!DOCTYPE html><html><head><title>Oops</title></head><body>${"x".repeat(2000)}</body></html>`,
+          ),
+        ),
+      cwd: tempDir,
+      log: (message: string) => logs.push(message),
+    });
+    const failure = logs.find((line) => line.startsWith("❌ Connection check failed"));
+    expect(failure).toBe("❌ Connection check failed: JIRA API error: 404 (HTML error page)");
+  });
+
   test("accepts tracker id input and re-prompts on invalid menu choice", async () => {
     const { prompt } = promptQueue([
       "99", // invalid number
@@ -454,7 +530,8 @@ describe("runInitWizard", () => {
     expect(probed).toBe(false);
     const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=markdown");
-    expect(env).toContain("MARKDOWN_TASKS_DIR=./tasks");
+    // Saved absolute: the worker service and task runs use other cwds.
+    expect(env).toContain(`MARKDOWN_TASKS_DIR=${join(tempDir, "tasks")}`);
   });
 
   test("github tracker skips the extra PR-token step", async () => {
