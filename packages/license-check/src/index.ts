@@ -51,6 +51,12 @@ export interface LicenseCheckResult {
   trialEndsAt?: string;
   /** True when the trial is eligible but has not been activated yet. */
   trialAvailable?: boolean;
+  /**
+   * True when nothing is wrong except that nobody is signed in: no
+   * `LICENSE_KEY`, no session, and the check allows a Worker Pilot. Signing
+   * in is the next step, not a fix for a broken setup.
+   */
+  signInRequired?: boolean;
 }
 
 export interface LicenseCheckOptions {
@@ -496,9 +502,21 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     }
   }
 
-  // 3. No valid license. LICENSE_KEY is the recommended remedy: it's more
-  // reliable than auth, which can fail when the purchase was made under a
-  // different email than the Supabase login. Sign-in is the alternative path.
+  return noLicenseResult(options, user !== null, entitlementCheckError);
+}
+
+/**
+ * Step 3 of {@link checkLicense}: no valid license. LICENSE_KEY is the
+ * recommended remedy: it's more reliable than auth, which can fail when the
+ * purchase was made under a different email than the Supabase login. Sign-in
+ * is the alternative path.
+ */
+function noLicenseResult(
+  options: LicenseCheckOptions,
+  signedIn: boolean,
+  entitlementCheckError: string | undefined,
+): LicenseCheckResult {
+  const { requireAutomation = false, allowTrial = false } = options;
   const messages: string[] = [];
   const loginCommand = options.loginCommand ?? "devintern login";
   if (requireAutomation) {
@@ -513,15 +531,15 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     messages.push(
       "Set LICENSE_KEY to a Supporter, Team, or Business license key from https://devintern.com/account, or purchase one at https://devintern.com/pricing.",
     );
-    if (!user) {
+    if (!signedIn) {
       messages.push(
         allowTrial
-          ? `Alternatively, run \`${loginCommand}\` to start a free Worker Pilot; no card is required.`
+          ? `Alternatively, run \`${loginCommand}\` to start your 14-day free Worker Pilot (no card required).`
           : "Alternatively, sign in if your account already holds one.",
       );
     }
   } else {
-    if (!user) {
+    if (!signedIn) {
       messages.push("No LICENSE_KEY is set and you are not signed in.");
     } else if (entitlementCheckError) {
       messages.push(`License entitlement check failed: ${entitlementCheckError}.`);
@@ -537,6 +555,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     valid: false,
     source: "none",
     message: messages.join(" "),
+    ...(!signedIn && requireAutomation && allowTrial ? { signInRequired: true } : {}),
   };
 }
 
@@ -561,6 +580,8 @@ export async function activateWorkerTrial(options: {
   productKey: string;
   supabaseConfig: SupabaseAuthConfig;
   retryBaseDelayMs?: number;
+  /** Sign-in command named in the message (defaults to `devintern login`). */
+  loginCommand?: string;
 }): Promise<LicenseCheckResult> {
   let user: AuthenticatedUser | null = null;
   try {
@@ -572,7 +593,8 @@ export async function activateWorkerTrial(options: {
     return {
       valid: false,
       source: "none",
-      message: "Run `devintern login` to start the free Worker Pilot.",
+      message: `Run \`${options.loginCommand ?? "devintern login"}\` to start your 14-day free Worker Pilot (no card required).`,
+      signInRequired: true,
     };
   }
 

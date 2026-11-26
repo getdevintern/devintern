@@ -16,7 +16,7 @@ If the relay is unreachable, the worker's regular [polling](./worker.md#polling-
 ## Quick start
 
 ```bash
-devintern login            # interactive sign-in
+devintern worker login github   # sign in for the worker workspace (or google, x, email you@company.com)
 devintern worker connect   # pair every GitHub and GitLab repository in the workspace
 devintern worker           # starts the relay connection alongside polling
 ```
@@ -47,7 +47,7 @@ For trackers, set the tracker credentials (see the table below), then run `devin
 
 | Variable              | Required | Description                                                                    |
 | --------------------- | -------- | ------------------------------------------------------------------------------ |
-| (signed-in session)   | Connect  | Run `devintern login` first; stored in `~/.devintern/state/code/.auth-session.json`    |
+| (signed-in session)   | Connect  | Run `devintern worker login` first; stored in `~/.devintern/state/code/.auth-session.json` |
 | `LICENSE_KEY`         | Worker   | Automation license for unattended `devintern worker` runs                      |
 | `WORKER_RELAY_URL`    | No       | Relay base URL (default `https://relay.devintern.com`)                         |
 | `DEVINTERN_AUTH_CALLBACK_PORT` | No | Fixed OAuth callback port for remote sign-in (default `17865`)              |
@@ -103,6 +103,8 @@ Pairing state is stored in owner-only `~/.devintern/state/code/relay.json`.
 ## Signing in over SSH or mosh
 
 Browser sign-in redirects to `127.0.0.1` on the machine running the CLI. On a remote host or in a container, run `devintern worker login github` (or `google`, `x`, `email you@company.com`) and open the printed URL in your laptop browser. After you sign in, the browser lands on a `127.0.0.1` page that does not load. Copy that page's full address, paste it into the waiting terminal, and press Enter. This works over SSH, mosh, and `docker run -it`. An email sign-in link works the same way.
+
+With no terminal at all (a coding agent, a script, `docker exec` without `-it`), split it in two: `devintern worker login github --no-wait` prints the URL and exits, and `devintern worker login --complete '<address>'` on the same host finishes it. See [Signing in without a terminal](./worker.md#signing-in-without-a-terminal).
 
 Over SSH you can instead forward the callback port before opening the URL (mosh cannot forward ports):
 

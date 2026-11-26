@@ -34,7 +34,7 @@ import type { CommandResult } from "./process";
 export interface WorkerInitReport {
   schema: string;
   version: number;
-  result: "success" | "failure";
+  result: "success" | "action_required" | "failure";
   error?: string;
   workspaceDir: string;
   tracker: string | null;
@@ -44,11 +44,12 @@ export interface WorkerInitReport {
   checks: Array<{
     name: string;
     label: string;
-    status: "pass" | "warn" | "fail" | "skipped";
+    status: "pass" | "warn" | "action" | "fail" | "skipped";
     message: string;
     hint?: string;
   }>;
   nextSteps: Array<{ id: string; message: string; command: string }>;
+  signIn?: { url: string | null; method: string; expiresAt: string; complete: string };
 }
 
 /** The parts of `workspace.toml` the init tests assert on. */

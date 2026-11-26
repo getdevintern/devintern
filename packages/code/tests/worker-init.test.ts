@@ -1016,8 +1016,34 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
       );
       expect(result.ready).toBe(false);
       const all = logs.join("\n");
-      expect(all).toContain("run `devintern worker login`");
+      expect(all).toContain("run `devintern worker login github`");
+      expect(all).toContain("14-day free Worker Pilot, no card required");
       expect(all).not.toContain("🎉");
+    });
+
+    test("when signing in is the only step left, the closing line says so", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          collectReadiness: async () => [
+            { id: "config", label: "Workspace config", status: "ok", detail: "1 repo" },
+            {
+              id: "entitlement",
+              label: "Automation entitlement",
+              status: "action",
+              detail:
+                "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+              hint: "Run `devintern worker login github`",
+            },
+          ],
+        }),
+      );
+      expect(result).toEqual({ ok: true, ready: false });
+      const all = logs.join("\n");
+      expect(all).toContain(
+        "👉 Worker setup saved. One step left: sign in to begin your 14-day free Worker Pilot, no card required.",
+      );
+      expect(all).toContain("1. Automation entitlement: Run `devintern worker login github`");
+      expect(all).not.toContain("not ready yet");
     });
   });
 

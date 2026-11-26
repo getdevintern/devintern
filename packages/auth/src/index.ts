@@ -3,11 +3,22 @@ import type { Session, User } from "@supabase/supabase-js";
 import {
   AUTH_CALLBACK_TIMEOUT_MS,
   createAuthCallbackServer,
+  DEFAULT_REMOTE_AUTH_CALLBACK_PORT,
   EMAIL_AUTH_CALLBACK_TIMEOUT_MS,
+  parsePastedCallback,
 } from "./auth-callback";
 import type { AuthCallbackServer } from "./auth-callback";
 import { loginMethodLabel, promptForEmail, watchStdinLines } from "./login-provider";
 import type { ResolvedLogin, OAuthProvider } from "./login-provider";
+import {
+  PENDING_LOGIN_TTL_MS,
+  PendingLoginError,
+  pastedAddressMismatch,
+  pendingLoginPath,
+  readPendingLogin,
+  removePendingLogin,
+  writePendingLogin,
+} from "./pending-login";
 import {
   isRemoteCliSession,
   openBrowser,
@@ -42,6 +53,17 @@ export {
   type PastedCallback,
 } from "./auth-callback";
 export { isRemoteCliSession, resolveAuthCallbackPort } from "./runtime";
+export {
+  PENDING_LOGIN_FILE,
+  PENDING_LOGIN_TTL_MS,
+  PendingLoginError,
+  parsePendingLogin,
+  pastedAddressMismatch,
+  pendingLoginPath,
+  readPendingLogin,
+  type PendingLogin,
+  type PendingLoginErrorCode,
+} from "./pending-login";
 
 export const DEFAULT_SUPABASE_URL = "https://robbzuhuqcgpfevaorux.supabase.co";
 export const DEFAULT_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_E31lRt1Z8hq3XuJIutiB3g_Y2sSEc5D";
@@ -391,6 +413,183 @@ export async function login(
     return loginWithEmail(config, resolved.email, hooks);
   }
   return loginWithOAuth(config, resolved.method, hooks);
+}
+
+/** Supabase storage key for the two-step sign-in client (its verifier is `<key>-code-verifier`). */
+const PENDING_STORAGE_KEY = "devintern-cli-auth";
+const PENDING_VERIFIER_KEY = `${PENDING_STORAGE_KEY}-code-verifier`;
+
+/**
+ * Supabase client whose auth storage is a plain map, so the PKCE code
+ * verifier can be saved after starting a sign-in and restored to finish it in
+ * another process. Nothing else is persisted.
+ */
+function createPkceClientWithStorage(config: SupabaseAuthConfig, items: Map<string, string>) {
+  return createClient(config.url, config.publishableKey, {
+    auth: {
+      flowType: "pkce",
+      autoRefreshToken: false,
+      // Custom storage applies only with persistSession; it is in memory.
+      persistSession: true,
+      storageKey: PENDING_STORAGE_KEY,
+      storage: {
+        getItem: (key: string) => items.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          items.set(key, value);
+        },
+        removeItem: (key: string) => {
+          items.delete(key);
+        },
+      },
+      detectSessionInUrl: false,
+    },
+  });
+}
+
+/** A sign-in started with {@link startPendingLogin}. */
+export interface StartedPendingLogin {
+  method: ResolvedLogin["method"];
+  /** Set for email sign-in: where the link was sent. */
+  email?: string;
+  /** Address to open in a browser; `null` for email (the link is in the inbox). */
+  url: string | null;
+  /** Address the browser lands on after sign-in. */
+  redirectTo: string;
+  /** When the pending sign-in stops being accepted (ISO 8601). */
+  expiresAt: string;
+}
+
+/** Options for {@link startPendingLogin} and {@link completePendingLogin}. */
+export interface PendingLoginOptions {
+  /** Callback port in the redirect address (default: `DEVINTERN_AUTH_CALLBACK_PORT` or 17865). */
+  port?: number;
+  /** Current time in ms (tests). */
+  now?: () => number;
+  /** Command shown in errors to start a sign-in again. */
+  startCommand?: string;
+}
+
+/**
+ * Start a sign-in without waiting for it: build the sign-in address (or send
+ * the email link), save the PKCE verifier to an owner-only pending file next
+ * to the session file, and return. {@link completePendingLogin} finishes it
+ * with the address the browser lands on. No local server is started; the
+ * browser's `127.0.0.1` page will not load, and that is expected.
+ *
+ * @param config - Supabase auth configuration.
+ * @param resolved - Login method (email needs the address).
+ * @param options - Port and clock overrides.
+ * @returns The address to open and the expiry.
+ * @throws When the email address is missing or Supabase rejects the request.
+ */
+export async function startPendingLogin(
+  config: SupabaseAuthConfig,
+  resolved: ResolvedLogin,
+  options: PendingLoginOptions = {},
+): Promise<StartedPendingLogin> {
+  const port =
+    options.port ?? resolveAuthCallbackPort(process.env, true) ?? DEFAULT_REMOTE_AUTH_CALLBACK_PORT;
+  const redirectTo = `http://127.0.0.1:${port}/auth/callback`;
+  const items = new Map<string, string>();
+  const client = createPkceClientWithStorage(config, items);
+  let url: string | null = null;
+  let email: string | undefined;
+  if (resolved.method === "email") {
+    email = resolved.email?.trim();
+    if (!email) {
+      throw new Error("Email sign-in needs the address, for example `email you@company.com`.");
+    }
+    const { error } = await client.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: redirectTo },
+    });
+    if (error) throw new Error(`Could not send sign-in email: ${error.message}`);
+  } else {
+    const { data, error } = await client.auth.signInWithOAuth({
+      provider: resolved.method,
+      options: { redirectTo, skipBrowserRedirect: true },
+    });
+    if (error) {
+      throw new Error(
+        `Could not start ${loginMethodLabel(resolved.method)} login: ${error.message}`,
+      );
+    }
+    if (!data.url) throw new Error("Supabase did not return an OAuth URL.");
+    url = data.url;
+  }
+  // Supabase stores JSON-encoded values; keep the plain verifier on disk.
+  const stored = items.get(PENDING_VERIFIER_KEY);
+  const codeVerifier = stored ? (JSON.parse(stored) as unknown) : undefined;
+  if (typeof codeVerifier !== "string" || !codeVerifier) {
+    throw new Error("Supabase did not create a PKCE code verifier.");
+  }
+  const now = options.now?.() ?? Date.now();
+  const expiresAt = new Date(now + PENDING_LOGIN_TTL_MS).toISOString();
+  await writePendingLogin(pendingLoginPath(config), {
+    version: 1,
+    method: resolved.method,
+    ...(email ? { email } : {}),
+    redirectTo,
+    codeVerifier,
+    createdAt: new Date(now).toISOString(),
+    expiresAt,
+  });
+  return { method: resolved.method, ...(email ? { email } : {}), url, redirectTo, expiresAt };
+}
+
+/**
+ * Finish a sign-in started with {@link startPendingLogin}: exchange the code
+ * in the pasted address with the saved verifier, save the session exactly as
+ * an interactive login does, and delete the pending file.
+ *
+ * @param config - Supabase auth configuration.
+ * @param address - The address the browser landed on (or its `code=...` query).
+ * @param options - Clock and command overrides.
+ * @returns The signed-in user.
+ * @throws {PendingLoginError} When nothing is pending, it expired, the address
+ *   is not a sign-in address or belongs to another sign-in, or the exchange fails.
+ */
+export async function completePendingLogin(
+  config: SupabaseAuthConfig,
+  address: string,
+  options: PendingLoginOptions = {},
+): Promise<AuthenticatedUser> {
+  const startCommand = options.startCommand ?? "devintern login github --no-wait";
+  const path = pendingLoginPath(config);
+  const pending = await readPendingLogin(path, startCommand, options.now?.() ?? Date.now());
+  const parsed = parsePastedCallback(address);
+  if (!parsed) {
+    throw new PendingLoginError(
+      "bad-address",
+      "That is not a sign-in address. Pass the full address the browser landed on " +
+        "(a 127.0.0.1 page that does not load; it contains `code=`).",
+    );
+  }
+  if ("error" in parsed) {
+    await removePendingLogin(path);
+    throw new PendingLoginError(
+      "oauth-error",
+      `Sign-in was not completed: ${parsed.error}. Start again with \`${startCommand}\`.`,
+    );
+  }
+  const mismatch = pastedAddressMismatch(address, pending);
+  if (mismatch) throw new PendingLoginError("mismatch", mismatch);
+
+  const items = new Map([[PENDING_VERIFIER_KEY, JSON.stringify(pending.codeVerifier)]]);
+  const client = createPkceClientWithStorage(config, items);
+  const { data, error } = await client.auth.exchangeCodeForSession(parsed.code);
+  if (error || !data.session || !data.user) {
+    // Keep the pending file: a mistyped code can be retried until it expires.
+    throw new PendingLoginError(
+      "exchange-failed",
+      `Sign-in failed: ${error?.message || "no session was returned"}. The address works once, ` +
+        "only on the host that started the sign-in, and only for a few minutes. " +
+        `If it keeps failing, start again with \`${startCommand}\`.`,
+    );
+  }
+  const user = await persistAuthenticatedSession(config, data.session, data.user);
+  await removePendingLogin(path);
+  return user;
 }
 
 /**
