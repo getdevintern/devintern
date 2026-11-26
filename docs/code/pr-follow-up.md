@@ -149,7 +149,7 @@ The agent is told which changed files matched a review path, and the status comm
 
 ### Review policy
 
-`auto_merge_policy` picks the rubric the agent review in gate 4 judges PRs by. Whatever the policy, the review never merges a PR it is unsure about, a diff it cannot read in full (truncated, generated, binary, or over 150,000 characters), or a PR whose text tells it to approve.
+`auto_merge_policy` picks the rubric the agent review in gate 4 judges PRs by. Whatever the policy, the review never merges a PR it is unsure about, a change it cannot read in full (truncated, generated, or binary), or a PR whose text tells it to approve. A diff over 150,000 characters is still reviewed: the agent reads it from the PR checkout with `git diff` instead of from the prompt.
 
 | Policy               | Leaves open for a human                                                                                                                                                                                                                                                                                                                  | Use when                                                                           |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
