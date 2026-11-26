@@ -330,3 +330,201 @@ export class DashboardFixture {
     return this.child.exitCode;
   }
 }
+
+/** One Inbox row as `GET /api/notifications` serves it (the fields the suites assert on). */
+export interface DashboardNotification {
+  id: number;
+  kind: string;
+  severity: "high" | "normal";
+  groupKey: string;
+  count: number;
+  runId?: number;
+  repo?: string;
+  subject?: string;
+  title: string;
+  body?: string;
+  createdAt: number;
+  updatedAt: number;
+  readAt?: number;
+  resolvedAt?: number;
+  muted: boolean;
+}
+
+/** `GET /api/notifications` page. */
+export interface DashboardNotificationPage {
+  notifications: DashboardNotification[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** `GET /api/notifications/unread-count` body. */
+export interface DashboardUnreadCount {
+  unread: number;
+  unreadHigh: number;
+}
+
+/** `GET /api/notifications/mutes` entry. */
+export interface DashboardNotificationMute {
+  groupKey: string;
+  mutedAt: number;
+}
+
+function record(value: unknown, context: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${context}: expected a JSON object, got ${JSON.stringify(value)}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function numberField(row: Record<string, unknown>, key: string, context: string): number {
+  const value = row[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${context}: ${key} must be a number, got ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+function stringField(row: Record<string, unknown>, key: string, context: string): string {
+  const value = row[key];
+  if (typeof value !== "string") {
+    throw new Error(`${context}: ${key} must be a string, got ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+function optional<T>(
+  row: Record<string, unknown>,
+  key: string,
+  read: (row: Record<string, unknown>, key: string, context: string) => T,
+  context: string,
+): T | undefined {
+  return row[key] === undefined || row[key] === null ? undefined : read(row, key, context);
+}
+
+/** Parse one served notification; throws with the offending field on a shape change. */
+export function parseDashboardNotification(raw: unknown): DashboardNotification {
+  const context = "notification";
+  const row = record(raw, context);
+  const severity = stringField(row, "severity", context);
+  if (severity !== "high" && severity !== "normal") {
+    throw new Error(`${context}: unexpected severity ${JSON.stringify(severity)}`);
+  }
+  if (typeof row.muted !== "boolean") {
+    throw new Error(`${context}: muted must be a boolean, got ${JSON.stringify(row.muted)}`);
+  }
+  const runId = optional(row, "runId", numberField, context);
+  const repo = optional(row, "repo", stringField, context);
+  const subject = optional(row, "subject", stringField, context);
+  const body = optional(row, "body", stringField, context);
+  const readAt = optional(row, "readAt", numberField, context);
+  const resolvedAt = optional(row, "resolvedAt", numberField, context);
+  return {
+    id: numberField(row, "id", context),
+    kind: stringField(row, "kind", context),
+    severity,
+    groupKey: stringField(row, "groupKey", context),
+    count: numberField(row, "count", context),
+    ...(runId !== undefined ? { runId } : {}),
+    ...(repo !== undefined ? { repo } : {}),
+    ...(subject !== undefined ? { subject } : {}),
+    title: stringField(row, "title", context),
+    ...(body !== undefined ? { body } : {}),
+    createdAt: numberField(row, "createdAt", context),
+    updatedAt: numberField(row, "updatedAt", context),
+    ...(readAt !== undefined ? { readAt } : {}),
+    ...(resolvedAt !== undefined ? { resolvedAt } : {}),
+    muted: row.muted,
+  };
+}
+
+async function okJson(response: Response, label: string): Promise<unknown> {
+  const text = await response.text();
+  if (response.status !== 200) {
+    throw new Error(`${label} returned ${response.status}: ${text}`);
+  }
+  return JSON.parse(text) as unknown;
+}
+
+/** List query parameters accepted by `GET /api/notifications`. */
+export interface NotificationListQuery {
+  unresolved?: boolean;
+  severity?: string;
+  kind?: string;
+  includeMuted?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /api/notifications` with the given filters, parsed into a page. */
+export async function listNotifications(
+  baseUrl: string,
+  query: NotificationListQuery = {},
+): Promise<DashboardNotificationPage> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
+  const search = params.size > 0 ? `?${params.toString()}` : "";
+  const label = `GET /api/notifications${search}`;
+  const body = record(
+    await okJson(await fetch(`${baseUrl}/api/notifications${search}`), label),
+    label,
+  );
+  if (!Array.isArray(body.notifications)) {
+    throw new Error(`${label}: notifications must be an array`);
+  }
+  return {
+    notifications: body.notifications.map(parseDashboardNotification),
+    total: numberField(body, "total", label),
+    limit: numberField(body, "limit", label),
+    offset: numberField(body, "offset", label),
+  };
+}
+
+/** `GET /api/notifications/unread-count`. */
+export async function notificationUnreadCount(baseUrl: string): Promise<DashboardUnreadCount> {
+  const label = "GET /api/notifications/unread-count";
+  const body = record(
+    await okJson(await fetch(`${baseUrl}/api/notifications/unread-count`), label),
+    label,
+  );
+  return {
+    unread: numberField(body, "unread", label),
+    unreadHigh: numberField(body, "unreadHigh", label),
+  };
+}
+
+/** `GET /api/notifications/mutes`. */
+export async function notificationMutes(baseUrl: string): Promise<DashboardNotificationMute[]> {
+  const label = "GET /api/notifications/mutes";
+  const body = record(
+    await okJson(await fetch(`${baseUrl}/api/notifications/mutes`), label),
+    label,
+  );
+  if (!Array.isArray(body.mutes)) throw new Error(`${label}: mutes must be an array`);
+  return body.mutes.map((raw) => {
+    const row = record(raw, label);
+    return {
+      groupKey: stringField(row, "groupKey", label),
+      mutedAt: numberField(row, "mutedAt", label),
+    };
+  });
+}
+
+/**
+ * Send one guarded notification write (`/api/notifications/<path>`) with the
+ * dashboard's own write headers; returns the status and parsed body.
+ */
+export async function notificationWrite(
+  baseUrl: string,
+  path: string,
+  body?: unknown,
+): Promise<DashboardWriteResult<Record<string, unknown>>> {
+  const response = await fetch(`${baseUrl}/api/notifications/${path}`, {
+    method: "POST",
+    headers: dashboardWriteHeaders(baseUrl),
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  return { status: response.status, body: record(await response.json(), `POST ${path}`) };
+}

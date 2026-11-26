@@ -53,6 +53,30 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: The `unconfirmed` state (needs a worker without an applied-config record) and asserting a transient `pending` (timing-dependent, deliberately not asserted).
 - Last reviewed: 2026-11-23
 
+### Inbox: worker runs create grouped notifications (GET /api/notifications, unread-count)
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/dashboard-inbox.test.ts` (first case: a failed ad-hoc run raises one high `retries_exhausted` row counted in `unread`/`unreadHigh`; marked read, a dashboard retry that fails again folds into the same row with `count` 2 and unread again; an escalated run adds an `escalated` row; `unresolved`, `severity`, `kind`, `limit`/`offset` subsets and ordering, and 400s for invalid filters; one row cross-checked against `queue.db`) (`bun run --filter @devintern/e2e test`)
+- Missing: Normal-severity kinds (`work_spawned`, `pr_opened`, `pr_auto_merged`) and the DevIntern-side kinds (`internal_error`, environment `source_unhealthy`) from real runs, so `severity=normal` is only asserted empty; `automation_broke` from a real automation.
+- Last reviewed: 2026-11-27
+
+### Inbox: read, read-all, resolve, mute and unmute through the dashboard
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/dashboard-inbox.test.ts` (first case: `POST /api/notifications/:id/read`, `read-all` (`updated` count, second call 0), `:id/resolve` (drops out of `unresolved=true` and the unread count, stays listed), `mute`/`unmute` with `{ "groupKey" }` (hidden by default, in `GET /api/notifications/mutes`, shown with `includeMuted=true`; a later failing retry of the muted task leaves the row unchanged and hidden); a write with no Origin and one with a foreign Origin return 403 and change nothing; 404/400 for unknown or malformed ids and an empty mute body) (`bun run --filter @devintern/e2e test`)
+- Missing: Dashboard UI clicks (bell, Overview "Needs you") are not driven; only the HTTP API is. `read-all` marking resolved rows read too (`updated` counts them) is asserted as documented ("every row").
+- Last reviewed: 2026-11-27
+
+### Inbox: a later successful run auto-resolves the task's notification
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/dashboard-inbox.test.ts` (second case: a task that fails once raises a `retries_exhausted` row; its dashboard retry succeeds and the run rules resolve the row with no Inbox write, so it leaves `unresolved=true` and the unread count while an unrelated failing task's row stays open) (`bun run --filter @devintern/e2e test`)
+- Missing: Auto-resolve of `escalated` rows by a PR merge/close and of `internal_error`/environment rows that fold several tasks.
+- Last reviewed: 2026-11-27
+
 ## Backlog
 
 Priority numbers are the global ranking from the
@@ -325,3 +349,41 @@ removed in `finally`, and the daemon is stopped there too.
 bun run --filter @getdevintern/code build
 cd packages/e2e && bun test tests/local/dashboard-workspace-sync.test.ts
 ```
+
+### Inbox notifications API
+
+Proves: Inbox rows written by real worker runs (CLI child processes) are
+grouped, counted, filtered, and changed through the worker-embedded
+dashboard's `/api/notifications…` routes as `docs/code/dashboard.md#inbox`
+describes.
+
+How: `tests/local/dashboard-inbox.test.ts` runs in the default offline suite
+and starts a `WorkerFixture` with `dashboard: { port }` per case. Outcomes come
+from the deterministic agent: a task whose body carries `E2E_FAIL_PROMPT_MARKER`
+fails on every attempt, one with `E2E_INCOMPLETE_PROMPT_MARKER` escalates, and
+`E2E_FAIL_ONCE_FILE` fails only the first invocation. Repeats go through
+`POST /api/runs/:id/retry`, which re-queues the same ad-hoc task. Reads and
+writes use the typed helpers in `helpers/dashboard.ts` (`listNotifications`,
+`notificationUnreadCount`, `notificationMutes`, `notificationWrite`, which
+sends `dashboardWriteHeaders`). Every wait is a bounded poll. No
+`[notifications.*]` delivery channel is configured.
+
+- First case: task A fails (`retries_exhausted`, high, unread 1/1), is marked
+  read, then fails again on retry and folds into the same row (`count` 2,
+  unread again). Task B escalates and task C fails, giving three rows for the
+  `kind`, `severity`, `unresolved`, and `limit`/`offset` checks. An unguarded
+  and a cross-origin write return 403. Resolve, read-all, mute (with a third
+  failing retry of A that stays hidden), and unmute are then checked against
+  the list, mutes, and unread-count responses.
+- Second case: task D fails once, task E keeps failing; D's retry succeeds and
+  D's row is resolved by the run rules alone, while E's stays open.
+
+Run:
+
+```sh
+bun run --filter @getdevintern/code build
+cd packages/e2e && bun test tests/local/dashboard-inbox.test.ts
+```
+
+Prerequisites: the built CLI only (the `dist/` skip guard is the only skip).
+The file takes about 10 s.
