@@ -124,6 +124,7 @@ export interface UtilsSurface {
     message: string;
     hookError?: string;
   }>;
+  hasPrePushHook(cwd?: string): Promise<boolean>;
   runPrePushHookLocally(options?: { verbose?: boolean; cwd?: string }): Promise<{
     success: boolean;
     message: string;

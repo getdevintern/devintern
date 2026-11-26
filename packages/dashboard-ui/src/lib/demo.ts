@@ -13,6 +13,8 @@ import type { RunRecord } from "./api";
 import type { NotificationRecord } from "./api-notifications";
 import {
   answerDemoNotifications,
+  classifyDemoRunDetail,
+  classifyDemoRuns,
   demoNotifications,
   filterRecordedRuns,
   isRunDetailUrl,
@@ -103,10 +105,14 @@ export function createDemoFetch(options: DemoFetchOptions): typeof fetch {
   };
   let runs: Promise<RunRecord[]> | undefined;
   const recordedRuns = (): Promise<RunRecord[]> => {
+    // Recordings that predate outcome classes get them here, including one
+    // DevIntern-side failure, so the banner, badges, and inbox tab have data.
     runs ??= load(RUNS_ALL_FILE).then((body) =>
-      body && typeof body === "object" && Array.isArray((body as { runs?: unknown }).runs)
-        ? (body as { runs: RunRecord[] }).runs
-        : [],
+      classifyDemoRuns(
+        body && typeof body === "object" && Array.isArray((body as { runs?: unknown }).runs)
+          ? (body as { runs: RunRecord[] }).runs
+          : [],
+      ),
     );
     return runs;
   };
@@ -145,8 +151,9 @@ export function createDemoFetch(options: DemoFetchOptions): typeof fetch {
     let body = await load(file);
     if (body === undefined) return jsonResponse(404, { error: "not part of this demo" });
     if (isRunDetailUrl(target)) {
-      const recordedIds = new Set((await recordedRuns()).map((run) => run.id));
-      body = pruneUnrecordedLineage(body, recordedIds);
+      const all = await recordedRuns();
+      const recordedIds = new Set(all.map((run) => run.id));
+      body = classifyDemoRunDetail(pruneUnrecordedLineage(body, recordedIds), all);
     }
     return jsonResponse(200, rebaseTimestamps(body, delta));
   };

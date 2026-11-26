@@ -18,7 +18,7 @@ import {
   recordRunStage,
 } from "../src/lib/state/run-recorder";
 import type { RunStageRecord } from "../src/lib/state/run-recorder";
-import { recordImplementationStage } from "../src/lib/task/pipeline";
+import { recordImplementationStage } from "../src/lib/task/implementation-stage";
 
 let taskDir: string;
 let activeRun = false;

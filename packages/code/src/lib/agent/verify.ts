@@ -11,7 +11,8 @@ import {
 import type { ReviewFeedback, ReviewFeedbackItem, ReviewPriority } from "../../types/auto-review";
 import { isShuttingDown } from "../cli/shutdown-state";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
-import { recordRunStage } from "../state/run-recorder";
+import { noteRunFailure, recordRunStage } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
 import type { TaskStepResult } from "../task/step-runner";
 import type { DeliveryState } from "./run-harness-finalize";
 
@@ -235,6 +236,9 @@ export async function verifyImplementation(
         // raw answer, and record the stage so the dashboard shows verification
         // instead of an unexplained halted implementation.
         await saveVerificationFailure(state, prompt, output);
+        // The verify machinery itself failed (the diff, the review agent, or
+        // its verdict), not the implementation: DevIntern's problem.
+        noteRunFailure(failureFromError(error, "verify"));
         recordRunStage("verify", {
           status: "failed",
           summary: (error as Error).message,

@@ -13,7 +13,11 @@ import type { OverviewResponse } from "@/lib/api-overview";
 import type { NotificationListResponse } from "@/lib/api-notifications";
 import { NOTIFICATION_POLL_MS } from "@/components/notifications/NotificationBell";
 import { NOTIFICATIONS_CHANGED_EVENT } from "@/lib/api-notifications";
-import { NeedsYouBlock, NEEDS_YOU_URL } from "@/components/overview/NeedsYouSection";
+import {
+  NeedsYouBlock,
+  NEEDS_YOU_URL,
+  WAITING_ON_REVIEW_URL,
+} from "@/components/overview/NeedsYouSection";
 import { queueTotal, WorkerFacts } from "@/components/overview/WorkerFacts";
 import { OverviewAlertBanner } from "@/components/overview/OverviewAlertBanner";
 import { ActiveWorkSection } from "@/components/overview/ActiveWorkSection";
@@ -30,6 +34,7 @@ export function OverviewScreen({
   activityRuns = null,
   queuedWork = null,
   needsYou = null,
+  waitingOnReview = null,
   now,
 }: {
   overview: OverviewResponse;
@@ -40,6 +45,8 @@ export function OverviewScreen({
   activityRuns?: RunRecord[] | null;
   /** Unresolved high-severity notifications; the block hides when empty. */
   needsYou?: NotificationListResponse | null;
+  /** Unresolved escalations (`total` only), split out of the Needs you count. */
+  waitingOnReview?: NotificationListResponse | null;
   now: number;
 }) {
   const alerts = overviewAlerts(overview, now);
@@ -61,7 +68,7 @@ export function OverviewScreen({
         ))}
       </div>
 
-      <NeedsYouBlock list={needsYou} now={now} />
+      <NeedsYouBlock list={needsYou} now={now} waitingOnReview={waitingOnReview?.total} />
 
       <WorkerFacts overview={overview} workerInfo={workerInfo} now={now} />
 
@@ -151,6 +158,11 @@ export function OverviewView() {
     NOTIFICATION_POLL_MS,
     { refreshOn: NOTIFICATIONS_CHANGED_EVENT },
   );
+  const { data: waitingOnReview } = usePoll<NotificationListResponse>(
+    WAITING_ON_REVIEW_URL,
+    NOTIFICATION_POLL_MS,
+    { refreshOn: NOTIFICATIONS_CHANGED_EVENT },
+  );
   // Elapsed times and countdowns tick between polls.
   const now = useNow(5_000);
   if (!data) {
@@ -167,6 +179,7 @@ export function OverviewView() {
       activityRuns={activity?.runs ?? null}
       queuedWork={queuedWork}
       needsYou={needsYou}
+      waitingOnReview={waitingOnReview}
       now={Math.max(now, data.generatedAt)}
     />
   );

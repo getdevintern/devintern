@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, retrying work, or delegating an ad-hoc task from the local dashboard."
 section: "Automation"
 order: 4
-dateModified: 2026-11-25
+dateModified: 2026-11-26
 ---
 
 # Worker Dashboard
@@ -15,7 +15,7 @@ The dashboard shows what the worker has been doing: current and past runs, agent
 | --------------- | -------------------------------------------------------------------------------------------------------------- |
 | **Overview**    | Worker health, active and queued work, recently finished tasks. The landing page.                              |
 | **Inbox**       | Notifications: what needs you, and what DevIntern changed outside itself. See [Inbox](#inbox).                 |
-| **Runs**        | Full run history. Open a run to follow its stages, read each agent transcript, open the task or PR, retry, or report a problem. |
+| **Runs**        | Full run history, filterable by status, origin, and [outcome class](#why-a-run-did-not-succeed). Open a run to follow its stages, read each agent transcript, open the task or PR, retry, or report a problem. |
 | **Automations** | Recurring automations, estimations, and scheduled jobs, with **Run now**.                                      |
 | **Pull requests** | The agent's PRs, switchable between **Open** (awaiting review, oldest first) and **Merged** (up to the 50 most recently merged, newest first), each linked to its ticket. Merges are recorded when the worker sees them, so PRs merged before this feature and PRs closed without merging are not listed. |
 | **Workspace**   | A read-only view of `workspace.toml`: routing, repositories, automations, credentials (key names only), and policy. |
@@ -45,19 +45,34 @@ Below the running rows:
 
 ## Inbox
 
-The bell in the header shows how many notifications are unread; a `!` on the count means some of them need you. Open it for the latest items, or choose **Open inbox**. When something needs you, **Overview** also lists it in a **Needs you** block at the top.
+The bell in the header shows how many notifications are unread; a `!` on the count means some of them need you. Open it for the latest items, or choose **Open inbox**. When something needs you, **Overview** also lists it in a **Needs you** block at the top, with the count split into what needs attention and what is waiting on review, for example **2 need attention · 5 waiting on review**.
 
-| Tab           | What lands there                                                                                  |
-| ------------- | ------------------------------------------------------------------------------------------------- |
-| **Needs you** | A task escalated, retries ran out, an automation broke after working, or a source stopped being readable. |
-| **Activity**  | PRs DevIntern opened or auto-merged, and work a run delegated or tickets it filed.                |
-| **All**       | Both.                                                                                             |
+| Tab                    | What lands there                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| **Needs you**          | Everything below that needs a human, plus exhausted retries, broken automations, and unreadable sources or credentials. |
+| **DevIntern problems** | A DevIntern step failed (a likely DevIntern bug). The same error across runs shares one row, for example **Likely DevIntern bug: verify failed (×3)**. |
+| **Waiting on review**  | Escalations: a review or merge rule held a PR for you, or the agent could not finish a task.     |
+| **Activity**           | PRs DevIntern opened or auto-merged, and work a run delegated or tickets it filed.                |
+| **All**                | Everything.                                                                                       |
 
 Repeats of the same event share one row with a count such as **×88**, and the row comes back as unread when it happens again. Each row links to its run, PR, or ticket. On a delegated-work row, **Show spawned work** lists the child tasks and tickets with their current status.
 
 - **Mark read** clears the unread state. **Mark all read** does it for every row.
 - **Resolve** closes a row you have dealt with. Rows also resolve on their own when the problem goes away, for example when a later run of the same task succeeds. Turn on **Show resolved** to see them again.
 - **Mute** hides this row and every future notification from the same cause. Use it for a known, noisy problem you do not want to hear about. Muted groups are listed at the bottom of the inbox with **Unmute**.
+
+## Why a run did not succeed
+
+A run that failed, escalated, or was abandoned has an outcome class. The runs list shows it as a badge with the cause underneath, and **Class** filters by it. Open the run for a banner with the class, the step that failed, its error, and where the unfinished work went.
+
+| Class                 | Meaning                                                                                  | What to do                                                                   |
+| --------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **Waiting on review** | A review or auto-merge rule wants a human to approve, for example a version bump or a deny pattern. Nothing is broken. | Review the PR, then merge or close it.                                       |
+| **Agent stopped**     | The agent could not complete the task: it gave up, tests kept failing, or the ticket was unclear. | Clarify the ticket or fix the blocker, then retry.                           |
+| **DevIntern problem** | A DevIntern step failed rather than the agent's work: verification, git or worktree operations, PR creation, or a crash. | Retry. If it happens again, choose **Report problem** on the banner; the report is pre-filled with the step and error. |
+| **Environment**       | Credentials, sign-in, network, a rate limit, a missing tool, or a code host that refuses the PR for a setup reason (for example missing code-host settings) stopped the run. | Fix the setup (see [Configuration](configuration.md)), then retry.           |
+
+The banner also shows the work status: **Work saved on branch** (a retry continues from it), **Work kept in worktree** with its path on the worker machine, or **Work discarded** when the changes could not be saved. Runs from before this feature have no class, except escalated auto-merge runs, which show as **Waiting on review**.
 
 ## Retry a failed run
 
@@ -69,7 +84,7 @@ Ad-hoc tasks from `devintern worker add` show **Re-queue task** instead. It resu
 
 When a run fails in a way the output does not explain, or completes with the wrong result, open it and choose **Report a problem**. It files the same redacted bug report as `devintern report --run <id>`; see [Reporting Bugs](reporting-bugs.md#report-from-the-dashboard).
 
-Missing credentials, usage limits, and failed verification checks are configuration issues, not DevIntern bugs. Fix those and retry.
+Missing credentials, usage limits, and failed verification checks are configuration issues, not DevIntern bugs. Fix those and retry. A run classed as a **DevIntern problem** shows **Report problem** on its banner instead, with the failing step and error already filled in.
 
 For a problem that is not tied to one run, choose **Report a bug** at the bottom of the sidebar. It sends your environment and recent worker logs, with no run attached. **Request a feature** opens a public GitHub issue form with your version filled in.
 

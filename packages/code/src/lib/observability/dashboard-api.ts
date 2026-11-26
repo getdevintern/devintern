@@ -21,6 +21,8 @@ import type {
   ManualTriggerOutcome,
 } from "../automation/acquirer";
 import { RunStore } from "../state/run-recorder";
+import { RUN_OUTCOME_CLASSES, isRunOutcomeClass } from "../state/run-outcome";
+import type { RunOutcomeClass } from "../state/run-outcome";
 import { hostTimeZone, isValidTimeZone } from "../state/run-activity";
 import type {
   RunOrigin,
@@ -79,27 +81,7 @@ import {
 import type { ConfiguredSource, DashboardSourcesResult } from "./dashboard-sources";
 import { scheduledJobRunFilter, toAutomationView } from "./dashboard-automation-view";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
-
-const RUN_STATUSES: RunStatus[] = [
-  "in_progress",
-  "succeeded",
-  "failed",
-  "deferred",
-  "escalated",
-  "abandoned",
-];
-const RUN_ORIGINS: RunOrigin[] = [
-  "task",
-  "error_monitor",
-  "pr_mention",
-  "ci_fix",
-  "conflict_resolution",
-  "auto_merge",
-  "scheduled",
-  "estimate",
-  "manual",
-  "local",
-];
+import { RUN_ORIGINS, RUN_STATUSES } from "./dashboard-run-filters";
 
 const STATS_WINDOWS: Record<string, number | null> = {
   "7d": 7 * 24 * 60 * 60 * 1000,
@@ -368,6 +350,7 @@ export class DashboardData {
     status?: RunStatus;
     origin?: RunOrigin;
     automationId?: string;
+    outcomeClass?: RunOutcomeClass;
     limit: number;
     offset: number;
   }): { runs: RunRecord[]; total: number } {
@@ -1209,7 +1192,8 @@ export async function handleRunAutomation(
  * `GET /api/runs` — paginated run list with optional filters.
  *
  * @param data - Dashboard data source
- * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`, `automationId`
+ * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`,
+ *   `automationId`, `outcomeClass`
  */
 export function handleRuns(data: DashboardData, params: URLSearchParams): ApiResponse {
   const rawLimit = params.get("limit");
@@ -1231,10 +1215,16 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
     return badRequest(`origin must be one of: ${RUN_ORIGINS.join(", ")}`);
   }
 
+  const outcomeClass = params.get("outcomeClass") ?? undefined;
+  if (outcomeClass !== undefined && !isRunOutcomeClass(outcomeClass)) {
+    return badRequest(`outcomeClass must be one of: ${RUN_OUTCOME_CLASSES.join(", ")}`);
+  }
+
   const result = data.listRuns({
     taskKey: params.get("taskKey") ?? undefined,
     status: status as RunStatus | undefined,
     origin: origin as RunOrigin | undefined,
+    ...(outcomeClass ? { outcomeClass } : {}),
     automationId: params.get("automationId") ?? undefined,
     limit,
     offset,
