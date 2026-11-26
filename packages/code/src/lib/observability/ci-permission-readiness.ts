@@ -1,7 +1,8 @@
 /**
  * `worker doctor` "CI status access" rows: one per GitHub repository whose
  * runs read commit CI state (`[workspace].auto_merge` or `ci_failure_fix`),
- * probed with the credential those runs use. See
+ * probed with the credential the fleet's CI reads use (the worker's own
+ * environment plus the workspace, repo and fleet-event team layers). See
  * `code-host/github/ci-permission-probe.ts` for what each permission means.
  */
 
@@ -14,8 +15,6 @@ import {
 import type { RepoCiPermissionOutcome } from "../workspace/ci-permission-check";
 import type { WorkspaceConfig } from "../workspace/config";
 import type { ReadinessCheck, ReadinessStatus } from "./readiness";
-
-type Env = Record<string, string | undefined>;
 
 const BASE = { id: "ci-permissions", label: "CI status access" } as const;
 
@@ -63,12 +62,11 @@ export function ciPermissionRow(name: string, outcome: RepoCiPermissionOutcome):
 export async function ciPermissionChecks(input: {
   config: WorkspaceConfig;
   workspaceDir: string;
-  processEnv: Env;
   offline: boolean;
   timeoutMs: number;
   deps: CiPermissionDoctorDeps;
 }): Promise<ReadinessCheck[]> {
-  const { config, workspaceDir, processEnv, offline, timeoutMs, deps } = input;
+  const { config, workspaceDir, offline, timeoutMs, deps } = input;
   const targets = config.repos.flatMap((repo) => {
     const slug = ciPermissionProbeSlug(config, repo);
     return slug ? [{ repo, slug, name: `[[repos]] "${repo.name}" (${slug})` }] : [];
@@ -92,11 +90,10 @@ export async function ciPermissionChecks(input: {
   for (const { repo, slug, name } of targets) {
     try {
       const outcome = await probeRepoCiPermissions({
+        config,
         repo,
         slug,
-        ciFailureFix: config.workspace.ciFailureFix,
         workspaceDir,
-        processEnv,
         usesHostedApp,
         timeoutMs,
         ...(deps.ciProbeFetch ? { fetch: deps.ciProbeFetch } : {}),

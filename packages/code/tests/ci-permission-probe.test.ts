@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { generateKeyPairSync } from "crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -19,15 +20,43 @@ const TOKEN = "placeholder-token-value";
 
 type Route = number | "network";
 
+/** Credential env vars the fleet reads from the worker's own environment. */
+const CREDENTIAL_ENV_KEYS = [
+  "GITHUB_TOKEN",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_PRIVATE_KEY_PATH",
+  "GITHUB_APP_PRIVATE_KEY_BASE64",
+] as const;
+
+// The probe resolves credentials like the fleet (process env underneath the
+// workspace layers), so isolate every test from the developer's shell.
+let savedCredentialEnv: Record<string, string | undefined> = {};
+beforeEach(() => {
+  savedCredentialEnv = Object.fromEntries(
+    CREDENTIAL_ENV_KEYS.map((key) => [key, process.env[key]]),
+  );
+  for (const key of CREDENTIAL_ENV_KEYS) delete process.env[key];
+});
+afterEach(() => {
+  for (const key of CREDENTIAL_ENV_KEYS) {
+    const value = savedCredentialEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+
 /** Fake GitHub API: status code (or a thrown network error) per endpoint. */
-function fakeGitHub(routes: { statuses?: Route; checks?: Route; actions?: Route; repo?: Route }): {
+function fakeGitHub(
+  routes: { statuses?: Route; checks?: Route; actions?: Route; repo?: Route },
+  expectedToken: string = TOKEN,
+): {
   fetch: CiProbeFetch;
   urls: string[];
 } {
   const urls: string[] = [];
   const fetch: CiProbeFetch = async (url, init) => {
     urls.push(url);
-    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
+    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${expectedToken}`);
     const route = url.endsWith("/status")
       ? routes.statuses
       : url.includes("/check-runs")
@@ -170,15 +199,19 @@ describe("worker doctor CI status access rows", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  function writeWorkspace(workspaceKeys: string): string {
+  function writeWorkspace(
+    workspaceKeys: string,
+    repoKeys = 'remote = "https://github.com/acme/app.git"',
+    options: { extra?: string; workspaceEnv?: string } = {},
+  ): string {
     const configPath = join(workspaceDir, "workspace.toml");
     writeFileSync(
       configPath,
-      `[workspace]\n${workspaceKeys}\n\n[defaults]\ntracker = "jira"\ntask_query = "project = APP"\n\n[[repos]]\nname = "app"\nremote = "https://github.com/acme/app.git"\n`,
+      `[workspace]\n${workspaceKeys}\n\n[defaults]\ntracker = "jira"\ntask_query = "project = APP"\n\n[[repos]]\nname = "app"\n${repoKeys}\n${options.extra ?? ""}`,
     );
     writeFileSync(
       join(workspaceDir, ".env"),
-      `JIRA_BASE_URL=https://acme.atlassian.net\nJIRA_EMAIL=bot@acme.com\nJIRA_API_TOKEN=x\nGITHUB_TOKEN=${TOKEN}\n`,
+      `JIRA_BASE_URL=https://acme.atlassian.net\nJIRA_EMAIL=bot@acme.com\nJIRA_API_TOKEN=x\n${options.workspaceEnv ?? `GITHUB_TOKEN=${TOKEN}\n`}`,
     );
     return configPath;
   }
@@ -221,6 +254,115 @@ describe("worker doctor CI status access rows", () => {
     const [row] = checks.filter((check) => check.id === "ci-permissions");
     expect(row?.status).toBe("ok");
     expect(row?.detail).toContain("check-run names hidden");
+  });
+
+  test.each([
+    ["a GitHub mirror remote", "https://github.com/acme/mirror.git"],
+    ["a non-GitHub remote", "https://gitlab.com/acme/app.git"],
+  ])("probes the GITHUB_REPO override over %s", async (_label, remote) => {
+    const workspacePath = writeWorkspace(
+      "auto_merge = true",
+      `remote = "${remote}"\n  [repos.env]\n  GITHUB_REPO = "acme/app"`,
+    );
+    const { fetch, urls } = fakeGitHub({});
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, deps(fetch));
+    const [row] = checks.filter((check) => check.id === "ci-permissions");
+    expect(row?.status).toBe("ok");
+    expect(row?.detail).toContain("(acme/app)");
+    expect(urls.length).toBeGreaterThan(0);
+    for (const url of urls) expect(url).toContain("/repos/acme/app");
+  });
+
+  test("probes the fleet-event team's token over the workspace .env", async () => {
+    const workspacePath = writeWorkspace("auto_merge = true", undefined, {
+      extra: `\n[[teams]]\nname = "platform"\ntracker = "jira"\nrepo = "app"\ntask_query = "project = PLAT"\n  [teams.env]\n  GITHUB_TOKEN = "team-token"\n`,
+      workspaceEnv: "GITHUB_TOKEN=workspace-token\n",
+    });
+    const { fetch, urls } = fakeGitHub({ statuses: 403 }, "team-token");
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, deps(fetch));
+    const [row] = checks.filter((check) => check.id === "ci-permissions");
+    expect(urls.length).toBeGreaterThan(0);
+    expect(row?.status).toBe("fail");
+    expect(row?.hint).toContain('[[teams]] "platform" env');
+  });
+
+  test("a team-only token is probed instead of reported missing", async () => {
+    const teamEnvFile = join(workspaceDir, "platform.env");
+    writeFileSync(teamEnvFile, `GITHUB_TOKEN=${TOKEN}\n`);
+    const workspacePath = writeWorkspace("auto_merge = true", undefined, {
+      extra: `\n[[teams]]\nname = "platform"\ntracker = "jira"\nrepo = "app"\ntask_query = "project = PLAT"\nenv_file = "platform.env"\n`,
+      workspaceEnv: "",
+    });
+    const { fetch } = fakeGitHub({ statuses: 403 });
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, deps(fetch));
+    const [row] = checks.filter((check) => check.id === "ci-permissions");
+    expect(row?.status).toBe("fail");
+    expect(row?.hint).toContain(teamEnvFile);
+  });
+
+  test("a repo env_file token wins over the workspace .env and is named in the hint", async () => {
+    const repoEnvFile = join(workspaceDir, "app.env");
+    writeFileSync(repoEnvFile, "GITHUB_TOKEN=repo-file-token\n");
+    const workspacePath = writeWorkspace(
+      "auto_merge = true",
+      'remote = "https://github.com/acme/app.git"\nenv_file = "app.env"',
+    );
+    const { fetch } = fakeGitHub({ statuses: 403 }, "repo-file-token");
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, deps(fetch));
+    const [row] = checks.filter((check) => check.id === "ci-permissions");
+    expect(row?.status).toBe("fail");
+    expect(row?.hint).toContain(repoEnvFile);
+  });
+
+  test("app-first probes the worker's GitHub App with its installation token", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = Buffer.from(
+      privateKey.export({ type: "pkcs8", format: "pem" }),
+    ).toString("base64");
+    const appApi = spyOn(globalThis, "fetch").mockImplementation((async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith("/repos/acme/app/installation")) return Response.json({ id: 7 });
+      if (url.endsWith("/app/installations/7/access_tokens")) {
+        return Response.json({
+          token: "app-installation-token",
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        });
+      }
+      throw new Error(`unexpected App API call ${url}`);
+    }) as typeof fetch);
+    try {
+      const workspacePath = writeWorkspace("auto_merge = true");
+      const { fetch, urls } = fakeGitHub({}, "app-installation-token");
+      const checks = await collectWorkerDoctorChecks(
+        { workspacePath },
+        deps(fetch, { usesHostedGitHubApp: async () => false }),
+      );
+      const [row] = checks.filter((check) => check.id === "ci-permissions");
+      expect(urls.length).toBeGreaterThan(0);
+      expect(row?.status).toBe("ok");
+      expect(row?.detail).toContain("(GitHub App)");
+    } finally {
+      appApi.mockRestore();
+    }
+  });
+
+  test("app-first ignores GitHub App settings that only the workspace .env holds", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const keyBase64 = Buffer.from(privateKey.export({ type: "pkcs8", format: "pem" })).toString(
+      "base64",
+    );
+    const workspacePath = writeWorkspace("auto_merge = true", undefined, {
+      workspaceEnv: `GITHUB_TOKEN=${TOKEN}\nGITHUB_APP_ID=12345\nGITHUB_APP_PRIVATE_KEY_BASE64=${keyBase64}\n`,
+    });
+    const { fetch, urls } = fakeGitHub({});
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      deps(fetch, { usesHostedGitHubApp: async () => false }),
+    );
+    const [row] = checks.filter((check) => check.id === "ci-permissions");
+    expect(urls.length).toBeGreaterThan(0);
+    expect(row?.detail).toContain("(GITHUB_TOKEN)");
   });
 
   test("no row and no probe when auto-merge and CI fixes are off", async () => {
@@ -270,8 +412,8 @@ describe("warnOnCiPermissionIssues", () => {
     const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { fetch } = fakeGitHub({ statuses: 403, checks: 403 });
+      process.env.GITHUB_TOKEN = TOKEN;
       await warnOnCiPermissionIssues(config("auto_merge = true"), workspaceDir, {
-        processEnv: { GITHUB_TOKEN: TOKEN },
         usesHostedApp: true,
         fetch,
       });
@@ -286,18 +428,32 @@ describe("warnOnCiPermissionIssues", () => {
     }
   });
 
+  test("warns for a token that only the repo's fleet-event team holds", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const teamConfig = parseWorkspaceConfig(
+        `[workspace]\nauto_merge = true\n\n[defaults]\ntracker = "jira"\n\n[[repos]]\nname = "app"\nremote = "https://github.com/acme/app.git"\n\n[[teams]]\nname = "platform"\ntracker = "jira"\nrepo = "app"\ntask_query = "project = PLAT"\n  [teams.env]\n  GITHUB_TOKEN = "${TOKEN}"\n`,
+      );
+      const { fetch } = fakeGitHub({ statuses: 403 });
+      await warnOnCiPermissionIssues(teamConfig, workspaceDir, { usesHostedApp: true, fetch });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain('[[teams]] "platform" env');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test("stays quiet for network errors and when the features are off", async () => {
     const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {
+      process.env.GITHUB_TOKEN = TOKEN;
       const { fetch } = fakeGitHub({ repo: "network" });
       await warnOnCiPermissionIssues(config("ci_failure_fix = true"), workspaceDir, {
-        processEnv: { GITHUB_TOKEN: TOKEN },
         usesHostedApp: true,
         fetch,
       });
       const off = fakeGitHub({ statuses: 403 });
       await warnOnCiPermissionIssues(config(""), workspaceDir, {
-        processEnv: { GITHUB_TOKEN: TOKEN },
         usesHostedApp: true,
         fetch: off.fetch,
       });

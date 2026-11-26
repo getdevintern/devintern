@@ -786,9 +786,7 @@ async function collectConfigScopedChecks(
   }
 
   // 4a. CI status access (auto-merge / CI fixes only)
-  checks.push(
-    ...(await ciPermissionChecks({ config, workspaceDir, processEnv, offline, timeoutMs, deps })),
-  );
+  checks.push(...(await ciPermissionChecks({ config, workspaceDir, offline, timeoutMs, deps })));
 }
 
 /**
