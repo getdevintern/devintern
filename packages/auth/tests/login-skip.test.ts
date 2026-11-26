@@ -84,6 +84,8 @@ console.log("RESULT:" + JSON.stringify({ outcome, status }));`,
   });
 
   test("a finished sign-in prompt leaves stdin flowing for the wizard that was reading it", async () => {
+    // The child reports each stage on stdout; the parent writes the next
+    // line only after that, so the test does not depend on timing.
     const proc = Bun.spawn(
       [
         "bun",
@@ -93,32 +95,44 @@ import { promptForLoginMethod, watchStdinLines } from "./src/login-provider";
 const wizard = [];
 // Stands in for the setup wizard's own prompt session on stdin.
 const rl = createInterface({ input: process.stdin });
-rl.on("line", (line) => wizard.push(line));
-await new Promise((resolve) => setTimeout(resolve, 100));
+let gotAfter;
+const after = new Promise((resolve) => (gotAfter = resolve));
+rl.on("line", (line) => {
+  wizard.push(line);
+  if (line === "after") gotAfter();
+});
+console.log("STAGE:listening");
 const { method } = await promptForLoginMethod();
 const stop = watchStdinLines(() => {});
-await new Promise((resolve) => setTimeout(resolve, 100));
 stop();
-await new Promise((resolve) => setTimeout(resolve, 400));
+console.log("STAGE:signed-in");
+await Promise.race([after, new Promise((resolve) => setTimeout(resolve, 3000))]);
 rl.close();
-console.log("RESULT:" + JSON.stringify({ method, wizard }));`,
+console.log("RESULT:" + JSON.stringify({ method, wizard }) + ":END");`,
       ],
       { cwd: new URL("..", import.meta.url).pathname, stdin: "pipe", stdout: "pipe" },
     );
-    proc.stdin.write("first\n");
-    proc.stdin.flush();
-    await Bun.sleep(150);
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let output = "";
+    const waitFor = async (marker: string): Promise<void> => {
+      while (!output.includes(marker)) {
+        const { done, value } = await reader.read();
+        if (done) throw new Error(`Child exited before ${marker}:\n${output}`);
+        output += decoder.decode(value);
+      }
+    };
+    await waitFor("STAGE:listening");
     proc.stdin.write("1\n");
     proc.stdin.flush();
-    await Bun.sleep(300);
+    await waitFor("STAGE:signed-in");
     proc.stdin.write("after\n");
+    proc.stdin.flush();
+    await waitFor(":END");
     proc.stdin.end();
-    const output = await new Response(proc.stdout).text();
     await proc.exited;
-    const result = JSON.parse(output.split("RESULT:")[1]?.trim() ?? "null") as {
-      method: string;
-      wizard: string[];
-    };
+    const json = output.split("RESULT:")[1]?.split(":END")[0] ?? "null";
+    const result = JSON.parse(json) as { method: string; wizard: string[] };
     expect(result.method).toBe("github");
     expect(result.wizard).toContain("after");
   });
