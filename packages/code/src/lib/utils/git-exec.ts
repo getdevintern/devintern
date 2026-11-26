@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import { statSync } from "fs";
+import { gitCredentialEnv, redactGitCredentials } from "./git-credentials";
 import { Utils } from "./registry";
 
 /**
@@ -26,10 +27,12 @@ export async function executeGitCommand(
 
   return new Promise((resolve) => {
     const useProcessGroup = Boolean(options?.timeoutMs) && process.platform !== "win32";
+    const spawnCwd = cwd || process.cwd();
+    const baseEnv = options?.env ? { ...process.env, ...options.env } : process.env;
     const git = spawn("git", args, {
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: cwd || process.cwd(),
-      env: options?.env ? { ...process.env, ...options.env } : process.env,
+      cwd: spawnCwd,
+      env: gitCredentialEnv(args, baseEnv, { cwd: spawnCwd }),
       detached: useProcessGroup,
     });
 
@@ -49,10 +52,10 @@ export async function executeGitCommand(
       settled = true;
       const result = {
         success: !timedOut && !spawnError && code === 0,
-        output: output.trim(),
+        output: redactGitCredentials(output.trim(), baseEnv),
         error: timedOut
           ? `Git command timed out after ${options?.timeoutMs}ms`
-          : spawnError?.message || error.trim(),
+          : redactGitCredentials(spawnError?.message || error.trim(), baseEnv),
       };
 
       if (verbose) {
