@@ -291,7 +291,7 @@ function secretValues(env: Env): string[] {
 }
 
 /** Read the `--env-file`, refusing files readable by group or others. */
-function readEnvFile(
+export function readEnvFile(
   path: string,
 ): { ok: true; values: Record<string, string> } | { ok: false; error: string } {
   let mode: number;

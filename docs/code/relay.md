@@ -43,6 +43,26 @@ For trackers, set the tracker credentials (see the table below), then run `devin
 | `devintern worker connect sentry`              | Add a Sentry auto-fix project (polled directly; not sent through the relay). See [Sentry Auto-fixes](./sentry-integration.md) |
 | `devintern worker connect status`              | Show relay status and repositories still awaiting verification            |
 
+## Pairing GitHub without a terminal
+
+`devintern worker connect github` prints the GitHub App install URL and waits up to 10 minutes for you to approve it. A coding agent or SSH session that cannot wait splits this in two, after signing in with `devintern worker login <method> --no-wait` (see [Signing in without a terminal](./worker.md#signing-in-without-a-terminal)):
+
+```bash
+devintern worker connect github --no-wait --json   # prints the install URL and exits 0
+# open the URL in any browser and approve the App, then:
+devintern worker connect github --status --json    # finishes local registration when approved
+```
+
+| Flag        | What it does                                                                                       |
+| ----------- | -------------------------------------------------------------------------------------------------- |
+| `--json`    | Print one JSON document on stdout; progress text goes to stderr. Works for every target            |
+| `--no-wait` | Start the pairing, print the install URL, and exit. Repositories under an existing installation are verified without a browser |
+| `--status`  | Check the pending pairing once (alias `--resume`). Also finishes a pairing whose wait was interrupted |
+
+With several GitHub accounts, each needs its own approval: run `--no-wait`, approve, `--status`, then repeat until nothing is left.
+
+`--json` prints `{"schema": "devintern.worker-connect", "version": 1, "target", "result", ...}`. `result` is `connected` (exit 0), `pending` (exit 0: `pairing` has `id`, `state`, `installUrl`, `expiresAt`, and `nextSteps` lists the URL to open and the `--status` command), `action_required` (exit 2: nobody is signed in, `nextSteps` holds the `devintern worker login <method> --no-wait --json` command), or `failure` (exit 1: `error` and often a `code` such as `pairing_expired` or `no_pending_pairing`). `devintern worker connect` with no target returns one document with a `targets` array. Treat an unknown `result` as not finished.
+
 ## Environment variables
 
 | Variable              | Required | Description                                                                    |
