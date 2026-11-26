@@ -14,6 +14,15 @@ export interface PipelineContext {
   taskContent: string;
   taskFile: string;
   workingDir: string;
+  /**
+   * Absolute directory of the workspace pipeline file that declared this run's
+   * pipeline (`pipeline_file` in `workspace.toml`), so a plugin can resolve
+   * its own relative config paths, such as a prompt file, next to that file.
+   * `null` when the built-in default (or the CLI `--verify` fallback) runs;
+   * resolve against `workingDir` in that case. Core never rewrites plugin
+   * options: each plugin decides which of its options are paths.
+   */
+  pipelineDir: string | null;
   outputDir: string;
   /** Explicit immutable outputs, independent of plugin names and step data. */
   artifacts: import("../artifacts/types").ArtifactRegistry;

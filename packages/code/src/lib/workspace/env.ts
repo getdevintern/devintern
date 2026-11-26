@@ -11,13 +11,18 @@
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
-import { gitHubSlugFromRemote, resolveFleetEventTeam } from "./config";
+import {
+  gitHubSlugFromRemote,
+  resolveFleetEventTeam,
+  resolveWorkspacePipelinePath,
+} from "./config";
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 import { applyAgentSelectionEnv } from "../agent/selection";
 import type { AgentSelection } from "../agent/selection";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
 import { WORKER_SUBPROCESS_ENV } from "../config/config-dir";
+import { GIT_AUTHOR_EMAIL_ENV, GIT_AUTHOR_NAME_ENV } from "../utils/git-identity";
 import {
   normalizeCodeHostUrl,
   parseGitLabHostAliases,
@@ -53,16 +58,21 @@ export const ACTIONED_SOURCE_ENV = "DEVINTERN_ACTIONED_SOURCE";
 
 /**
  * Parse a dotenv-style file into a record (same semantics as the tracker
- * config loader: `KEY=value`, `#` comments, optional single/double quotes).
- * Missing files yield an empty record.
+ * config loader: `KEY=value`, `#` comments, optional single/double quotes,
+ * and an optional shell `export ` prefix). Missing files yield an empty record.
  */
 export function parseEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) {
     return {};
   }
+  return parseEnvFileContent(readFileSync(path, "utf8"));
+}
+
+/** {@link parseEnvFile} over already-read text. */
+export function parseEnvFileContent(content: string): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const trimmed = line.trim();
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim().replace(/^export\s+/, "");
     if (!trimmed || trimmed.startsWith("#")) {
       continue;
     }
@@ -331,6 +341,13 @@ function composeRepoEnv(
     env.PR_LABELS = repo.prLabels.join(",");
   }
 
+  // Commit identity for hosts without one (`utils/git-identity.ts`); a git
+  // identity configured on the host still wins.
+  if (repo.gitAuthor) {
+    env[GIT_AUTHOR_NAME_ENV] = repo.gitAuthor.name;
+    env[GIT_AUTHOR_EMAIL_ENV] = repo.gitAuthor.email;
+  }
+
   applyAgentSelectionEnv(env, options.agentSelection);
 
   return { env, derivedGitLabProject, explicitGitLabProject };
@@ -354,9 +371,10 @@ function pinPipelineEnv(
   delete env[WORKSPACE_PIPELINE_REPO_ENV];
   delete env[WORKSPACE_PIPELINE_DEFAULT_ENV];
   if (repo.pipelineFile) {
-    env[WORKSPACE_PIPELINE_REPO_ENV] = isAbsolute(repo.pipelineFile)
-      ? repo.pipelineFile
-      : join(workspaceDir, repo.pipelineFile);
+    env[WORKSPACE_PIPELINE_REPO_ENV] = resolveWorkspacePipelinePath(
+      workspaceDir,
+      repo.pipelineFile,
+    );
   }
   if (options.pipelineDefaultFile) {
     env[WORKSPACE_PIPELINE_DEFAULT_ENV] = options.pipelineDefaultFile;
@@ -671,4 +689,21 @@ function pinWorkerRuntimeEnv(env: Record<string, string | undefined>, workspaceD
   env[ANALYTICS_CONFIG_DIR_ENV] = workspaceDir;
   env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
   env[WORKER_SUBPROCESS_ENV] = "1";
+}
+
+/** Env for a team's tracker client; throws naming the variables a team still lacks. */
+export function requireTeamTrackerEnv(
+  team: Parameters<typeof buildTeamEnv>[0],
+  workspaceDir: string,
+  required: string[],
+): ReturnType<typeof buildTeamEnv> {
+  const env = buildTeamEnv(team, workspaceDir);
+  const missing = required.filter((key) => !env[key]);
+  if (missing.length > 0) {
+    throw new Error(
+      `Team "${team.name}" (${team.tracker}) is missing required variables: ${missing.join(", ")}. ` +
+        "Add them to the workspace .env or the team's env_file.",
+    );
+  }
+  return env;
 }

@@ -3,11 +3,12 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { ReportPreview } from "@/lib/api";
-import { REPORT_DOCS_URL, ReportDialogBody } from "./ReportProblem";
+import { REPORT_DOCS_URL, ReportDialogBody, reportStepDescription } from "./ReportProblem";
 import {
   canPreview,
   canSend,
   INITIAL_REPORT_FLOW,
+  initialReportFlow,
   isReportBusy,
   isReportDraftDirty,
   reportFlowReducer,
@@ -169,6 +170,15 @@ describe("report flow", () => {
     );
     expect(isReportDraftDirty(run(DRAFTED))).toBe(true);
 
+    // A pre-filled report: unchanged or cleared is not worth a discard prompt.
+    const start = initialReportFlow({ title: "verify failed", description: "Run #953 failed" });
+    const prefilled = start.draft;
+    expect(isReportDraftDirty(start, prefilled)).toBe(false);
+    const cleared = run([{ type: "edit", draft: { title: "", description: "" } }], start);
+    expect(isReportDraftDirty(cleared, prefilled)).toBe(false);
+    const edited = run([{ type: "edit", draft: { title: "verify crashed" } }], start);
+    expect(isReportDraftDirty(edited, prefilled)).toBe(true);
+
     const previewing = run([...DRAFTED, { type: "previewStart" }]);
     expect(isReportBusy(previewing)).toBe(true);
     const previewed = run([{ type: "previewDone", preview: preview() }], previewing);
@@ -267,5 +277,17 @@ describe("report dialog", () => {
     expect(saved).toContain("devintern report --from /w/.devintern-code/reports/r.json");
     expect(saved).toContain("devintern login");
     expect(saved).toContain("Try again");
+  });
+});
+
+describe("reportStepDescription", () => {
+  test("names the run when one is attached", () => {
+    expect(reportStepDescription("compose", 42)).toContain("run #42");
+    expect(reportStepDescription("sent", 42)).toBe("Run #42");
+  });
+
+  test("a general report explains how to attach a run", () => {
+    expect(reportStepDescription("compose", null)).toContain("open it under Runs");
+    expect(reportStepDescription("saved", null)).toBe("No run attached");
   });
 });

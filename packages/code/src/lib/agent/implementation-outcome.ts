@@ -22,6 +22,9 @@ import {
   IMPLEMENTATION_SUMMARY_START as SUMMARY_START,
 } from "@devintern/agent-harness";
 
+import { isEnvironmentError } from "../state/run-outcome";
+import type { RunFailure } from "../state/run-outcome";
+
 /** Statuses the marker accepts. */
 export type ImplementationOutcomeStatus = "done" | "noop" | "blocked" | "partial";
 
@@ -233,6 +236,30 @@ export function deliveryRunDisposition(
     return { status: "escalated", reason: `${disposition.reason}; ${prReason}` };
   }
   return { status: "failed", reason: prReason };
+}
+
+/**
+ * Class of a run that delivered: an agent-reported `blocked` outcome is the
+ * agent's. A PR the code host would not create is the environment when the
+ * failure names credentials or the network, or when it is permanent (missing
+ * code-host config, a 4xx validation error such as an existing PR): a re-run
+ * cannot fix those, the user's setup must change. Anything else is
+ * DevIntern's publish step. No cause is attached, so the reason keeps its
+ * queryable prefix (`pushed but PR creation failed: …`).
+ *
+ * @param status - Disposition status
+ * @param prFailure - PR creation failure message, when one happened
+ * @param permanent - The PR creation failure was marked permanent
+ */
+export function deliveryDispositionFailure(
+  status: "succeeded" | "escalated" | "failed",
+  prFailure: string | undefined,
+  permanent = false,
+): RunFailure | undefined {
+  if (status === "escalated") return { outcomeClass: "agent", stage: "implementation" };
+  if (status !== "failed") return undefined;
+  const environmental = prFailure !== undefined && (permanent || isEnvironmentError(prFailure));
+  return { outcomeClass: environmental ? "environment" : "internal", stage: "publish" };
 }
 
 /** Prompt instruction describing the marker; appended to the summary request. */

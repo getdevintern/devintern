@@ -54,6 +54,8 @@ import {
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import type { RunStore } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
+import type { RunFailure } from "../state/run-outcome";
 import type { TaskExecutionResult } from "./task-polling";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
@@ -314,6 +316,22 @@ const RETRY_BACKOFF_MAX_MS = 10 * 60_000;
 export function baseSyncRetryBackoffMs(attempts: number): number {
   if (attempts <= 0) return 0;
   return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (attempts - 1), RETRY_BACKOFF_MAX_MS);
+}
+
+/**
+ * Classify a failed base sync. `aborted` means the conflict agent could not
+ * produce a mergeable tree (the merge was rolled back), which is the agent's
+ * failure; setup, push, and verification failures are DevIntern's git steps
+ * (or the environment).
+ *
+ * @param result - Resolver result with outcome `failed`
+ */
+export function baseSyncFailure(result: AutomaticResolveResult): RunFailure {
+  return failureFromError(
+    result.message,
+    "base_sync",
+    result.failureKind === "aborted" ? "agent" : "internal",
+  );
 }
 
 /**
@@ -1010,6 +1028,7 @@ export class ReviewPollingAcquirer implements Acquirer {
               ? "deferred"
               : "succeeded",
           result.message,
+          result.outcome === "failed" ? { failure: baseSyncFailure(result) } : {},
         );
       } catch (error) {
         console.warn(`⚠️  Run recording (base sync end) failed: ${(error as Error).message}`);

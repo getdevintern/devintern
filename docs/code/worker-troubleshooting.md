@@ -1,15 +1,50 @@
 ---
 title: "Worker Troubleshooting"
 sidebarLabel: "Worker Troubleshooting"
-description: "Use when a worker task did not run, ran again, or failed: retrying tickets, actioned tickets, interrupted runs, pickup log messages, and reading worker logs."
+description: "Use when the worker service keeps failing or stops at logout, or a worker task did not run, ran again, or failed: retrying tickets, actioned tickets, interrupted runs, pickup log messages, and reading worker logs."
 section: "Automation"
 order: 2.3
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # Worker Troubleshooting
 
 Start with `devintern worker doctor` ([details](./worker.md#checking-readiness-worker-doctor)). It catches most configuration problems before the worker runs. For automation-specific problems, see [Recurring Automations → Troubleshooting](./automations.md#troubleshooting).
+
+## Setup stopped partway
+
+If `devintern worker init` was interrupted (Ctrl+C or Ctrl+D), run it again. It keeps what was already saved and finishes the setup, even if the workspace still names a different tracker from before the query step. A workspace that already has a ready-tasks query keeps its tracker; change it by hand in `workspace.toml`.
+
+If `worker doctor` reports `Markdown tasks directory not found: ./tasks`, the folder was saved as a relative path by an older version. Set `MARKDOWN_TASKS_DIR` in `~/.devintern/.env` to the folder's absolute path.
+
+## The service keeps failing
+
+Run `devintern worker service status`. It shows the service state and, when the last start failed, the reason the worker printed.
+
+| State        | Meaning and fix                                                                                                    |
+| ------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `failed`     | The worker cannot start with this setup (no license, nobody signed in, invalid `workspace.toml`), so the service stopped retrying. Fix what it names (`devintern worker doctor` lists every problem), then run `devintern worker service restart` |
+| `restarting` | The worker exited for another reason, and the service starts it again after 30 seconds. Read the last lines with `devintern worker logs --level error` |
+| `starting`   | The service is up, but the worker has not finished starting (first start, orphan recovery, slow network). Check again in a minute |
+| `stopped`    | Stopped by you or at logout. Start it with `devintern worker service start`. If it stops at every logout, see [lingering](#the-worker-stops-when-you-log-out) |
+
+Startup failures are written to `worker.stderr.log` in the workspace home, so `devintern worker logs` and the dashboard show them too. Output from before the worker could log at all (for example a missing Bun runtime) is only in the service manager's log: `devintern worker service logs`.
+
+If `worker service install` says the worker would not start, it did not install anything. Fix the checks it lists and run it again. `--force` installs anyway, and the service then fails until the checks pass.
+
+## The worker stops when you log out
+
+A systemd user service runs only while you are logged in, unless lingering is enabled for your user. `worker service install` enables it. When that needs root (no polkit agent, an SSH session without a login), it warns and prints the command; run it once:
+
+```bash
+sudo loginctl enable-linger <user>
+```
+
+Then the worker starts at boot and keeps running after logout.
+
+## "The systemd user manager is not running"
+
+`worker service install` talks to your systemd user manager. Shells without a login session (`docker exec`, `sudo -u <user>`, `su`) do not set `XDG_RUNTIME_DIR`; DevIntern finds the manager's socket under `/run/user/<uid>` on its own. When that directory does not exist, the manager is not running: run `sudo loginctl enable-linger <user>` and install again. If it still cannot connect, export the two variables the message names (`XDG_RUNTIME_DIR=/run/user/<uid>` and `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus`).
 
 ## Re-running a task
 
@@ -69,12 +104,12 @@ In a multi-repo workspace, a task whose routing rules match no repository, or mo
 
 ## Runs that fail at delivery
 
-A run fails, and no PR is created, when it leaves nothing to publish (no changes and no new commits), fails pre-push validation, or cannot push its branch. Commits the agent made itself count as changes. The batch CLI's exit code is not a per-task result; check each run in the [dashboard](./dashboard.md).
+A run fails, and no PR is created, when it leaves nothing to publish (no changes and no new commits), fails pre-push validation, or cannot push its branch. Commits the agent made itself count as changes. The batch CLI's exit code is not a per-task result; check each run in the [dashboard](./dashboard.md). Its outcome class tells you whether the agent, your setup, or DevIntern itself stopped the run; see [Why a run did not succeed](./dashboard.md#why-a-run-did-not-succeed).
 
 ## Reading logs and run data
 
 - The dashboard's **Logs** tab shows recent worker output ([details](./dashboard.md)).
-- The worker also writes `worker.stdout.log` and `worker.stderr.log` in the workspace home. Under systemd, use `journalctl --user -u devintern-worker`.
+- The worker also writes `worker.stdout.log` and `worker.stderr.log` in the workspace home, including startup failures such as a failed license check. `devintern worker service logs` prints the service manager's log: the journal under systemd, `worker.launchd.log` under launchd.
 - For scripts and sandboxed agents, `devintern worker runs`, `stats`, `automations`, `queue`, `status`, and `logs` print the same data; add `--json` for machine-readable output ([details](./dashboard.md#read-dashboard-data-from-the-command-line)).
 
 ## `worker status` says `unknown` inside a sandbox

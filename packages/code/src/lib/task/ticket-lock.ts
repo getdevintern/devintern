@@ -82,7 +82,7 @@ export function acquireTicketLocks(
     const fileName = ticketLockFileName(ticket.key, ticket.isFilePath);
     if (seen.has(fileName)) continue;
     seen.add(fileName);
-    const lock = new LockManager(ticketLocksDir(workspaceDir), fileName, { plainDir: true });
+    const lock = new LockManager(ticketLocksDir(workspaceDir), fileName);
     const result = lock.acquire();
     if (!result.success) {
       release();

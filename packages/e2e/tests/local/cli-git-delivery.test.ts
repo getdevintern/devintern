@@ -107,3 +107,65 @@ test.skipIf(!existsSync(cliPath))(
   },
   60_000,
 );
+
+/** Drop the identity `isolatedEnvironment` injects, leaving git none at all. */
+function removeGitIdentity(run: FixtureWorkspace): void {
+  const env: Record<string, string | undefined> = run.env;
+  for (const key of [
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+  ]) {
+    delete env[key];
+  }
+}
+
+for (const scenario of [
+  {
+    name: "with no git identity and no setting, the task commits as the DevIntern fallback",
+    env: {} as Record<string, string>,
+    identity: "DevIntern <devintern@users.noreply.github.com>",
+  },
+  {
+    name: "with no git identity, the task commits with the git_author workspace setting",
+    env: {
+      DEVINTERN_GIT_AUTHOR_NAME: "Workspace Bot",
+      DEVINTERN_GIT_AUTHOR_EMAIL: "bot@example.invalid",
+    } as Record<string, string>,
+    identity: "Workspace Bot <bot@example.invalid>",
+  },
+]) {
+  test.skipIf(!existsSync(cliPath))(
+    scenario.name,
+    async () => {
+      const run = new FixtureWorkspace();
+      try {
+        await prepareLocalRemote(run);
+        // Seeding needed an identity; the run itself gets none: no
+        // GIT_AUTHOR_*/GIT_COMMITTER_*, and global/system config are off.
+        removeGitIdentity(run);
+        Object.assign(run.env, scenario.env);
+        expect(run.env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+        const result = await run.runTask();
+        const output = `${result.stdout}\n${result.stderr}`;
+
+        expect(output).not.toContain("Author identity unknown");
+        expect(output).not.toContain("Git hook failed");
+        expect(await run.git("ls-remote", "origin", `refs/heads/${run.head}`), output).not.toBe("");
+        await run.git("fetch", "--quiet", "origin", run.head);
+        expect(await run.git("log", "-1", "--format=%an <%ae>|%cn <%ce>", "FETCH_HEAD")).toBe(
+          `${scenario.identity}|${scenario.identity}`,
+        );
+        expect(await run.git("diff", "--name-only", `${run.base}...FETCH_HEAD`)).toBe(
+          "src/greeting.ts",
+        );
+        // Nothing was written to git config to get there.
+        expect(await run.git("config", "--local", "--list")).not.toContain("user.");
+      } finally {
+        run.dispose();
+      }
+    },
+    60_000,
+  );
+}

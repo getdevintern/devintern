@@ -16,6 +16,7 @@ test("the runs list moved to #/runs and run detail still parses", () => {
 
 test("workspace and the existing sections parse", () => {
   expect(parseHash("#/workspace")).toEqual({ view: "workspace" });
+  expect(parseHash("#/inbox")).toEqual({ view: "inbox" });
   expect(parseHash("#/automations")).toEqual({ view: "automations" });
   expect(parseHash("#/automations/needs%20space")).toEqual({
     view: "automation",

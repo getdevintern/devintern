@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, mock, test, spyOn } from "bun:
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  checkLicense,
+  resolveApiBase,
+  setReleaseBuildForTests,
+  shouldSkipLicenseCheck,
+} from "../src/index.ts";
 
 const originalFetch = globalThis.fetch;
 let authenticated = true;
@@ -207,6 +213,8 @@ describe("checkLicense entitlement API", () => {
       requireAutomation: true,
     });
     expect(second.valid).toBe(false);
+    // Signed in but not entitled is a real failure, not a pending sign-in.
+    expect(second.signInRequired).toBeUndefined();
 
     mode = "down";
     const third = await checkLicense({
@@ -295,8 +303,18 @@ describe("checkLicense entitlement API", () => {
 
     expect(result.valid).toBe(false);
     expect(result.message).toContain("devintern login");
-    expect(result.message).toContain("no card is required");
+    expect(result.message).toContain("14-day free Worker Pilot (no card required)");
+    expect(result.signInRequired).toBe(true);
     expect(calls).toBe(0);
+
+    // Without the Pilot, signing in is not the next step by itself.
+    const noTrial = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig: freshSupabaseConfig(),
+      requireAutomation: true,
+    });
+    expect(noTrial.valid).toBe(false);
+    expect(noTrial.signInRequired).toBeUndefined();
   });
 
   test("activates the Worker Pilot with the signed-in user's token", async () => {
@@ -329,5 +347,64 @@ describe("checkLicense entitlement API", () => {
     expect(request?.init?.headers).toMatchObject({ Authorization: "Bearer test-access-token" });
   });
 
+  test("setup wording names the worker sign-in instead of detected automation", async () => {
+    authenticated = false;
+    const { checkLicense } = await import(`../src/index.ts?setup=${Date.now()}`);
+    const base = {
+      productKey: "devintern/code",
+      supabaseConfig: freshSupabaseConfig(),
+      requireAutomation: true,
+      allowTrial: true,
+    };
 
+    const runtime = await checkLicense(base);
+    expect(runtime.message).toContain("Automated execution detected (CI / systemd / cron)");
+    expect(runtime.message).toContain("run `devintern login` to start your 14-day free Worker Pilot");
+
+    const setup = await checkLicense({
+      ...base,
+      setup: true,
+      loginCommand: "devintern worker login",
+    });
+    expect(setup.valid).toBe(false);
+    expect(setup.message).not.toContain("Automated execution detected");
+    expect(setup.message).toContain("the unattended worker needs one to start");
+    expect(setup.message).toContain("run `devintern worker login` to start your 14-day free Worker Pilot");
+  });
+});
+
+describe("release build hardening", () => {
+  test("skip flag is honoured outside release builds", () => {
+    expect(shouldSkipLicenseCheck({ DEVINTERN_SKIP_LICENSE_CHECK: "1" }, false)).toBe(true);
+    expect(shouldSkipLicenseCheck({ DEVINTERN_SKIP_LICENSE_CHECK: "0" }, false)).toBe(false);
+  });
+
+  test("skip flag is ignored in release builds", () => {
+    expect(shouldSkipLicenseCheck({ DEVINTERN_SKIP_LICENSE_CHECK: "1" }, true)).toBe(false);
+  });
+
+  test("DEVINTERN_API_BASE override only applies outside release builds", () => {
+    const env = { DEVINTERN_API_BASE: "https://evil.test" };
+    expect(resolveApiBase(env, false)).toBe("https://evil.test");
+    expect(resolveApiBase(env, true)).not.toBe("https://evil.test");
+  });
+
+  test("checkLicense denies despite the skip flag in a release build", async () => {
+    const saved = process.env.DEVINTERN_SKIP_LICENSE_CHECK;
+    process.env.DEVINTERN_SKIP_LICENSE_CHECK = "1";
+    delete process.env.LICENSE_KEY;
+    authenticated = false;
+    const options = { productKey: "devintern/code", supabaseConfig: freshSupabaseConfig() };
+    try {
+      setReleaseBuildForTests(false);
+      expect((await checkLicense(options)).valid).toBe(true);
+      setReleaseBuildForTests(true);
+      expect((await checkLicense(options)).valid).toBe(false);
+    } finally {
+      setReleaseBuildForTests(undefined);
+      authenticated = true;
+      if (saved === undefined) delete process.env.DEVINTERN_SKIP_LICENSE_CHECK;
+      else process.env.DEVINTERN_SKIP_LICENSE_CHECK = saved;
+    }
+  });
 });

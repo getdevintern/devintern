@@ -51,6 +51,14 @@ export interface LicenseCheckResult {
   trialEndsAt?: string;
   /** True when the trial is eligible but has not been activated yet. */
   trialAvailable?: boolean;
+  /** When source is "grace": the end of the 72-hour offline window (ISO 8601). */
+  graceEndsAt?: string;
+  /**
+   * True when nothing is wrong except that nobody is signed in: no
+   * `LICENSE_KEY`, no session, and the check allows a Worker Pilot. Signing
+   * in is the next step, not a fix for a broken setup.
+   */
+  signInRequired?: boolean;
 }
 
 export interface LicenseCheckOptions {
@@ -68,6 +76,14 @@ export interface LicenseCheckOptions {
   requireAutomation?: boolean;
   /** Include a signed-in user's worker trial when no paid entitlement exists. */
   allowTrial?: boolean;
+  /**
+   * Word a missing automation license for someone setting up unattended use
+   * in a terminal (e.g. `worker init`) instead of for a run that was
+   * detected as automated.
+   */
+  setup?: boolean;
+  /** Sign-in command named in the message (defaults to `devintern login`). */
+  loginCommand?: string;
   /** Base delay between entitlement retries in ms (defaults to 500). */
   retryBaseDelayMs?: number;
 }
@@ -133,6 +149,11 @@ function readCachedEntitlement(
   }
 }
 
+function graceEnd(checkedAt: string): string | undefined {
+  const checked = Date.parse(checkedAt);
+  return Number.isFinite(checked) ? new Date(checked + GRACE_WINDOW_MS).toISOString() : undefined;
+}
+
 /** Builds the grace-mode success result from a cached entitlement. */
 function graceResult(cached: CachedEntitlement, cause: string): LicenseCheckResult {
   const checkedDate = cached.checkedAt.slice(0, 10);
@@ -140,6 +161,7 @@ function graceResult(cached: CachedEntitlement, cause: string): LicenseCheckResu
     valid: true,
     source: "grace",
     entitlementSource: cached.entitlementSource,
+    graceEndsAt: graceEnd(cached.checkedAt),
     message:
       `License server unreachable (${cause}). ` +
       `Using cached entitlement from ${checkedDate}; valid for up to 72 hours after the last successful check.`,
@@ -215,6 +237,49 @@ function formatEntitlementHttpError(status: number, bodyText: string): string {
 }
 
 /**
+ * Baked in at build time (`DEVINTERN_RELEASE_BUILD=1` in the publish jobs).
+ * Undefined in source runs and tests, which keep the developer escape hatches.
+ */
+declare const __DEVINTERN_RELEASE_BUILD__: boolean | undefined;
+
+let releaseBuildOverride: boolean | undefined;
+
+/** True only in published release bundles. */
+export function isReleaseBuild(): boolean {
+  if (releaseBuildOverride !== undefined) return releaseBuildOverride;
+  return typeof __DEVINTERN_RELEASE_BUILD__ !== "undefined" && __DEVINTERN_RELEASE_BUILD__ === true;
+}
+
+/** Test seam: force the release flag; pass `undefined` to restore the build-time value. */
+export function setReleaseBuildForTests(value: boolean | undefined): void {
+  releaseBuildOverride = value;
+}
+
+/**
+ * Whether `DEVINTERN_SKIP_LICENSE_CHECK=1` is honoured. Release builds ignore
+ * it so a one-line env edit cannot bypass licensing.
+ */
+export function shouldSkipLicenseCheck(
+  env: Record<string, string | undefined> = process.env,
+  releaseBuild: boolean = isReleaseBuild(),
+): boolean {
+  return !releaseBuild && env.DEVINTERN_SKIP_LICENSE_CHECK === "1";
+}
+
+/**
+ * Entitlement API base URL. `DEVINTERN_API_BASE` is a test/staging override
+ * and is ignored in release builds.
+ */
+export function resolveApiBase(
+  env: Record<string, string | undefined> = process.env,
+  releaseBuild: boolean = isReleaseBuild(),
+): string {
+  return (!releaseBuild && env.DEVINTERN_API_BASE) || DEFAULT_API_BASE;
+}
+
+let warnedSkipIgnored = false;
+
+/**
  * Checks entitlement for the signed-in user via the devintern.com license API.
  *
  * Uses {@link fetchWithRetry} for transient failures (5xx, 429, network).
@@ -231,7 +296,7 @@ async function checkEntitlementViaWebsite(
   allowTrial: boolean,
   retryBaseDelayMs: number,
 ): Promise<EntitlementCheckResult> {
-  const base = process.env.DEVINTERN_API_BASE || DEFAULT_API_BASE;
+  const base = resolveApiBase();
   const params = new URLSearchParams({ productKey });
   if (requireAutomation) params.set("server", "1");
   if (allowTrial) params.set("trial", "1");
@@ -345,7 +410,8 @@ async function checkExplicitLicenseKey(
  * Infrastructure failures fall back to a cached last-known-good entitlement
  * for up to 72 hours; definitive denials clear the cache and fail.
  *
- * Skipped entirely when `DEVINTERN_SKIP_LICENSE_CHECK=1` (tests/CI).
+ * Skipped entirely when `DEVINTERN_SKIP_LICENSE_CHECK=1` (tests/CI), except in
+ * release builds, which ignore the flag.
  *
  * @param options - Product key, auth config, and optional license key / automation flag.
  * @returns Validation outcome with `valid`, `source`, and a human-readable `message`.
@@ -361,7 +427,11 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
   } = options;
 
   // Allow tests and CI to skip license checks
-  if (process.env.DEVINTERN_SKIP_LICENSE_CHECK === "1") {
+  if (isReleaseBuild() && process.env.DEVINTERN_SKIP_LICENSE_CHECK === "1" && !warnedSkipIgnored) {
+    warnedSkipIgnored = true;
+    process.stderr.write("DEVINTERN_SKIP_LICENSE_CHECK is ignored in release builds.\n");
+  }
+  if (shouldSkipLicenseCheck()) {
     return {
       valid: true,
       source: "license-key",
@@ -440,13 +510,28 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     }
   }
 
-  // 3. No valid license. LICENSE_KEY is the recommended remedy: it's more
-  // reliable than auth, which can fail when the purchase was made under a
-  // different email than the Supabase login. Sign-in is the alternative path.
+  return noLicenseResult(options, user !== null, entitlementCheckError);
+}
+
+/**
+ * Step 3 of {@link checkLicense}: no valid license. LICENSE_KEY is the
+ * recommended remedy: it's more reliable than auth, which can fail when the
+ * purchase was made under a different email than the Supabase login. Sign-in
+ * is the alternative path.
+ */
+function noLicenseResult(
+  options: LicenseCheckOptions,
+  signedIn: boolean,
+  entitlementCheckError: string | undefined,
+): LicenseCheckResult {
+  const { requireAutomation = false, allowTrial = false } = options;
   const messages: string[] = [];
+  const loginCommand = options.loginCommand ?? "devintern login";
   if (requireAutomation) {
     messages.push(
-      "Automated execution detected (CI / systemd / cron) but no automation license was found.",
+      options.setup
+        ? "No automation license or Worker Pilot was found, and the unattended worker needs one to start."
+        : "Automated execution detected (CI / systemd / cron) but no automation license was found.",
     );
     if (entitlementCheckError) {
       messages.push(`License entitlement check failed: ${entitlementCheckError}.`);
@@ -454,15 +539,15 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     messages.push(
       "Set LICENSE_KEY to a Supporter, Team, or Business license key from https://devintern.com/account, or purchase one at https://devintern.com/pricing.",
     );
-    if (!user) {
+    if (!signedIn) {
       messages.push(
         allowTrial
-          ? "Alternatively, run `devintern login` to start a free Worker Pilot; no card is required."
+          ? `Alternatively, run \`${loginCommand}\` to start your 14-day free Worker Pilot (no card required).`
           : "Alternatively, sign in if your account already holds one.",
       );
     }
   } else {
-    if (!user) {
+    if (!signedIn) {
       messages.push("No LICENSE_KEY is set and you are not signed in.");
     } else if (entitlementCheckError) {
       messages.push(`License entitlement check failed: ${entitlementCheckError}.`);
@@ -478,6 +563,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     valid: false,
     source: "none",
     message: messages.join(" "),
+    ...(!signedIn && requireAutomation && allowTrial ? { signInRequired: true } : {}),
   };
 }
 
@@ -502,6 +588,8 @@ export async function activateWorkerTrial(options: {
   productKey: string;
   supabaseConfig: SupabaseAuthConfig;
   retryBaseDelayMs?: number;
+  /** Sign-in command named in the message (defaults to `devintern login`). */
+  loginCommand?: string;
 }): Promise<LicenseCheckResult> {
   let user: AuthenticatedUser | null = null;
   try {
@@ -513,11 +601,12 @@ export async function activateWorkerTrial(options: {
     return {
       valid: false,
       source: "none",
-      message: "Run `devintern login` to start the free Worker Pilot.",
+      message: `Run \`${options.loginCommand ?? "devintern login"}\` to start your 14-day free Worker Pilot (no card required).`,
+      signInRequired: true,
     };
   }
 
-  const base = process.env.DEVINTERN_API_BASE || DEFAULT_API_BASE;
+  const base = resolveApiBase();
   try {
     const response = await fetchWithRetry(
       `${base}/api/license/trial`,

@@ -31,9 +31,11 @@ import {
   handleWorkerStatus,
 } from "./lib/observability/dashboard-api";
 import { handleOverview } from "./lib/observability/dashboard-overview";
+import { DashboardNotifications } from "./lib/observability/dashboard-notifications";
 import { handleSources } from "./lib/observability/dashboard-sources";
 import { handleQueuedWork } from "./lib/observability/queued-work";
 import { handleCancelTask, handleCreateTask } from "./lib/observability/dashboard-tasks";
+import { VERSION } from "./lib/cli/bootstrap";
 import { DashboardReports } from "./lib/observability/dashboard-report";
 import type { DashboardReportDeps } from "./lib/observability/dashboard-report";
 import { handleWorkspace } from "./lib/observability/dashboard-workspace";
@@ -51,10 +53,11 @@ import {
   parseDashboardAllowedOriginsEnv,
 } from "./lib/observability/dashboard-origins";
 import type { DashboardAllowedOrigin } from "./lib/observability/dashboard-origins";
+import { DEFAULT_DASHBOARD_PORT } from "./lib/observability/dashboard-port";
 import { TailscaleOriginDetector } from "./lib/observability/dashboard-tailscale";
 import type { TailscaleStatusProbe } from "./lib/observability/dashboard-tailscale";
 
-export const DEFAULT_DASHBOARD_PORT = 4400;
+export { DEFAULT_DASHBOARD_PORT };
 export { isLoopbackDashboardHost };
 
 /** Why {@link checkDashboardRequest} refused a request. */
@@ -329,6 +332,9 @@ export function startDashboardServer(
     configuredSources: options.configuredSources,
   });
   const reports = new DashboardReports(data, options.reportDeps);
+  // Notifications live in the durable queue DB, which is the workspace DB a
+  // `--workspace` worker writes to; run history and the queue can differ.
+  const notifications = new DashboardNotifications(data.queueDbPath);
   const uiDir = resolveUiDir();
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
@@ -341,6 +347,8 @@ export function startDashboardServer(
   const runReportPreviewPattern = /^\/api\/runs\/([^/]+)\/report\/preview$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
   const taskCancelPattern = /^\/api\/tasks\/([^/]+)\/cancel$/;
+  const notificationReadPattern = /^\/api\/notifications\/([^/]+)\/read$/;
+  const notificationResolvePattern = /^\/api\/notifications\/([^/]+)\/resolve$/;
 
   const envOrigins = parseDashboardAllowedOriginsEnv(process.env.DASHBOARD_ALLOWED_ORIGINS);
   if (envOrigins.errors.length > 0) {
@@ -386,8 +394,28 @@ export function startDashboardServer(
     if (reportPreview) {
       return reports.preview(reportPreview[1], await readJsonBody(request));
     }
+    if (pathname === "/api/reports/preview") {
+      return reports.previewGeneral(await readJsonBody(request));
+    }
     if (pathname === "/api/reports") {
       return reports.submit(await readJsonBody(request));
+    }
+    if (pathname === "/api/notifications/read-all") {
+      return notifications.markAllRead();
+    }
+    if (pathname === "/api/notifications/mute") {
+      return notifications.mute(await readJsonBody(request));
+    }
+    if (pathname === "/api/notifications/unmute") {
+      return notifications.unmute(await readJsonBody(request));
+    }
+    const notificationRead = pathname.match(notificationReadPattern);
+    if (notificationRead) {
+      return notifications.markRead(notificationRead[1]);
+    }
+    const notificationResolve = pathname.match(notificationResolvePattern);
+    if (notificationResolve) {
+      return notifications.resolve(notificationResolve[1]);
     }
     return { status: 405, body: { error: "method not allowed" } };
   };
@@ -415,7 +443,7 @@ export function startDashboardServer(
           return json(await routeWrite(request, pathname));
         }
         if (pathname === "/api/health") {
-          return json({ status: 200, body: { status: "ok" } });
+          return json({ status: 200, body: { status: "ok", version: VERSION } });
         }
         if (pathname === "/api/automations") {
           return json(handleAutomations(data));
@@ -474,6 +502,10 @@ export function startDashboardServer(
         }
         if (pathname === "/api/agent-prs") {
           return json(handleAgentPrs(data, url.searchParams));
+        }
+        const notificationRead = notifications.routeGet(pathname, url.searchParams);
+        if (notificationRead) {
+          return json(notificationRead);
         }
         if (pathname === "/api/logs") {
           return json(handleLogs(data, url.searchParams));

@@ -14,6 +14,7 @@ import { runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { logHookErrorToFile } from "./plan";
 import type { VerifyConfig } from "./verify";
 import type { ResolvedPipelineStep } from "../task/pipeline-config";
+import type { StackBase } from "../dependencies/gate";
 
 export interface FinalizeContext {
   taskFile: string;
@@ -31,7 +32,14 @@ export interface FinalizeContext {
   createPr: boolean;
   /** Treat a run that makes no repository changes as a successful no-op. */
   allowNoChanges: boolean;
+  /**
+   * PR target and diff base. Starts as the stack base for a stacked run and
+   * is switched to the base's merge target when the base merges mid-run
+   * (`stack-base-guard.ts`), so read it at use time.
+   */
   prTargetBranch: string;
+  /** The PR this run is stacked on, when its target is that PR's branch. */
+  stackBase?: StackBase;
   tracker?: TaskTrackerClient;
   skipComments: boolean;
   hookRetries: number;
@@ -49,6 +57,12 @@ export interface FinalizeContext {
   requestedPrTargetBranch?: string;
   verify?: VerifyConfig;
   pipelineSteps?: ResolvedPipelineStep[];
+  /**
+   * Exposed to plugins as `PipelineContext.pipelineDir`; `null` for the built-in
+   * default. Required so the compiler rejects a caller that forgets to wire it:
+   * an omission would silently send every plugin `null`.
+   */
+  pipelineDir: string | null;
   artifactPolicy?: import("../artifacts/types").ArtifactPolicy;
   artifactUploader?: import("../artifacts/upload").LoadedArtifactUploader;
   runRepair?: (
@@ -97,7 +111,6 @@ export function createGitHelpers(ctx: FinalizeContext) {
     tracker,
     skipComments,
     hookRetries,
-    prTargetBranch,
     prTargetBranchExplicit,
     requestedPrTargetBranch,
     projectSettings,
@@ -270,6 +283,7 @@ export function createGitHelpers(ctx: FinalizeContext) {
       // missing target (e.g. `--pr-target-branch main` on a `master` repo) makes
       // GitHub reject the PR with "Validation Failed", leaving a pushed branch
       // and no PR. Fall back to the repo's real default branch in that case.
+      const prTargetBranch = ctx.prTargetBranch;
       let effectivePrTargetBranch = prTargetBranch;
       if (
         !(await Utils.remoteBranchExists(prTargetBranch, {

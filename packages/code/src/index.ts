@@ -8,7 +8,7 @@ import type { ResolvedHarness } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { setSandboxOverride } from "./lib/agent/sandbox";
-import { beginShutdown, isShuttingDown } from "./lib/cli/shutdown-state";
+import { beginShutdown, isShuttingDown, isSignalHandlingClaimed } from "./lib/cli/shutdown-state";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { flushAnalytics, isAnonymousIdNewlyCreated, track } from "./lib/observability/analytics";
 import type { AnalyticsPropValue } from "./lib/observability/analytics";
@@ -26,7 +26,8 @@ import {
 } from "./lib/trackers/capabilities";
 import { acquireRunLocks } from "./lib/cli/run-locks";
 import { applyManualWorkspaceRun, findWorkspaceRepoForCheckout } from "./lib/workspace/manual-run";
-import { migrateLegacyCheckout, moveLegacyCheckoutState } from "./lib/workspace/migrate-checkout";
+import { moveLegacyCheckoutState } from "./lib/workspace/migrate-checkout";
+import { bootstrapCheckoutEnv } from "./lib/cli/checkout-env";
 import { Utils } from "./lib/utils";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import {
@@ -153,14 +154,9 @@ if (process.argv[2] === "init") {
   // A checkout of a registered workspace repo takes its env, state, and
   // prompts from the workspace; its own `.devintern-code/.env` is skipped.
   // First run of this release in a legacy checkout: move its settings first.
-  await migrateLegacyCheckout();
-  runContext.manualWorkspace = await findWorkspaceRepoForCheckout();
-  const envFileArg = findEnvFileArg(process.argv);
-  if (runContext.manualWorkspace) {
-    applyManualWorkspaceRun(runContext.manualWorkspace, { runtimeOnly: Boolean(envFileArg) });
-  }
-  loadEnvironment(envFileArg, {
-    skipProjectEnv: Boolean(runContext.manualWorkspace),
+  runContext.manualWorkspace = await bootstrapCheckoutEnv({
+    envFile: findEnvFileArg(process.argv),
+    migrate: true,
   });
 }
 
@@ -414,6 +410,9 @@ process.on("unhandledRejection", (error: Error) => {
 
 // Handle process termination signals
 async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number): Promise<void> {
+  // The worker daemon runs its own graceful shutdown and exits 0 when it
+  // finishes; exiting here first would skip it (and fail the service unit).
+  if (isSignalHandlingClaimed()) return;
   if (isShuttingDown()) return;
   beginShutdown();
   console.log(`\n\n⚠️  Received ${signal}, cleaning up...`);

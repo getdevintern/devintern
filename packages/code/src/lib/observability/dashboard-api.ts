@@ -15,13 +15,14 @@ import { existsSync } from "fs";
 import { resolve } from "path";
 
 import { LockManager } from "../lock-manager";
-import type { LockStatus } from "../lock-manager";
 import type {
   AutomationScheduleStatus,
   DashboardAutomationActions,
   ManualTriggerOutcome,
 } from "../automation/acquirer";
 import { RunStore } from "../state/run-recorder";
+import { RUN_OUTCOME_CLASSES, isRunOutcomeClass } from "../state/run-outcome";
+import type { RunOutcomeClass } from "../state/run-outcome";
 import { hostTimeZone, isValidTimeZone } from "../state/run-activity";
 import type {
   RunOrigin,
@@ -31,6 +32,7 @@ import type {
   RunStatus,
 } from "../state/run-recorder";
 import { InjectedTaskStore } from "../state/injected-tasks";
+import { readRunLineage } from "../state/run-lineage";
 import type { InjectedTask } from "../state/injected-tasks";
 import type { ScheduleSnapshot } from "../worker/schedule";
 import type { QueuedJobSnapshot } from "../worker/supervisor";
@@ -59,6 +61,8 @@ import {
   interruptedChildStillRunning,
 } from "../workspace/injected-recovery";
 import { resolveWorkspaceDir } from "../workspace/paths";
+import { lastExitView, readWorkerLifecycle, stoppedWorkerExit } from "../worker/lifecycle";
+import type { WorkerLastExitView } from "../worker/lifecycle";
 import {
   readDashboardQueueStatuses,
   readDashboardRelayStats,
@@ -77,27 +81,7 @@ import {
 import type { ConfiguredSource, DashboardSourcesResult } from "./dashboard-sources";
 import { scheduledJobRunFilter, toAutomationView } from "./dashboard-automation-view";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
-
-const RUN_STATUSES: RunStatus[] = [
-  "in_progress",
-  "succeeded",
-  "failed",
-  "deferred",
-  "escalated",
-  "abandoned",
-];
-const RUN_ORIGINS: RunOrigin[] = [
-  "task",
-  "error_monitor",
-  "pr_mention",
-  "ci_fix",
-  "conflict_resolution",
-  "auto_merge",
-  "scheduled",
-  "estimate",
-  "manual",
-  "local",
-];
+import { RUN_ORIGINS, RUN_STATUSES } from "./dashboard-run-filters";
 
 const STATS_WINDOWS: Record<string, number | null> = {
   "7d": 7 * 24 * 60 * 60 * 1000,
@@ -227,6 +211,8 @@ export interface WorkerStatusView {
   /** Lock file the status was read from; absent when undeterminable. */
   lockFile?: string;
   reason?: "pid-namespace"; // `unknown` because the lock owner is in another PID namespace
+  /** Additive: how the last worker ended (clean stop or failed start), when stopped. */
+  lastExit?: WorkerLastExitView;
 }
 
 export type { AgentPrView, OpenAgentPrView } from "./dashboard-agent-prs";
@@ -364,6 +350,7 @@ export class DashboardData {
     status?: RunStatus;
     origin?: RunOrigin;
     automationId?: string;
+    outcomeClass?: RunOutcomeClass;
     limit: number;
     offset: number;
   }): { runs: RunRecord[]; total: number } {
@@ -1205,7 +1192,8 @@ export async function handleRunAutomation(
  * `GET /api/runs` — paginated run list with optional filters.
  *
  * @param data - Dashboard data source
- * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`, `automationId`
+ * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`,
+ *   `automationId`, `outcomeClass`
  */
 export function handleRuns(data: DashboardData, params: URLSearchParams): ApiResponse {
   const rawLimit = params.get("limit");
@@ -1227,10 +1215,16 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
     return badRequest(`origin must be one of: ${RUN_ORIGINS.join(", ")}`);
   }
 
+  const outcomeClass = params.get("outcomeClass") ?? undefined;
+  if (outcomeClass !== undefined && !isRunOutcomeClass(outcomeClass)) {
+    return badRequest(`outcomeClass must be one of: ${RUN_OUTCOME_CLASSES.join(", ")}`);
+  }
+
   const result = data.listRuns({
     taskKey: params.get("taskKey") ?? undefined,
     status: status as RunStatus | undefined,
     origin: origin as RunOrigin | undefined,
+    ...(outcomeClass ? { outcomeClass } : {}),
     automationId: params.get("automationId") ?? undefined,
     limit,
     offset,
@@ -1269,6 +1263,7 @@ export function handleRunDetail(data: DashboardData, idParam: string): ApiRespon
       retry,
       harnessLogs: data.listRunHarnessLogs(id),
       artifacts: data.listRunArtifacts(id),
+      lineage: readRunLineage(data.dbPath, data.queueDbPath, detail.run),
     },
   };
 }
@@ -1380,37 +1375,34 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
 }
 
 /**
- * Resolve worker liveness from the daemon's lock file.
+ * Resolve worker liveness from the workspace lock (`<workspace>/.worker.lock`).
  *
- * Both `.devintern-code/.worker.lock` (simple mode) and the workspace-home lock
- * (fleet mode) are consulted. A live lock beats a stale (dead-pid) one; `stopped`
- * only when every readable lock is dead. No readable lock, or one from another
- * PID namespace (read inside a sandbox, and beats a stale one), means `unknown`.
+ * `stopped` when the lock's pid is dead. No readable lock means `unknown`, as
+ * does a lock from another PID namespace with a fresh heartbeat (read inside a
+ * sandbox), which also reports `reason: "pid-namespace"`. Without a lock, a
+ * lifecycle record (clean stop, failed start) makes it `stopped` + `lastExit`.
  *
- * @param workingDir - Project root the dashboard was started from
- * @param workspaceDir - Workspace home whose lock is also consulted
+ * @param workspaceDir - Workspace home holding the worker lock
  */
 export function resolveWorkerStatus(
-  workingDir: string,
   workspaceDir: string = resolveWorkspaceDir(),
 ): WorkerStatusView {
-  const locks = [
-    LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE),
-    LockManager.readLockStatus(workspaceDir, WORKER_LOCK_FILE, { plainDir: true }),
-  ].filter((lock): lock is LockStatus => lock !== null);
-  if (locks.length === 0) {
-    return { status: "unknown" };
+  const lock = LockManager.readLockStatus(workspaceDir, WORKER_LOCK_FILE);
+  const record = readWorkerLifecycle(workspaceDir);
+  if (!lock) {
+    if (!record) return { status: "unknown" };
+    const lastExit = lastExitView(record);
+    return { status: "stopped", ...(lastExit ? { lastExit } : {}) };
   }
-  // Live beats unverifiable beats stale, whichever location each sits in.
-  const rank = (l: LockStatus) => (l.running === true ? 0 : l.running === "unknown" ? 1 : 2);
-  const lock = locks.sort((a, b) => rank(a) - rank(b))[0]; // `locks` is a fresh array
   const unknown = lock.running === "unknown";
+  const lastExit = lock.running === false ? stoppedWorkerExit(record, lock.startedAt) : undefined;
   return {
     status: unknown ? "unknown" : lock.running ? "running" : "stopped",
     pid: lock.pid,
     startedAt: lock.startedAt,
     lockFile: lock.path,
     ...(unknown ? { reason: "pid-namespace" as const } : {}),
+    ...(lastExit ? { lastExit } : {}),
   };
 }
 
@@ -1428,7 +1420,7 @@ export function handleWorkerStatus(data: DashboardData, serverPid?: number): Api
   return {
     status: 200,
     body: {
-      worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
+      worker: resolveWorkerStatus(data.workspaceDir),
       // Additive, HTTP route only: pid of the process serving this dashboard.
       // Equals `worker.pid` only for the worker's in-process dashboard
       // (`worker doctor` relies on it).

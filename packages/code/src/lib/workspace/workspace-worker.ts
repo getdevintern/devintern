@@ -14,10 +14,13 @@ import { randomUUID } from "crypto";
 
 import { parseEnvInteger } from "../config/env-integer";
 import { createPickupGate } from "../worker/schedule";
+import { exitWorkerStartupPermanently } from "../worker/startup";
 import type { PickupGate, ScheduleSnapshot } from "../worker/schedule";
 import { recoverOrphanedTaskRuns, resolveStatusName } from "../worker/orphan-recovery";
+import type { OrphanRecoveryResult } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
+import { startNotificationMaintenance } from "../notifications/maintenance";
 import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
@@ -40,7 +43,7 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
 import { migrateCommittedTrackerSettings } from "./migrate-checkout";
 import { loadWorkspaceTrackerSettings } from "./tracker-settings";
-import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildTeamEnv } from "./env";
+import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, requireTeamTrackerEnv } from "./env";
 import {
   automationsDir,
   injectedTasksDir,
@@ -213,10 +216,17 @@ export async function recoverOrphanedWorkspaceRuns(options: {
   config: WorkspaceConfig;
   workspaceDir: string;
   dbPath: string;
-}): Promise<void> {
+}): Promise<OrphanRecoveryResult> {
   const { config, workspaceDir, dbPath } = options;
   const runStore = new RunStore(dbPath);
   let retryStore: RetryStateStore | null = null;
+  let recovery: OrphanRecoveryResult = {
+    reaped: 0,
+    recovered: 0,
+    skipped: 0,
+    resumable: [],
+    deferredRunIds: [],
+  };
   try {
     const hasTaskOrphans =
       runStore.listRuns({ status: "in_progress", origin: "task", limit: 1 }).length > 0;
@@ -347,7 +357,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       }),
     );
 
-    const recovery = await recoverOrphanedTaskRuns({
+    recovery = await recoverOrphanedTaskRuns({
       runStore,
       tracker,
       trackerType,
@@ -437,6 +447,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     retryStore?.close();
     runStore.close();
   }
+  return recovery;
 }
 
 /**
@@ -891,7 +902,7 @@ function assertWorkerHasRepos(config: WorkspaceConfig, configPath: string): void
       "   Add [[repos]] entries without manual_only = true " +
       "(or run `devintern worker add-repo` inside an existing repo).",
   );
-  process.exit(1);
+  exitWorkerStartupPermanently();
 }
 
 /** Reload hooks published by buildFleetEventAcquirers into the worker loop. */
@@ -931,18 +942,26 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   assertWorkspaceHasWork(config, retryQueue, injectedTasks, multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
+  // Prune + sweeper now; delivery starts in onStarted (lock held), so a worker
+  // that loses the lock race never double-sends.
+  const notificationDelivery = startNotificationMaintenance(state.dbPath, () => config);
   await startLoggedWorkerFailover(state.queue);
   const repoManager = new RepoManager(workspaceDir);
   const supervisor = createTaskSupervisor({
     maxConcurrency: config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
   });
-  await recoverOrphanedWorkspaceRuns({ config, workspaceDir, dbPath: state.dbPath });
+  const orphanRecovery = await recoverOrphanedWorkspaceRuns({
+    config,
+    workspaceDir,
+    dbPath: state.dbPath,
+  });
   pruneClosedChangeRequestCursors(state.workerState);
   const injectedStartup = createInjectedStartupRecovery(
     injectedTasks,
     workspaceDir,
     options.beforeAcquirersStart,
+    orphanRecovery.deferredRunIds,
   );
 
   const pickupGate = startWorkspacePickupGate(config, workspaceDir);
@@ -1122,19 +1141,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
 
   if (multiTeam) {
     for (const team of config.teams) {
-      const env = buildTeamEnv(team, workspaceDir);
-      const missing = trackerRequiredEnv(team.tracker).filter((key) => !env[key]);
-      if (missing.length > 0) {
-        throw new Error(
-          `Team "${team.name}" (${team.tracker}) is missing required variables: ${missing.join(", ")}. ` +
-            "Add them to the workspace .env or the team's env_file.",
-        );
-      }
+      const env = requireTeamTrackerEnv(team, workspaceDir, trackerRequiredEnv(team.tracker));
       const client = createTrackerClient(team.tracker, env);
       const searchTasks = (query: string) => client.searchTasks(query);
       const detector = createChangeDetector(team.tracker, searchTasks, {
         env,
         source: `${team.tracker}:${team.name}`,
+        pollIntervalMs: () => pollIntervalSeconds * 1000,
       });
       if (!detector) {
         throw new Error(
@@ -1155,7 +1168,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     // tracker credentials until a task query is enabled.
     const trackerManager = new TaskTrackerManager();
     const searchTasks = (query: string) => trackerManager.getClient().searchTasks(query);
-    const detector = createChangeDetector(config.defaults.tracker, searchTasks);
+    const detector = createChangeDetector(config.defaults.tracker, searchTasks, {
+      pollIntervalMs: () => pollIntervalSeconds * 1000,
+    });
     if (initialQuery && !detector) {
       throw new Error(
         `Could not initialize the ${config.defaults.tracker} change detector. ` +
@@ -1358,6 +1373,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       onShutdown: () => {
         reloader.stop();
         autoUpdater.stop();
+        notificationDelivery.stop();
         errorMonitorStatusStore?.close();
         errorMonitorStatusStore = null;
         injectedStartup.close();
@@ -1366,18 +1382,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         // successor starts (binds the same dashboard port) while this
         // process is still alive, so a socket still bound here can fail it
         // with EADDRINUSE and leave the daemon down.
-        if (dashboardServer) {
-          try {
-            dashboardServer.stop();
-          } catch {
-            // Already stopped.
-          }
-          dashboardServer = null;
-        }
+        stopDashboardServer(dashboardServer);
+        dashboardServer = null;
       },
       finalExitCode: () => autoUpdater.finalExitCode(),
       onStarted: async (acquirerNames) => {
         holdsWorkerLock = true;
+        notificationDelivery.start();
         // Re-read the file now that the lock is held: records which version
         // is live (or why the on-disk version was rejected) for the dashboard.
         reloader.reload("worker started");
@@ -1392,6 +1403,15 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     },
     acquirers,
   );
+}
+
+/** Stop the dashboard server if it is running (already-stopped is fine). */
+function stopDashboardServer(server: { stop(): void } | null): void {
+  try {
+    server?.stop();
+  } catch {
+    // Already stopped.
+  }
 }
 
 /** Log the configured agent concurrency and warn when jobs can run in parallel. */
@@ -1449,7 +1469,7 @@ function assertWorkspaceHasWork(
     console.error(
       "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
     );
-    process.exit(1);
+    exitWorkerStartupPermanently();
   }
   if (workspaceHasConfiguredWork(config, multiTeam, initialQuery)) return;
 

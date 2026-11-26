@@ -1,6 +1,6 @@
 import { ArtifactStore } from "../src/lib/artifacts/store";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { tmpdir } from "os";
 
@@ -187,6 +187,39 @@ describe("dashboard API", () => {
 
     const none = handleRuns(data, new URLSearchParams("automationId=missing"));
     expect((none.body as { total: number }).total).toBe(0);
+  });
+
+  test("handleRuns filters by outcome class and exposes the outcome fields", () => {
+    const store = new RunStore(dbPath);
+    const internal = store.createRun({ origin: "local", taskKey: "local-a" });
+    store.finishRun(internal, "escalated", "verify: Remote branch feature/x not found", {
+      failure: {
+        outcomeClass: "internal",
+        stage: "verify",
+        cause: "Remote branch feature/x not found",
+      },
+      work: { status: "saved", ref: "feature/local-a" },
+    });
+    const hold = store.createRun({ origin: "auto_merge", prNumber: 3 });
+    store.finishRun(hold, "escalated", "matches deny pattern a/**", {
+      failure: { outcomeClass: "review_hold", stage: "auto_merge" },
+    });
+    store.close();
+
+    const response = handleRuns(data, new URLSearchParams("outcomeClass=internal"));
+    const body = response.body as { runs: Record<string, unknown>[]; total: number };
+    expect(body.total).toBe(1);
+    expect(body.runs[0]).toMatchObject({
+      id: internal,
+      outcomeClass: "internal",
+      failureStage: "verify",
+      failureCause: "Remote branch feature/x not found",
+      workStatus: "saved",
+      workRef: "feature/local-a",
+    });
+    const detail = handleRunDetail(data, String(hold)).body as { run: Record<string, unknown> };
+    expect(detail.run).toMatchObject({ outcomeClass: "review_hold", failureStage: "auto_merge" });
+    expect(handleRuns(data, new URLSearchParams("outcomeClass=bogus")).status).toBe(400);
   });
 
   test("handleRuns rejects invalid params", () => {
@@ -400,11 +433,10 @@ describe("dashboard API", () => {
     queue.enqueue("issue_comment", { hello: true });
     queue.close();
 
-    // Live worker lock (this test process's pid).
-    const configDir = join(dir, ".devintern-code");
-    mkdirSync(configDir, { recursive: true });
+    // Live workspace worker lock (this test process's pid).
+    const lockFile = join(workspaceDir, ".worker.lock");
     writeFileSync(
-      join(configDir, ".worker.lock"),
+      lockFile,
       JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
     );
 
@@ -418,7 +450,7 @@ describe("dashboard API", () => {
     };
     expect(body.worker.status).toBe("running");
     expect(body.worker.pid).toBe(process.pid);
-    expect(body.worker.lockFile).toContain(join(".devintern-code", ".worker.lock"));
+    expect(body.worker.lockFile).toBe(lockFile);
     expect(body.queue.pending).toBe(1);
     expect(body.agentPrs).toEqual({ open: 1, closed: 1 });
     expect(body.cursors.map((c) => c.source)).toEqual(["jira"]);
@@ -430,7 +462,7 @@ describe("dashboard API", () => {
 
     // Dead pid → stopped (a stale lock is determinable, not unknown).
     writeFileSync(
-      join(configDir, ".worker.lock"),
+      lockFile,
       JSON.stringify({ pid: 999999999, timestamp: new Date().toISOString() }),
     );
     const dead = handleWorkerStatus(data);
@@ -909,10 +941,7 @@ describe("dashboard API", () => {
     }
   });
 
-  test("worker liveness falls back to the workspace home lock (fleet mode)", () => {
-    // The fleet daemon locks the workspace home directly, without nesting
-    // .devintern-code/ — a dashboard started from a repo checkout must still
-    // see it.
+  test("worker liveness comes from the workspace lock, not the dashboard's cwd", () => {
     writeFileSync(
       join(workspaceDir, ".worker.lock"),
       JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
@@ -926,43 +955,25 @@ describe("dashboard API", () => {
     expect(body.worker.lockFile).toBe(join(workspaceDir, ".worker.lock"));
   });
 
-  test("a stale project-dir lock does not shadow a live workspace lock", () => {
-    // A crashed worker leaves a lock whose pid is dead. If the current worker
-    // (fleet mode) has since taken the workspace-home lock, the stale lock
-    // must not win just because it was checked first.
+  test("a legacy project-dir lock is ignored", () => {
+    // An old per-checkout worker left a live lock in the repo; the dead
+    // workspace lock is the only one that counts.
     const configDir = join(dir, ".devintern-code");
     mkdirSync(configDir, { recursive: true });
     writeFileSync(
       join(configDir, ".worker.lock"),
-      JSON.stringify({ pid: 999999999, timestamp: "2026-08-26T06:03:49.220Z" }),
-    );
-    writeFileSync(
-      join(workspaceDir, ".worker.lock"),
       JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
-    );
-
-    const body = handleWorkerStatus(data).body as {
-      worker: { status: string; pid: number; lockFile?: string };
-    };
-    expect(body.worker.status).toBe("running");
-    expect(body.worker.pid).toBe(process.pid);
-    expect(body.worker.lockFile).toBe(join(workspaceDir, ".worker.lock"));
-  });
-
-  test("stopped is reported when every readable lock is stale", () => {
-    const configDir = join(dir, ".devintern-code");
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(
-      join(configDir, ".worker.lock"),
-      JSON.stringify({ pid: 999999999, timestamp: "2026-08-26T06:03:49.220Z" }),
     );
     writeFileSync(
       join(workspaceDir, ".worker.lock"),
       JSON.stringify({ pid: 999999998, timestamp: "2026-08-26T06:03:49.220Z" }),
     );
 
-    const body = handleWorkerStatus(data).body as { worker: { status: string } };
+    const body = handleWorkerStatus(data).body as {
+      worker: { status: string; lockFile?: string };
+    };
     expect(body.worker.status).toBe("stopped");
+    expect(body.worker.lockFile).toBe(join(workspaceDir, ".worker.lock"));
   });
 
   test("worker status without any lock file is unknown, not stopped", () => {
@@ -1231,6 +1242,7 @@ describe("dashboard server", () => {
 
       const health = await fetch(`${base}/api/health`);
       expect(health.status).toBe(200);
+      expect(await health.json()).toMatchObject({ status: "ok", version: expect.any(String) });
 
       const runs = (await (await fetch(`${base}/api/runs`)).json()) as { total: number };
       expect(runs.total).toBe(1);
@@ -1444,16 +1456,16 @@ describe("dashboard server", () => {
 });
 
 describe("resolveWorkerStatus PID-namespace liveness", () => {
-  let workingDir: string;
+  let repoDir: string;
   let workspaceDir: string;
 
   beforeEach(() => {
-    workingDir = mkdtempSync(join(tmpdir(), "worker-status-cwd-"));
+    repoDir = mkdtempSync(join(tmpdir(), "worker-status-repo-"));
     workspaceDir = mkdtempSync(join(tmpdir(), "worker-status-ws-"));
   });
 
   afterEach(() => {
-    rmSync(workingDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
@@ -1476,7 +1488,7 @@ describe("resolveWorkerStatus PID-namespace liveness", () => {
     // Never equal to the reader's namespace (and off Linux the reader has
     // none, which is just as unverifiable), so this holds on any host.
     const lockFile = writeWorkspaceLock({ pidNamespace: "pid:[foreign-test-namespace]" });
-    expect(resolveWorkerStatus(workingDir, workspaceDir)).toEqual({
+    expect(resolveWorkerStatus(workspaceDir)).toEqual({
       status: "unknown",
       pid: 999_999_999,
       startedAt: "2026-11-17T10:11:59.687Z",
@@ -1487,16 +1499,25 @@ describe("resolveWorkerStatus PID-namespace liveness", () => {
 
   test("a legacy lock without a namespace still reports stopped", () => {
     writeWorkspaceLock({});
-    expect(resolveWorkerStatus(workingDir, workspaceDir).status).toBe("stopped");
+    expect(resolveWorkerStatus(workspaceDir).status).toBe("stopped");
   });
 
-  test("an unverifiable lock beats a provably stale one", () => {
-    writeWorkspaceLock({ pidNamespace: "pid:[foreign-test-namespace]" });
-    mkdirSync(join(workingDir, ".devintern-code"));
+  test("a stale project-dir lock without a workspace lock is unknown", () => {
+    const legacyDir = join(repoDir, ".devintern-code");
+    mkdirSync(legacyDir);
     writeFileSync(
-      join(workingDir, ".devintern-code", ".worker.lock"),
+      join(legacyDir, ".worker.lock"),
       JSON.stringify({ pid: 999_999_999, timestamp: "2026-11-17T09:00:00.000Z" }),
     );
-    expect(resolveWorkerStatus(workingDir, workspaceDir).status).toBe("unknown");
+    expect(resolveWorkerStatus(workspaceDir)).toEqual({ status: "unknown" });
+  });
+
+  test("an empty workspace home is unknown and stays empty", () => {
+    expect(resolveWorkerStatus(workspaceDir)).toEqual({ status: "unknown" });
+    expect(readdirSync(workspaceDir)).toEqual([]);
+
+    const missing = join(workspaceDir, "not-created");
+    expect(resolveWorkerStatus(missing)).toEqual({ status: "unknown" });
+    expect(existsSync(missing)).toBe(false);
   });
 });

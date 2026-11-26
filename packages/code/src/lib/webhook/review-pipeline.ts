@@ -3,6 +3,9 @@ import { UsageLimitError } from "@devintern/agent-harness";
 import { captureError } from "@devintern/utils";
 import { GitHubReviewsClient } from "../code-host/github/reviews";
 import { beginRun, endRun } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
+import type { RunFailure } from "../state/run-outcome";
+import type { RunOutcomeDetail } from "../state/run-recorder";
 import { WorkerState } from "../state/worker-state";
 import { formatReviewPrompt } from "../review/formatter";
 import { Utils } from "../utils";
@@ -395,6 +398,13 @@ async function processReviewAsync(
 
   let runStatus: "succeeded" | "failed" | "deferred" = "succeeded";
   let runReason: string | undefined;
+  let runOutcome: RunOutcomeDetail = {};
+  /** Record a failed run with its class and stage (one statement per exit path). */
+  const fail = (reason: string, failure: RunFailure): void => {
+    runStatus = "failed";
+    runReason = reason;
+    runOutcome = { failure };
+  };
   let leasedWorktree: string | null = null;
 
   try {
@@ -492,8 +502,7 @@ async function processReviewAsync(
 
     if (!worktreePath) {
       console.error("❌ Failed to prepare repository");
-      runStatus = "failed";
-      runReason = "Failed to prepare repository";
+      fail("Failed to prepare repository", { outcomeClass: "internal", stage: "worktree_setup" });
       return;
     }
 
@@ -550,8 +559,7 @@ async function processReviewAsync(
 
     if (!agentResult.success) {
       console.error(`❌ Agent failed: ${agentResult.message}`);
-      runStatus = "failed";
-      runReason = agentResult.message;
+      fail(agentResult.message, { outcomeClass: "agent", stage: "address_review" });
       return;
     }
 
@@ -580,8 +588,7 @@ async function processReviewAsync(
 
     // Verify Agent didn't switch branches during execution (e.g., checking out main for comparison)
     if (!(await restoreReviewBranch(ctx))) {
-      runStatus = "failed";
-      runReason = "Agent left the review branch";
+      fail("Agent left the review branch", { outcomeClass: "agent", stage: "address_review" });
       return;
     }
 
@@ -600,8 +607,7 @@ async function processReviewAsync(
       // Agent left uncommitted changes - try to commit with hook retry logic
       console.log("\n📝 Agent left changes uncommitted, committing now...");
       if (!(await commitUncommittedReviewChanges(ctx))) {
-        runStatus = "failed";
-        runReason = "Failed to commit review changes";
+        fail("Failed to commit review changes", { outcomeClass: "agent", stage: "commit" });
         return;
       }
     }
@@ -613,8 +619,7 @@ async function processReviewAsync(
       console.warn("⚠️  No new commits to push - Agent may not have made any changes");
       // Still continue to mark comments as addressed
     } else if (!(await publishReviewChanges(ctx, finalCommitsAhead))) {
-      runStatus = "failed";
-      runReason = "Failed to publish review changes";
+      fail("Failed to publish review changes", { outcomeClass: "internal", stage: "publish" });
       return;
     }
 
@@ -636,8 +641,7 @@ async function processReviewAsync(
       runReason = (error as Error).message;
       throw error;
     }
-    runStatus = "failed";
-    runReason = (error as Error).message;
+    fail((error as Error).message, failureFromError(error, "address_review"));
     console.error(`❌ Error processing review: ${(error as Error).message}`);
     if (config.debug) {
       console.error((error as Error).stack);
@@ -648,7 +652,7 @@ async function processReviewAsync(
     throw error;
   } finally {
     // No-op when no run was started (or it already failed to open).
-    endRun(runStatus, runReason);
+    endRun(runStatus, runReason, runOutcome);
     // Keep the worktree (reused across reviews of the same PR, deps stay
     // cached) but drop the lease so later cleanups may count it as idle.
     releaseLeasedWorktree(leasedWorktree);

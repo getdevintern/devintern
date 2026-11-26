@@ -8,13 +8,14 @@
  * credentials never change what worker repos run with.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
 import { findProjectRoot } from "@devintern/utils";
 
 import { parseGitLabHostAliases, parseGitRemoteUrl } from "../code-host";
 import { Utils } from "../utils";
+import { writeSecretFile } from "../utils/secret-file";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "./config";
 import { deriveRepoName, ensureWorkspaceScaffold, tomlString } from "./init";
 import type { WorkspaceLogFn } from "./init";
@@ -106,8 +107,7 @@ export async function registerManualCheckout(
   parseWorkspaceConfig(updated, configPath);
 
   mkdirSync(join(workspaceDir, REPO_ENV_DIR), { recursive: true, mode: 0o700 });
-  writeFileSync(envPath, envContent, { encoding: "utf8", mode: 0o600 });
-  chmodSync(envPath, 0o600);
+  writeSecretFile(envPath, envContent);
   writeFileSync(configPath, updated);
   loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
 

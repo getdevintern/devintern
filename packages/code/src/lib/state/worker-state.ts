@@ -23,6 +23,8 @@ import type { ChangeRequestIdentity, CodeHostProvider } from "../code-host/index
 import { configureSqliteConnection } from "./sqlite";
 import { buildTicketUrl } from "../task/ticket-url";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
+import { notifyPrClosed, notifyPrOpened } from "../notifications/event-rules";
+import { parseRunId, RUN_ID_ENV } from "./run-outputs";
 import {
   optionalEnum,
   optionalNumber,
@@ -677,6 +679,14 @@ export class WorkerState {
     metadata: { branch?: string; taskKey?: string; ticketUrl?: string } = {},
   ): void {
     const now = Date.now();
+    const prior = this.db
+      .query(
+        `SELECT state FROM agent_prs
+         WHERE provider = ? AND instance_url = ? AND project_path = ? AND change_number = ?`,
+      )
+      .get(change.provider, change.instanceUrl, change.projectPath, change.number) as {
+      state: string;
+    } | null;
     this.db.run(
       `INSERT INTO agent_prs (
          provider, instance_url, project_id, project_path, change_number, web_url,
@@ -714,6 +724,18 @@ export class WorkerState {
         now,
       ],
     );
+    // Re-registering an open PR is not news; a new or reopened one is.
+    if (!prior || prior.state === "closed") {
+      notifyPrOpened(this.db, {
+        repo: change.projectPath,
+        number: change.number,
+        url: change.webUrl,
+        ...(metadata.taskKey ? { taskKey: metadata.taskKey } : {}),
+        ...(parseRunId(process.env[RUN_ID_ENV]) !== undefined
+          ? { runId: parseRunId(process.env[RUN_ID_ENV]) }
+          : {}),
+      });
+    }
   }
 
   /**
@@ -854,6 +876,14 @@ export class WorkerState {
        WHERE state = 'open' AND provider = 'github' AND repo NOT IN (${placeholders})`,
       [Date.now(), ...allowed],
     );
+    // A closed PR resolves the escalations about it, same as markAgentPrClosed.
+    for (const pr of foreign) {
+      this.notifyClosed(
+        "SELECT web_url FROM agent_prs WHERE provider = 'github' AND repo = ? AND pr_number = ?",
+        [pr.repo, pr.prNumber],
+        `https://github.com/${pr.repo}/pull/${pr.prNumber}`,
+      );
+    }
     return foreign;
   }
 
@@ -874,7 +904,7 @@ export class WorkerState {
     reason?: AgentPrCloseReason,
     merge: AgentPrMergeDetails = {},
   ): void {
-    this.db.transaction(() => {
+    const closed = this.db.transaction(() => {
       const now = Date.now();
       const { changes } = this.db.run(
         `UPDATE agent_prs SET state = 'closed', updated_at = ?,
@@ -888,7 +918,26 @@ export class WorkerState {
       );
       // No registry row: the cursors may belong to another subsystem.
       if (changes > 0) this.clearPrCursors(repo, prNumber);
+      return changes > 0;
     })();
+    if (closed) {
+      this.notifyClosed(
+        "SELECT web_url FROM agent_prs WHERE provider = 'github' AND repo = ? AND pr_number = ?",
+        [repo, prNumber],
+        `https://github.com/${repo}/pull/${prNumber}`,
+      );
+    }
+  }
+
+  /** Resolve escalations about a PR that just closed (best-effort, never throws). */
+  private notifyClosed(query: string, params: Array<string | number>, fallbackUrl?: string): void {
+    try {
+      const row = this.db.query(query).get(...params) as { web_url: string | null } | null;
+      const url = row?.web_url ?? fallbackUrl;
+      if (url) notifyPrClosed(this.db, url);
+    } catch (error) {
+      console.warn(`⚠️  Notification (pr-closed) failed: ${(error as Error).message}`);
+    }
   }
 
   /**
@@ -903,11 +952,21 @@ export class WorkerState {
     reason?: AgentPrCloseReason,
     merge: AgentPrMergeDetails = {},
   ): void {
-    this.db.transaction(() => {
+    const closed = this.db.transaction(() => {
       if (this.closeChangeRequestRow(identity, reason, merge) > 0) {
         this.clearChangeRequestCursors(identity);
+        return true;
       }
+      return false;
     })();
+    if (closed) {
+      this.notifyClosed(
+        `SELECT web_url FROM agent_prs WHERE provider = ? AND instance_url = ?
+         AND project_path = ? AND change_number = ?`,
+        [identity.provider, identity.instanceUrl, identity.projectPath, identity.number],
+        identity.webUrl,
+      );
+    }
   }
 
   private closeChangeRequestRow(

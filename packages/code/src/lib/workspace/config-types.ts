@@ -59,6 +59,17 @@ export interface WorkspaceSettings {
   conflictAgent?: AgentSelection;
   /** Auto-merge of the agent's own PRs (off by default). */
   autoMerge: AutoMergeSettings;
+  /**
+   * Commit identity for hosts whose git has none (`git_author_name` +
+   * `git_author_email`). Never overrides a configured git identity.
+   */
+  gitAuthor?: GitAuthorSetting;
+}
+
+/** `git_author_name` / `git_author_email` from `[workspace]` or a `[[repos]]` entry. */
+export interface GitAuthorSetting {
+  name: string;
+  email: string;
 }
 
 /**
@@ -180,6 +191,11 @@ export interface RepoConfig {
   /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
   prLabels?: string[];
   /**
+   * Commit identity when git has none: the repo's `git_author_name` /
+   * `git_author_email`, falling back to `[workspace]`.
+   */
+  gitAuthor?: GitAuthorSetting;
+  /**
    * Workspace-relative JSON file holding this repository's pipeline override.
    * Takes precedence over the repo's checked-in `settings.json` pipeline and
    * over `[defaults].pipeline_file`.
@@ -294,6 +310,11 @@ export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
   dashboard: DashboardSettings;
   worker: WorkerSettings;
+  /**
+   * Out-of-dashboard notification delivery (`[notifications]`); absent or
+   * channel-less means nothing is delivered.
+   */
+  notifications?: import("../notifications/delivery/config").NotificationsSettings;
   defaults: WorkspaceDefaults;
   /** Team tracker sources; empty means the single `[defaults]` fleet query. */
   teams: TeamConfig[];

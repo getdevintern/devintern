@@ -29,6 +29,7 @@ import type { StackLink } from "../dependencies/stack-maintainer";
 import { initInjectedTaskSchema } from "./injected-tasks-schema";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
+import { notifyDelegatedTaskAdded, notifyInjectedTaskExhausted } from "../notifications/run-rules";
 import type { RunRecord } from "./run-recorder";
 export {
   addAutoResumeColumn,
@@ -151,6 +152,8 @@ export interface InjectedTask {
   cancelledBy?: InjectedCancelActor;
   /** Optional operator reason given with the cancel. */
   cancelReason?: string;
+  /** Agent run that delegated this task (run lineage), when known. */
+  parentRunId?: number;
 }
 
 interface InjectedTaskRow {
@@ -176,6 +179,7 @@ interface InjectedTaskRow {
   dependency_reason?: string | null;
   cancelled_by?: string | null;
   cancel_reason?: string | null;
+  parent_run_id?: number | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -225,6 +229,7 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
     cancelledBy:
       row.cancelled_by === "cli" || row.cancelled_by === "dashboard" ? row.cancelled_by : undefined,
     cancelReason: row.cancel_reason ?? undefined,
+    parentRunId: typeof row.parent_run_id === "number" ? row.parent_run_id : undefined,
   };
 }
 
@@ -256,6 +261,8 @@ export interface EnqueueInjectedTaskInput {
   /** Initial gate verdict, so the queue view explains the wait immediately. */
   dependencyState?: InjectedDependencyState;
   dependencyReason?: string;
+  /** Agent run that delegated this task; stored only on a new row. */
+  parentRunId?: number;
 }
 
 export interface EnqueueInjectedTaskResult {
@@ -352,8 +359,8 @@ export class InjectedTaskStore {
       db.query(
         `INSERT INTO injected_tasks
            (task_key, repo, team, title, body, task_file, idempotency_key, actor, status, created_at,
-            depends_on, dependency_mode, dependency_state, dependency_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+            depends_on, dependency_mode, dependency_state, dependency_reason, parent_run_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
       ).run(
         input.taskKey,
         input.repo,
@@ -368,6 +375,7 @@ export class InjectedTaskStore {
         dependsOn ? (input.dependencyMode ?? "merged") : null,
         dependsOn ? (input.dependencyState ?? null) : null,
         dependsOn ? (input.dependencyReason ?? null) : null,
+        input.parentRunId ?? null,
       );
     } catch (error) {
       // A concurrent caller claimed the same idempotency key between the read
@@ -381,6 +389,7 @@ export class InjectedTaskStore {
     const row = db
       .query("SELECT * FROM injected_tasks WHERE id = last_insert_rowid()")
       .get() as InjectedTaskRow;
+    if (input.parentRunId !== undefined) notifyDelegatedTaskAdded(db, input.parentRunId);
     return { task: rowToInjectedTask(row), deduplicated: false };
   }
 
@@ -589,7 +598,9 @@ export class InjectedTaskStore {
            RETURNING *`,
         )
         .get(options.exhaustedMessage, now, deferCount, id) as InjectedTaskRow | null;
-      return failed ? { task: rowToInjectedTask(failed), requeued: false } : null;
+      if (!failed) return null;
+      notifyInjectedTaskExhausted(db, failed.task_key, options.exhaustedMessage);
+      return { task: rowToInjectedTask(failed), requeued: false };
     }
 
     const requeued = db

@@ -38,6 +38,29 @@ describe("startWorkerCapture", () => {
     Object.assign(console, savedConsole);
   });
 
+  test("a second start for the same directory reuses the running capture", () => {
+    // The daemon CLI starts capturing before its license check; startWorker()
+    // starts it again later. Lines must not be written twice.
+    tempDir = makeTempDir();
+    const early = startWorkerCapture(tempDir);
+    const later = startWorkerCapture(tempDir);
+    try {
+      expect(later).toBe(early);
+      console.error("only once");
+      const err = readFileSync(join(tempDir, "worker.stderr.log"), "utf8");
+      expect(err.match(/only once/g)).toHaveLength(1);
+    } finally {
+      later.stop();
+    }
+    // After stop, a new capture starts fresh.
+    const next = startWorkerCapture(tempDir);
+    try {
+      expect(next).not.toBe(early);
+    } finally {
+      next.stop();
+    }
+  });
+
   test("tees console output into the capture files", () => {
     tempDir = makeTempDir();
     const capture = startWorkerCapture(tempDir);

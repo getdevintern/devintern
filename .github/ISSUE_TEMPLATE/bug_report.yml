@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a DevIntern bug in public. Use `devintern report` instead if it needs logs or run details.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is **public**. Do not paste secrets, tokens, customer data, task descriptions, or unredacted logs.
+
+        If the bug involves a failed run or needs logs to diagnose, file a private report instead: run `devintern report --last`, or open the run in the dashboard and choose **Report a problem**. It masks credentials and shows you everything before sending. See [Reporting bugs](https://devintern.com/docs/code/reporting-bugs).
+  - type: dropdown
+    id: product
+    attributes:
+      label: Product
+      options:
+        - DevIntern Code (devintern CLI or worker)
+        - Dashboard
+        - DevIntern PM (devpm CLI)
+        - DevIntern PM desktop app
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `devintern --version` or `devpm --version`.
+      placeholder: "2.29.0"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `devintern ...`
+        2. ...
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, agent harness, task tracker, and sandbox if any.
+      placeholder: "macOS 15, claude-code, Linear, no sandbox"
+    validations:
+      required: false
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: A short, redacted excerpt only. Check it for tokens, paths, and repository or customer names before posting.
+      render: text
+    validations:
+      required: false

@@ -31,6 +31,7 @@ The execution scaffold is shared with the narrative variant in
 mkdir -p ~/.devintern/pipelines/steps ~/.devintern/pipelines/prompts
 cp examples/pipeline-plugins/shared/explainer.ts ~/.devintern/pipelines/steps/explainer.ts
 cp examples/pipeline-plugins/pr-explainer-visual/plugin.ts ~/.devintern/pipelines/steps/pr-explainer-visual.ts
+cp examples/pipeline-plugins/shared/prompt-path.ts ~/.devintern/pipelines/steps/prompt-path.ts
 cp examples/pipeline-plugins/pr-explainer-visual/prompts/visual.md ~/.devintern/pipelines/prompts/pr-explainer-visual.md
 cp examples/pipeline-plugins/pr-explainer-visual/pipeline.json ~/.devintern/pipelines/backend.json
 cd ~/.devintern/pipelines && bun add @getdevintern/code
@@ -42,8 +43,11 @@ Set `pipeline_file = "pipelines/backend.json"` on the repository's
 `[[repos]]` entry in `~/.devintern/workspace.toml` (see
 [Install and copy a plugin](../README.md#install-and-copy-a-plugin)).
 
-`promptFile` is read relative to the task checkout, so the pipeline file
-gives it as an absolute path: replace `/home/you` with your home directory.
+A relative `promptFile` such as `./prompts/pr-explainer-visual.md` is read next to the
+pipeline file (`~/.devintern/pipelines/`), so the same pipeline works for
+every repository. An absolute path is used as written. Requires
+`@getdevintern/code` 2.30.0 or later; older versions read a relative path
+from the task checkout.
 
 ## Choosing a style
 

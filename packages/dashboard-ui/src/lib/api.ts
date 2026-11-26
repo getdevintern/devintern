@@ -52,7 +52,26 @@ export interface RunRecord {
   stepActive?: boolean;
   startedAt: number;
   finishedAt?: number;
+  /** Whose problem a non-successful run was (unset for successes and old runs). */
+  outcomeClass?: RunOutcomeClass;
+  /** Stage or step that failed (`verify`, `publish`, …). */
+  failureStage?: string;
+  /** Redacted one-line cause of the failing stage. */
+  failureCause?: string;
+  /** Where the run's unfinished work went. */
+  workStatus?: RunWorkStatus;
+  /** Branch (`saved`) or worktree path (`kept`). */
+  workRef?: string;
 }
+
+/**
+ * `review_hold`: a review or merge rule wants a human; `agent`: the agent
+ * could not finish; `internal`: a DevIntern step failed; `environment`:
+ * credentials, network, rate limits, or a missing tool.
+ */
+export type RunOutcomeClass = "review_hold" | "agent" | "internal" | "environment";
+
+export type RunWorkStatus = "saved" | "kept" | "discarded" | "none";
 
 /** Outcome stages carry the run's terminal status (escalated, deferred, …). */
 export type StageStatus =
@@ -113,6 +132,63 @@ export interface RunDetailResponse {
   harnessLogs: HarnessLogFile[];
   /** Task artifacts under the run's output directory, sorted by path. */
   artifacts: TaskArtifactFile[];
+  /** Where this run came from and what it spawned (absent from older servers). */
+  lineage?: RunLineage;
+}
+
+/** How a run relates to the run it was sourced from. */
+export type LineageRelation = "delegated" | "follow_up";
+
+/** The run this run was sourced from. */
+export interface RunLineageParent {
+  runId: number;
+  origin: RunOrigin;
+  status: RunStatus;
+  relation: LineageRelation;
+  automationId?: string;
+  taskKey?: string;
+  /** PR a follow-up run acts on. */
+  prNumber?: number;
+  prUrl?: string;
+}
+
+/** An ad-hoc task the run delegated with `devintern worker add`. */
+export interface SpawnedDelegatedTask {
+  kind: "delegated_task";
+  id: number;
+  taskKey: string;
+  title?: string;
+  status?: "pending" | "running" | "done" | "failed" | "cancelled";
+  latestRunId?: number;
+  latestRunStatus?: RunStatus;
+  prNumber?: number;
+  prUrl?: string;
+}
+
+/** A tracker ticket the run filed. */
+export interface SpawnedTrackerIssue {
+  kind: "tracker_issue";
+  key: string;
+  tracker?: string;
+  url?: string;
+  title?: string;
+}
+
+/** A later run on the PR this run opened. */
+export interface SpawnedFollowUpRun {
+  kind: "follow_up_run";
+  runId: number;
+  origin: RunOrigin;
+  status: RunStatus;
+  startedAt: number;
+}
+
+export type SpawnedWork = SpawnedDelegatedTask | SpawnedTrackerIssue | SpawnedFollowUpRun;
+
+/** `lineage` of a run detail response. */
+export interface RunLineage {
+  parent: RunLineageParent | null;
+  spawned: SpawnedWork[];
 }
 
 /** One durable agent-harness execution transcript under `logs/harness/`. */
@@ -232,11 +308,15 @@ export interface ReportPayload {
   [key: string]: unknown;
 }
 
-/** `POST /api/runs/:id/report/preview` response: what will be sent. */
+/**
+ * `POST /api/runs/:id/report/preview` (or `POST /api/reports/preview` for a
+ * report with no run) response: what will be sent.
+ */
 export interface ReportPreview {
   previewId: string;
   expiresAt: number;
-  runId: number;
+  /** The attached run, or null for a general report. */
+  runId: number | null;
   signedIn: boolean;
   /** Anonymous reports need a contact email to submit. */
   contactRequired: boolean;
@@ -293,11 +373,16 @@ function errorMessage(body: unknown, fallback: string): string {
 }
 
 /**
- * Build the redacted report for a run without sending it. Throws with the
- * server's message on failure.
+ * Build the redacted report without sending it, for a run or (with a null
+ * run id) for the worker as a whole. Throws with the server's message on
+ * failure.
  */
-export async function previewRunReport(runId: number, draft: ReportDraft): Promise<ReportPreview> {
-  const response = await fetch(`/api/runs/${runId}/report/preview`, {
+export async function previewReport(
+  runId: number | null,
+  draft: ReportDraft,
+): Promise<ReportPreview> {
+  const url = runId === null ? "/api/reports/preview" : `/api/runs/${runId}/report/preview`;
+  const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(draft),

@@ -40,6 +40,16 @@ export interface SelectedPipeline {
 }
 
 /**
+ * Directory exposed to plugins as `PipelineContext.pipelineDir`: the declaring
+ * workspace file's directory, as given (no `realpath`, matching
+ * {@link resolveWorkspaceRelativePaths}), or `null` for the built-in default.
+ * Unlike `baseDir`, the built-in scope never falls back to the checkout.
+ */
+export function pipelineDirFor(selection: SelectedPipeline): string | null {
+  return selection.sourcePath === null ? null : resolve(dirname(selection.sourcePath));
+}
+
+/**
  * Read and parse a workspace pipeline definition file.
  *
  * Fails loudly for a missing file or invalid JSON, naming the file so an

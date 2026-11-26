@@ -68,8 +68,12 @@ async function runCLI(
   try {
     // Skip git for argument-handling runs (init has its own gitignore checks).
     // The webhook subcommand parses its own args and rejects --no-git.
+    // Login rejects unknown flags, so it gets none either.
+    const strictArgs = args[0] === "login" || (args[0] === "worker" && args[1] === "login");
     const extraArgs =
-      args[0] === "init" || args.includes("--no-git") || args[0] === "webhook" ? [] : ["--no-git"];
+      args[0] === "init" || args.includes("--no-git") || args[0] === "webhook" || strictArgs
+        ? []
+        : ["--no-git"];
     const env = options.rawEnv
       ? { ...process.env, ...options.env }
       : cliTrackerTestEnv(options.env);
@@ -104,6 +108,49 @@ async function runCLI(
 }
 
 describe.concurrent("CLI Argument Handling", () => {
+  const withWorkspace = (testDir: string) => {
+    mkdirSync(join(testDir, ".workspace"), { recursive: true });
+    writeFileSync(join(testDir, ".workspace", "workspace.toml"), "");
+  };
+
+  test("worker login rejects unknown flags instead of starting a sign-in", async () => {
+    const result = await runCLI(["worker", "login", "github", "--no-browser"], {
+      prepareDir: withWorkspace,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Unknown option for devintern worker login");
+    expect(result.stderr).toContain("--no-browser");
+    expect(result.stderr).toContain("--no-wait");
+    expect(result.stdout).not.toContain("supabase.co");
+  });
+
+  test("worker login --json reports argument errors as a JSON document", async () => {
+    const result = await runCLI(["worker", "login", "--no-wait", "--json"], {
+      prepareDir: withWorkspace,
+    });
+    expect(result.exitCode).toBe(1);
+    const doc = JSON.parse(result.stdout);
+    expect(doc).toMatchObject({ schema: "devintern.login", version: 1, result: "failure" });
+    expect(doc.error).toContain("--no-wait needs a sign-in method");
+  });
+
+  test("worker login --complete without a pending sign-in fails cleanly", async () => {
+    const result = await runCLI(
+      ["worker", "login", "--complete", "http://127.0.0.1:17865/auth/callback?code=x", "--json"],
+      { prepareDir: withWorkspace },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ result: "failure", code: "missing" });
+  });
+
+  test("worker login --help lists the two-step options", async () => {
+    const result = await runCLI(["worker", "login", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("--no-wait");
+    expect(result.stdout).toContain("--complete <address>");
+    expect(result.stdout).toContain("14-day free Worker Pilot, no card required");
+  });
+
   test("spawn env must disable Sentry for CLI subprocesses (DEVINTERN-6)", () => {
     // These tests spawn the real CLI against a closed tracker port. The
     // fetch failure surfaces as fetchWithRetry's TypeError ("Unable to
@@ -575,7 +622,9 @@ describe.concurrent("CLI Argument Handling", () => {
       expect(output).not.toContain("team automation subscription");
       expect(output).not.toContain("single-repo automation only");
       expect(output).toContain("No repos configured");
-      expect(result.exitCode).toBe(1);
+      // A configuration error a restart cannot fix: EX_CONFIG, which the
+      // generated systemd unit does not restart.
+      expect(result.exitCode).toBe(78);
     } finally {
       try {
         rmSync(wsDir, { recursive: true, force: true });

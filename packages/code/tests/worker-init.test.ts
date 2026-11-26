@@ -8,9 +8,12 @@ import {
   statSync,
   writeFileSync,
 } from "fs";
-import { tmpdir } from "os";
+import { tmpdir, userInfo } from "os";
 import path from "path";
 
+import { stdinClosedError } from "@devintern/auth";
+
+import { isPromptAbort } from "../src/lib/cli/prompt-abort";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/code-host/github/app-setup";
 import {
@@ -20,6 +23,7 @@ import {
 import {
   configureWorkerOperatingPolicy,
   copyProjectSessionToWorkspace,
+  defaultEnsureTracker,
   generateWebhookSecret,
   renderLaunchdPlist,
   renderSystemdUnit,
@@ -28,6 +32,11 @@ import {
   workerAuthSessionPath,
   workspaceGitHubRepos,
 } from "../src/lib/init/worker-init";
+
+/** The login name the service step passes to loginctl (same lookup order). */
+function loginName(): string {
+  return process.env.USER || process.env.LOGNAME || userInfo().username;
+}
 
 describe("upsertEnvVars", () => {
   test("appends new keys under a worker section", () => {
@@ -180,6 +189,9 @@ describe("runWorkerInit", () => {
       // touches the runner's real systemd/launchd session.
       platform: "linux" as NodeJS.Platform,
       homedir: tempDir,
+      checkServiceManager: async () => ({ available: true as const }),
+      // The honest start check would wait for a real worker lock.
+      verifyServiceStart: async () => ({ state: "running" as const, pid: 4242 }),
       ...overrides,
     };
   }
@@ -276,6 +288,52 @@ describe("runWorkerInit", () => {
     expect(checked).toEqual([workspaceDir, workspaceDir]);
     expect(signedIn).toEqual([workspaceDir]);
     expect(logs.join("\n")).toContain("Free Worker Pilot available");
+  });
+
+  test("Ctrl+D during license sign-in stops setup instead of continuing", async () => {
+    let checks = 0;
+    const run = runWorkerInit(
+      deps(["status=todo", "n", ""], {
+        checkAutomationLicense: async () => {
+          checks += 1;
+          return "No automation license found.";
+        },
+        signIn: async () => {
+          throw stdinClosedError();
+        },
+        getUser: async () => {
+          throw new Error("relay step must not run after an abort");
+        },
+      }),
+    );
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(isPromptAbort(error)).toBe(true);
+    expect(checks).toBe(1);
+    expect(logs.join("\n")).not.toContain("Sign-in failed");
+    expect(logs.join("\n")).not.toContain("License check errored");
+  });
+
+  test("Ctrl+D during relay sign-in stops setup instead of continuing", async () => {
+    const run = runWorkerInit(
+      deps(["status=todo", "n", "", ""], {
+        getUser: async () => null,
+        signIn: async () => {
+          throw stdinClosedError();
+        },
+        connectRelay: async () => {
+          throw new Error("connectRelay must not run after an abort");
+        },
+      }),
+    );
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(isPromptAbort(error)).toBe(true);
+    expect(logs.join("\n")).not.toContain("Sign-in failed");
   });
 
   test("passes the workspace to the license check (DEV-126)", async () => {
@@ -656,10 +714,12 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
     expect(commands).toContainEqual(["systemctl", "--user", "daemon-reload"]);
     expect(commands).toContainEqual(["systemctl", "--user", "enable", "--now", "devintern-worker"]);
     const all = logs.join("\n");
-    expect(all).toContain("devintern-worker service installed and running");
+    expect(all).toContain("devintern-worker service installed; waiting for the worker to start");
+    expect(all).toContain("✅ The worker is running (pid 4242).");
     expect(all).toContain("http://localhost:4400");
-    expect(commands).toContainEqual(["loginctl", "enable-linger"]);
-    expect(all).toContain("User lingering was enabled");
+    // Lingering names the user: without one, loginctl needs a login session.
+    expect(commands).toContainEqual(["loginctl", "enable-linger", loginName()]);
+    expect(all).toContain("User lingering is on");
     expect(all).toContain("already running as your user service");
   });
 
@@ -724,7 +784,7 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
     ]);
     const all = logs.join("\n");
     expect(all).toContain("devintern-worker service updated and restarted");
-    expect(all).not.toContain("installed and running");
+    expect(all).not.toContain("service installed;");
   });
 
   test("a custom installed service is preserved and gets manual comparison steps", async () => {
@@ -788,9 +848,313 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
     expect(commands).toEqual([
       ["launchctl", "print", "gui/501/com.devintern.worker"],
       ["launchctl", "bootstrap", "gui/501", plistPath],
-      ["launchctl", "print", "gui/501/com.devintern.worker"],
     ]);
-    expect(logs.join("\n")).toContain("devintern-worker service installed and running");
+    expect(logs.join("\n")).toContain("devintern-worker service installed; waiting");
+    expect(logs.join("\n")).toContain("✅ The worker is running");
+  });
+
+  describe("honest service step", () => {
+    /** systemd fake: enable flips is-active/is-enabled; loginctl is scriptable. */
+    function systemdRun(commands: string[][], loginctl?: (args: string[]) => RunResult) {
+      let enabled = false;
+      return async (command: string, args: string[]): Promise<RunResult> => {
+        commands.push([command, ...args]);
+        if (command === "loginctl" && loginctl) return loginctl(args);
+        if (args.includes("is-active") || args.includes("is-enabled")) {
+          return { status: enabled ? 0 : 3, stdout: "", stderr: "" };
+        }
+        if (args.includes("enable")) enabled = true;
+        return { status: 0, stdout: "", stderr: "" };
+      };
+    }
+    type RunResult = { status: number; stdout: string; stderr: string };
+
+    test("readiness blockers keep the service from being installed", async () => {
+      const commands: string[][] = [];
+      const questions: string[] = [];
+      const answers = ["status=todo"];
+      const result = await runWorkerInit(
+        deps([], {
+          prompt: async (question) => {
+            questions.push(question);
+            return answers.shift() ?? "n";
+          },
+          run: systemdRun(commands),
+          collectReadiness: async () => [
+            {
+              id: "entitlement",
+              label: "Automation entitlement",
+              status: "action",
+              detail: "Not started",
+              hint: "Run `devintern worker login github`",
+            },
+          ],
+        }),
+      );
+      expect(result).toEqual({ ok: true, ready: false, signInOnly: true });
+      expect(questions.some((question) => question.includes("background service"))).toBe(false);
+      expect(commands.some((command) => command.includes("enable"))).toBe(false);
+      const all = logs.join("\n");
+      // Readiness is reported before the service step, not after it.
+      expect(all.indexOf("Readiness (the same checks")).toBeLessThan(
+        all.indexOf("Background service"),
+      );
+      expect(all).toContain("Not installed yet: the worker would not start");
+      expect(all).toContain("devintern worker service install");
+    });
+
+    test("a worker that fails to start is reported, not called running", async () => {
+      const commands: string[][] = [];
+      const result = await runWorkerInit(
+        deps(["status=todo", "n", "n", ""], {
+          execPath: "/usr/local/bin/devintern",
+          run: systemdRun(commands),
+          verifyServiceStart: async () => ({
+            state: "failed" as const,
+            reason: "License check failed: Run `devintern worker login` to start your Pilot",
+            permanent: true,
+            logLines: ["❌ License check failed"],
+          }),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).toContain("❌ The worker did not start: License check failed");
+      expect(all).toContain("The service will not retry on its own");
+      expect(all).toContain("devintern worker service restart");
+      expect(all).not.toContain("The worker is running");
+      expect(all).not.toContain("already running as your user service");
+      expect(all).not.toContain("🎉");
+    });
+
+    test("a lingering failure names the root command and the consequence", async () => {
+      const commands: string[][] = [];
+      const user = loginName();
+      await runWorkerInit(
+        deps(["status=todo", "n", "n", ""], {
+          run: systemdRun(commands, (args) =>
+            args[0] === "show-user"
+              ? { status: 0, stdout: "no\n", stderr: "" }
+              : { status: 1, stdout: "", stderr: "Access denied" },
+          ),
+        }),
+      );
+      expect(commands).toContainEqual([
+        "loginctl",
+        "show-user",
+        user,
+        "--property=Linger",
+        "--value",
+      ]);
+      const all = logs.join("\n");
+      expect(all).toContain(`could not enable lingering for ${user} (Access denied)`);
+      expect(all).toContain("stops when you log out and does not start at boot");
+      expect(all).toContain(`sudo loginctl enable-linger ${user}`);
+    });
+  });
+
+  describe("onboarding recovery and closing summary", () => {
+    const configPath = () => path.join(workspaceDir, "workspace.toml");
+    const jiraTemplate =
+      '[defaults]\ntracker = "jira"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n';
+
+    test("a new workspace records the chosen tracker before the query prompt", async () => {
+      writeFileSync(configPath(), jiraTemplate);
+      const run = runWorkerInit(
+        deps([], {
+          bootstrapWorkspace: async () => ({ workspaceDir, created: true }),
+          prompt: async (question) => {
+            if (question.startsWith("Ready-tasks query")) throw stdinClosedError();
+            return "n";
+          },
+        }),
+      );
+      const error = await run.then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(isPromptAbort(error)).toBe(true);
+      expect(loadWorkspaceConfig(configPath()).defaults.tracker).toBe("markdown");
+    });
+
+    test("a re-run finishes a workspace an earlier run left without a query", async () => {
+      writeFileSync(configPath(), jiraTemplate);
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          bootstrapWorkspace: async () => ({ workspaceDir, created: false }),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const config = loadWorkspaceConfig(configPath());
+      expect(config.defaults.tracker).toBe("markdown");
+      expect(config.defaults.taskQuery).toBe("status=todo");
+      expect(logs.join("\n")).toContain("Finishing an earlier setup");
+    });
+
+    test("a configured workspace with another tracker is still refused", async () => {
+      writeFileSync(
+        configPath(),
+        jiraTemplate.replace('tracker = "jira"', 'tracker = "jira"\ntask_query = "project = APP"'),
+      );
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          bootstrapWorkspace: async () => ({ workspaceDir, created: false }),
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(logs.join("\n")).toContain("This workspace uses jira");
+      expect(loadWorkspaceConfig(configPath()).defaults.tracker).toBe("jira");
+    });
+
+    test("a re-run offers the saved query and Enter keeps it", async () => {
+      writeFileSync(
+        configPath(),
+        '[defaults]\ntracker = "markdown"\ntask_query = "status=ready"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n',
+      );
+      const questions: string[] = [];
+      const answers = [""];
+      const result = await runWorkerInit(
+        deps([], {
+          prompt: async (question) => {
+            questions.push(question);
+            return answers.shift() ?? "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions).toContain("Ready-tasks query [status=ready]: ");
+      expect(loadWorkspaceConfig(configPath()).defaults.taskQuery).toBe("status=ready");
+    });
+
+    test("yes/no prompts re-ask on an unknown answer instead of guessing", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo", "sure", "y", "", "acme", "api", "", "tok"], {
+          bootstrapWorkspace: async () => ({ workspaceDir, repoName: "app" }),
+          validateSentry: async () => 0,
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("Enter y or n.");
+      expect(loadWorkspaceConfig(configPath()).errorMonitors).toHaveLength(1);
+    });
+
+    test("the Sentry token is read with the hidden-input prompt", async () => {
+      const secretQuestions: string[] = [];
+      const result = await runWorkerInit(
+        deps(["status=todo", "y", "", "acme", "api", ""], {
+          bootstrapWorkspace: async () => ({ workspaceDir, repoName: "app" }),
+          validateSentry: async () => 0,
+          promptSecret: async (question) => {
+            secretQuestions.push(question);
+            return "sntrys_hidden";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(secretQuestions).toEqual(["Sentry auth token (input hidden): "]);
+    });
+
+    test("no service offer without a systemd user session; foreground guidance instead", async () => {
+      const questions: string[] = [];
+      const answers = ["status=todo"];
+      const result = await runWorkerInit(
+        deps([], {
+          prompt: async (question) => {
+            questions.push(question);
+            return answers.shift() ?? "n";
+          },
+          checkServiceManager: async () => ({
+            available: false as const,
+            reason: "systemctl is not installed",
+          }),
+          installService: async () => {
+            throw new Error("must not install");
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.includes("background service"))).toBe(false);
+      const all = logs.join("\n");
+      expect(all).toContain(
+        "A background service is not available here: systemctl is not installed.",
+      );
+      expect(all).toContain("Run the worker in the foreground instead: `devintern worker`");
+      expect(existsSync(path.join(workspaceDir, "devintern-worker.service"))).toBe(false);
+    });
+
+    test("ends with the doctor checks and says not ready when one fails", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          collectReadiness: async () => [
+            { id: "config", label: "Workspace config", status: "ok", detail: "1 repo" },
+            {
+              id: "harness",
+              label: "Agent harness",
+              status: "fail",
+              detail: "claude not found",
+              hint: "Install the agent CLI",
+            },
+          ],
+        }),
+      );
+      expect(result).toEqual({ ok: true, ready: false, signInOnly: false });
+      const all = logs.join("\n");
+      expect(all).toContain("Readiness (the same checks as `devintern worker doctor`)");
+      expect(all).toContain("❌ Agent harness — claude not found");
+      expect(all).toContain("the worker is not ready yet");
+      expect(all).toContain("1. Agent harness: Install the agent CLI");
+      expect(all).not.toContain("🎉");
+    });
+
+    test("says ready only when every check passes", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          collectReadiness: async () => [
+            { id: "config", label: "Workspace config", status: "ok", detail: "1 repo" },
+          ],
+        }),
+      );
+      expect(result).toEqual({ ok: true, ready: true, signInOnly: false });
+      expect(logs.join("\n")).toContain("🎉 Worker setup complete — the worker is ready.");
+    });
+
+    test("a license problem alone is enough to say not ready", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo", "n", "n"], {
+          checkAutomationLicense: async () => "No automation license found.",
+        }),
+      );
+      expect(result.ready).toBe(false);
+      const all = logs.join("\n");
+      expect(all).toContain("run `devintern worker login github`");
+      expect(all).toContain("14-day free Worker Pilot, no card required");
+      expect(all).not.toContain("🎉");
+    });
+
+    test("when signing in is the only step left, the closing line says so", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          collectReadiness: async () => [
+            { id: "config", label: "Workspace config", status: "ok", detail: "1 repo" },
+            {
+              id: "entitlement",
+              label: "Automation entitlement",
+              status: "action",
+              detail:
+                "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+              hint: "Run `devintern worker login github`",
+            },
+          ],
+        }),
+      );
+      expect(result).toEqual({ ok: true, ready: false, signInOnly: true });
+      const all = logs.join("\n");
+      expect(all).toContain(
+        "👉 Worker setup saved. One step left: sign in to begin your 14-day free Worker Pilot, no card required.",
+      );
+      expect(all).toContain("1. Automation entitlement: Run `devintern worker login github`");
+      expect(all).not.toContain("not ready yet");
+    });
   });
 
   test("finds tracker config from a repository subdirectory", async () => {
@@ -804,6 +1168,62 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
       }),
     );
     expect(result.ok).toBe(true);
+  });
+
+  describe("tracker from [defaults].tracker (non-interactive init output)", () => {
+    const savedGithubToken = process.env.GITHUB_TOKEN;
+    const savedGithubRepo = process.env.GITHUB_REPO;
+
+    const log = (m: string) => logs.push(m);
+
+    beforeEach(() => {
+      // No legacy checkout .env and no TASK_TRACKER anywhere.
+      rmSync(path.join(tempDir, ".devintern-code"), { recursive: true, force: true });
+      delete process.env.TASK_TRACKER;
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITHUB_REPO;
+      writeFileSync(
+        path.join(workspaceDir, "workspace.toml"),
+        '[defaults]\ntracker = "github"\ntask_query = "label:ready"\n',
+      );
+    });
+
+    afterEach(() => {
+      if (savedGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedGithubToken;
+      if (savedGithubRepo === undefined) delete process.env.GITHUB_REPO;
+      else process.env.GITHUB_REPO = savedGithubRepo;
+    });
+
+    test("reuses the tracker when credentials are present", async () => {
+      writeFileSync(
+        path.join(workspaceDir, ".env"),
+        "GITHUB_TOKEN=ghp_test\nGITHUB_REPO=acme/app\n",
+      );
+      const tracker = await defaultEnsureTracker(
+        tempDir,
+        async () => "n",
+        async () => "",
+        log,
+      );
+      expect(tracker).toBe("github");
+      const all = logs.join("\n");
+      expect(all).toContain("Using github from");
+      expect(all).not.toContain("No tracker config yet");
+    });
+
+    test("asks as before when credentials are missing", async () => {
+      writeFileSync(path.join(workspaceDir, ".env"), "GITHUB_TOKEN=ghp_test\n");
+      const stop = async (): Promise<string> => {
+        throw new Error("tracker prompt reached");
+      };
+      await expect(defaultEnsureTracker(tempDir, stop, stop, log)).rejects.toThrow(
+        "tracker prompt reached",
+      );
+      const all = logs.join("\n");
+      expect(all).toContain("No tracker config yet");
+      expect(all).not.toContain("Using github from");
+    });
   });
 });
 

@@ -11,20 +11,25 @@
  */
 
 import { flushErrorTracking } from "@devintern/utils";
-import { LockManager } from "./lib/lock-manager";
+import { claimSignalHandling } from "./lib/cli/shutdown-state";
+import type { LockManager } from "./lib/lock-manager";
+import { writeWorkerLifecycle } from "./lib/worker/lifecycle";
+import { exitWorkerStartupPermanently, markWorkerStarted } from "./lib/worker/startup";
 import { acknowledgeWorkerHandover } from "./lib/worker/handover";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { startWorkerCapture } from "./lib/observability/worker-capture";
 import type { WorkerCaptureHandle } from "./lib/observability/worker-capture";
 
 export interface WorkerOptions {
-  /** Single-instance lock override (workspace mode locks the workspace home
-   *  instead of the current directory). */
-  lock?: LockManager;
+  /** Single-instance lock; production callers pass `createWorkspaceLock()`
+   *  (`<workspace>/.worker.lock`). */
+  lock: LockManager;
   /** What this worker serves, for the startup banner (defaults to cwd). */
   label?: string;
   /** Directory for the dashboard's `worker.stdout.log` / `worker.stderr.log`
-   *  capture files (the workspace home). Omit to skip self-capture. */
+   *  capture files and the lifecycle record (`.worker.lifecycle.json`, the
+   *  started / stopped transitions `worker status` reads): the workspace
+   *  home. Omit to skip both. */
   logDir?: string;
   /** Called once after every configured event source starts successfully. */
   onStarted?: (acquirerNames: string[]) => Promise<void> | void;
@@ -60,6 +65,12 @@ export interface WorkerOptions {
 
 /** Default bound for mode-specific graceful shutdown work. */
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+/**
+ * Bound for the whole graceful shutdown (acquirers, hooks, flush). Kept below
+ * the generated systemd unit's `TimeoutStopSec=` so the worker exits on its
+ * own terms instead of being SIGKILLed.
+ */
+export const DEFAULT_SHUTDOWN_DEADLINE_MS = 90_000;
 export const DEFAULT_ACCESS_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
@@ -151,6 +162,10 @@ export interface WorkerShutdownDependencies {
   finalExitCode?: () => number | Promise<number | undefined> | undefined;
   flush?: () => Promise<void>;
   exit?: (code: number) => void;
+  /** Called with the final exit code right before a graceful exit. */
+  recordStopped?: (code: number) => void;
+  /** Bound for the whole shutdown; past it the worker exits 1. */
+  deadlineMs?: number;
 }
 
 /** Await one hook, rejecting when its graceful-shutdown allowance expires. */
@@ -201,6 +216,13 @@ export function createWorkerShutdownHandler(
     }
     shuttingDown = true;
     console.log(`\n🛑 Received ${signal}, shutting down worker...`);
+    const deadlineMs = dependencies.deadlineMs ?? DEFAULT_SHUTDOWN_DEADLINE_MS;
+    const deadline = setTimeout(() => {
+      if (forceExitRequested) return;
+      forceExitRequested = true;
+      console.warn(`⚠️  Graceful shutdown did not finish within ${deadlineMs / 1000}s; exiting.`);
+      exit(1);
+    }, deadlineMs);
 
     // Start admission shutdown before stopping acquirers. Do not await it
     // yet: an admitted automation holds its supervisor slot until its
@@ -269,7 +291,15 @@ export function createWorkerShutdownHandler(
           console.warn(`⚠️  Final exit hook failed: ${(error as Error).message}`);
         }
       }
+      clearTimeout(deadline);
+      try {
+        dependencies.recordStopped?.(code);
+      } catch {
+        // Status falls back to the lock alone.
+      }
       exit(code);
+    } else {
+      clearTimeout(deadline);
     }
   };
 }
@@ -312,8 +342,7 @@ export async function startWorker(
   // Single-instance guard, separate from the CLI task lock so an idle daemon
   // does not block manual `devintern TASK-123` runs. The executor still takes
   // the task lock per run (one in-flight task per repo).
-  const lock =
-    options.lock ?? new LockManager(process.cwd(), ".worker.lock", { reclaimForeign: true });
+  const { lock, logDir: lifecycleDir } = options;
   const lockResult = lock.acquire();
   if (!lockResult.success) {
     console.error(`❌ ${lockResult.message.replace("devintern", "devintern worker")}`);
@@ -327,7 +356,8 @@ export async function startWorker(
     );
     console.error("   Direct webhooks are a separate command:  devintern webhook serve");
     lock.release();
-    process.exit(1);
+    // A restart cannot fix this; under a service manager, stop retrying.
+    exitWorkerStartupPermanently();
   }
 
   try {
@@ -345,6 +375,7 @@ export async function startWorker(
       startedAcquirers.push(acquirer);
     }
     await options.onStarted?.(acquirers.map((acquirer) => acquirer.name));
+    if (lifecycleDir) markWorkerStarted(lifecycleDir);
   } catch (error) {
     for (const acquirer of startedAcquirers) await acquirer.stop();
     lock.release();
@@ -371,8 +402,14 @@ export async function startWorker(
     },
     shutdownTimeoutMs: options.shutdownTimeoutMs,
     finalExitCode: options.finalExitCode,
+    recordStopped: lifecycleDir
+      ? (code) => writeWorkerLifecycle(lifecycleDir, { state: "stopped", exitCode: code })
+      : undefined,
   });
 
+  // This handler owns SIGINT/SIGTERM from here on: the CLI entry point's
+  // task-run handler would otherwise exit 143 before the drain finishes.
+  claimSignalHandling();
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   acknowledgeWorkerHandover();

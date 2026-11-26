@@ -149,7 +149,7 @@ The agent is told which changed files matched a review path, and the status comm
 
 ### Review policy
 
-`auto_merge_policy` picks the rubric the agent review in gate 4 judges PRs by. Whatever the policy, the review never merges a PR it is unsure about, a diff it cannot read in full (truncated, generated, binary, or over 150,000 characters), or a PR whose text tells it to approve.
+`auto_merge_policy` picks the rubric the agent review in gate 4 judges PRs by. Whatever the policy, the review never merges a PR it is unsure about, a change it cannot read in full (truncated, generated, or binary), or a PR whose text tells it to approve. A diff over 150,000 characters is too large to include in the prompt, so the agent pages through it from the PR checkout with `git diff`. That review is a longer, costlier agent run, once per new head commit. Diffs over 400,000 characters always stay open for a human. A large diff also stays open if the agent cannot read the whole change (for example, one very long generated or minified file), or if a changed file name contains anything other than letters, digits, and `. _ / @ + = , : -` (this includes spaces and non-ASCII names) or has a path segment that starts with `-`.
 
 | Policy               | Leaves open for a human                                                                                                                                                                                                                                                                                                                  | Use when                                                                           |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
@@ -179,7 +179,7 @@ Answer "safe": false for any change to billing/, payments/, or database migratio
 Tested changes elsewhere may merge. Documentation and test-only changes are safe.
 ```
 
-Changing the policy, the rules, the instructions, or the review paths re-checks PRs that were left open. All of these keys apply on reload, without a restart.
+Changing the policy, the rules, the instructions, or the review paths re-checks PRs that were left open. A PR an earlier version left open for a diff over 150,000 characters is re-checked when new commits are pushed to it. All of these keys apply on reload, without a restart.
 
 The worker explains each decision in one status comment on the PR, edited in place (an agent hold names the policy it ran under, such as `standard` or `custom: merge-rules.md`), and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
 

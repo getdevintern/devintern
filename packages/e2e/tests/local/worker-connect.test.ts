@@ -5,9 +5,10 @@
  * The built CLI runs against a temp workspace created through the real
  * `worker scaffold` + `worker add-repo` path. Relay and API base URLs point at
  * a loopback recorder that must see zero requests; Sentry is the in-process
- * `FakeSentryServer`. Sentry connect is interactive and refuses non-TTY stdin,
- * so the happy path is driven through a Bun pseudo-terminal rather than by
- * importing internals to bypass the TTY check.
+ * `FakeSentryServer`. Interactive Sentry connect refuses non-TTY stdin, so its
+ * prompts are driven through a Bun pseudo-terminal rather than by importing
+ * internals to bypass the TTY check; the flag-driven `--org`/`--project` mode
+ * needs no terminal and runs over plain pipes.
  *
  * Relay targets (`github`, `gitlab`, tracker webhooks, `status`) need a
  * signed-in relay session and stay in the live/opt-in suites.
@@ -140,8 +141,12 @@ class ConnectFixture {
     if (errors.length > 0) throw new AggregateError(errors, "worker-connect cleanup failed");
   }
 
-  run(args: string[], cwd: string = this.root): Promise<CommandResult> {
-    return command([process.execPath, cliPath, ...args], cwd, this.env);
+  run(
+    args: string[],
+    cwd: string = this.root,
+    env: Record<string, string> = {},
+  ): Promise<CommandResult> {
+    return command([process.execPath, cliPath, ...args], cwd, { ...this.env, ...env });
   }
 
   /** `worker scaffold` plus one `worker add-repo` per name: the documented bootstrap path. */
@@ -303,7 +308,7 @@ function sentryAnswers(
     ["Sentry project slug: ", PROJECT],
     ["Sentry search filter (optional, e.g. environment:production): ", ""],
   ];
-  if (token !== undefined) answers.push(["Sentry auth token (input is visible): ", token]);
+  if (token !== undefined) answers.push(["Sentry auth token (input hidden): ", token]);
   return answers;
 }
 
@@ -405,12 +410,146 @@ cliTest(
 
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain(
-        "❌ 'devintern worker connect sentry' is interactive; run it in a terminal.",
+        "❌ 'devintern worker connect sentry' is interactive; run it in a terminal, or pass --org <slug> --project <slug>",
       );
+      expect(result.stderr).toContain("--env-file <path> (mode 0600)");
       expect(result.stdout).not.toContain("Sentry URL");
       expect(fixture.snapshot()).toEqual(before);
       expect(sentry.listRequests).toEqual([]);
       expect(fixture.recorder.requests).toEqual([]);
+    } finally {
+      await fixture.release();
+    }
+  },
+  60_000,
+);
+
+cliTest(
+  "worker connect sentry --json works without a terminal: token from a 0600 --env-file, monitor and token file written",
+  async () => {
+    const fixture = new ConnectFixture();
+    try {
+      const [repo] = await fixture.bootstrap();
+      const sentry = fixture.sentry({ expectedToken: FIXTURE_TOKEN });
+      const tokenInput = join(fixture.root, "sentry-input.env");
+      writeFileSync(tokenInput, `SENTRY_AUTH_TOKEN=${FIXTURE_TOKEN}\n`, { mode: 0o600 });
+      const args = [
+        "worker",
+        "connect",
+        "sentry",
+        "--org",
+        ORG,
+        "--project",
+        PROJECT,
+        "--sentry-url",
+        sentry.url,
+        "--env-file",
+        tokenInput,
+        "--json",
+      ];
+
+      const result = await fixture.run(args);
+
+      expect(result.exitCode, redact(result.stderr)).toBe(0);
+      const doc = JSON.parse(result.stdout) as {
+        schema: string;
+        result: string;
+        monitors: Array<{ id: string; action: string; repo: string; envFile: string }>;
+      };
+      expect(doc).toMatchObject({
+        schema: "devintern.worker-connect",
+        result: "connected",
+        monitors: [{ action: "added", repo: repo!.repoName }],
+      });
+      expect(occurrences(result.stdout + result.stderr, FIXTURE_TOKEN)).toBe(0);
+      const tokenFile = join(fixture.workspaceDir, doc.monitors[0]!.envFile);
+      expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+      expect(readFileSync(tokenFile, "utf8")).toBe(`SENTRY_AUTH_TOKEN=${FIXTURE_TOKEN}\n`);
+      expect(fixture.errorMonitors()).toHaveLength(1);
+      expect(sentry.receivedBearer(FIXTURE_TOKEN)).toBe(true);
+
+      // A second run needs --yes; the stored monitor is not duplicated.
+      const again = await fixture.run(args);
+      expect(again.exitCode).toBe(1);
+      expect(JSON.parse(again.stdout)).toMatchObject({ code: "monitor_exists" });
+      const refreshed = await fixture.run([...args, "--yes"]);
+      expect(refreshed.exitCode, redact(refreshed.stderr)).toBe(0);
+      expect(JSON.parse(refreshed.stdout).monitors[0].action).toBe("updated");
+      expect(fixture.errorMonitors()).toHaveLength(1);
+      expect(fixture.recorder.requests).toEqual([]);
+    } finally {
+      await fixture.release();
+    }
+  },
+  60_000,
+);
+
+cliTest(
+  "worker connect sentry refuses a group-readable --env-file and takes the token only from the environment or that file",
+  async () => {
+    const fixture = new ConnectFixture();
+    try {
+      await fixture.bootstrap();
+      const sentry = fixture.sentry({ expectedToken: FIXTURE_TOKEN });
+      const before = fixture.snapshot();
+      const tokenInput = join(fixture.root, "loose.env");
+      writeFileSync(tokenInput, `SENTRY_AUTH_TOKEN=${FIXTURE_TOKEN}\n`, { mode: 0o644 });
+      const base = ["worker", "connect", "sentry", "--org", ORG, "--project", PROJECT, "--json"];
+
+      const loose = await fixture.run([
+        ...base,
+        "--sentry-url",
+        sentry.url,
+        "--env-file",
+        tokenInput,
+      ]);
+      expect(loose.exitCode).toBe(1);
+      expect(JSON.parse(loose.stdout)).toMatchObject({ code: "env_file_unreadable" });
+      expect(occurrences(loose.stdout + loose.stderr, FIXTURE_TOKEN)).toBe(0);
+
+      const asFlag = await fixture.run([...base, "--token", FIXTURE_TOKEN]);
+      expect(asFlag.exitCode).toBe(1);
+      expect(asFlag.stdout + asFlag.stderr).toContain("never accepted as flags");
+
+      const noToken = await fixture.run([...base, "--sentry-url", sentry.url]);
+      expect(noToken.exitCode).toBe(1);
+      expect(JSON.parse(noToken.stdout)).toMatchObject({ code: "missing_token" });
+
+      expect(fixture.snapshot()).toEqual(before);
+      expect(sentry.listRequests).toEqual([]);
+    } finally {
+      await fixture.release();
+    }
+  },
+  60_000,
+);
+
+cliTest(
+  "worker connect --json without a sign-in is action_required with the sign-in step and reaches no relay",
+  async () => {
+    const fixture = new ConnectFixture();
+    try {
+      await fixture.bootstrap();
+
+      const result = await fixture.run(["worker", "connect", "linear", "--json"]);
+
+      expect(result.exitCode, result.stdout + result.stderr).toBe(2);
+      const doc = JSON.parse(result.stdout) as {
+        result: string;
+        nextSteps: Array<{ id: string; command: string }>;
+      };
+      expect(doc).toMatchObject({
+        schema: "devintern.worker-connect",
+        target: "linear",
+        result: "action_required",
+      });
+      expect(doc.nextSteps[0]).toMatchObject({ id: "sign-in" });
+      expect(doc.nextSteps[0]!.command).toContain("worker login <method> --no-wait --json");
+      expect(fixture.recorder.requests).toEqual([]);
+
+      const status = await fixture.run(["worker", "connect", "github", "--status", "--json"]);
+      expect(status.exitCode).toBe(2);
+      expect(JSON.parse(status.stdout).result).toBe("action_required");
     } finally {
       await fixture.release();
     }
@@ -464,13 +603,10 @@ ptyTest(
       expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
       expect(readFileSync(tokenFile, "utf8") === `SENTRY_AUTH_TOKEN=${FIXTURE_TOKEN}\n`).toBe(true);
 
-      // The prompt is documented as visible, so the PTY echoes the typed token
-      // once, directly after its prompt. The CLI's own log lines must not
-      // repeat it, so it appears exactly once in the merged transcript.
-      expect(occurrences(first.output, FIXTURE_TOKEN)).toBe(1);
-      expect(
-        first.output.includes(`Sentry auth token (input is visible): ${FIXTURE_TOKEN}\n`),
-      ).toBe(true);
+      // The token prompt hides its input, and the CLI's own log lines must
+      // not repeat it, so the token never appears in the merged transcript.
+      expect(occurrences(first.output, FIXTURE_TOKEN)).toBe(0);
+      expect(first.output.includes("Sentry auth token (input hidden): \n")).toBe(true);
 
       // Re-run with the token in the environment: no token prompt, no duplicate.
       const configBefore = fixture.snapshot();
@@ -481,7 +617,7 @@ ptyTest(
       );
       expect(second.exitCode, redact(second.output)).toBe(0);
       expect(second.output).toContain("Using SENTRY_AUTH_TOKEN from the existing environment.");
-      expect(second.output).not.toContain("Sentry auth token (input is visible)");
+      expect(second.output).not.toContain("Sentry auth token (input hidden)");
       expect(second.output).toContain(
         `Sentry monitor "${monitors[0]!.id}" is already configured; no duplicate added.`,
       );
@@ -521,8 +657,8 @@ ptyTest(
       expect(sentry.unexpectedRequests).toEqual([]);
       expect(fixture.snapshot()).toEqual(before);
       expect(fixture.errorMonitors()).toEqual([]);
-      // Only the visible typed echo; the failure message must not repeat it.
-      expect(occurrences(result.output, BAD_TOKEN)).toBe(1);
+      // The prompt hides the typed token and the failure message must not repeat it.
+      expect(occurrences(result.output, BAD_TOKEN)).toBe(0);
       expect(fixture.recorder.requests).toEqual([]);
     } finally {
       await fixture.release();
