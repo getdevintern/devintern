@@ -52,7 +52,6 @@ ci_failure_fix = false
 # auto_merge_deny_paths = ["**/migrations/**"]
 # auto_merge_review_paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/skills/**"]
 # auto_merge_review = true
-# auto_merge_review_large_diffs = false       # true: agent reviews diffs over 150k chars via git
 # auto_merge_method = "squash"                # merge | squash | rebase
 # auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
 # auto_merge_once = true                      # false: re-check after every new commit

@@ -127,7 +127,6 @@ describe("auto-merge job", () => {
     reviewLabel: "needs-human-review",
     once: true,
     policy: "strict" as const,
-    reviewLargeDiffs: false,
     agent: { model: "sonnet" },
   };
 

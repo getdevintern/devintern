@@ -1138,7 +1138,6 @@ remote = "git@github.com:acme/api.git"
       reviewLabel: "needs-human-review",
       once: true,
       policy: "strict",
-      reviewLargeDiffs: false,
     });
   });
 
@@ -1170,7 +1169,6 @@ ${base}`).workspace.autoMerge.reviewLabel;
 auto_merge = true
 auto_merge_method = "rebase"
 auto_merge_review = false
-auto_merge_review_large_diffs = true
 auto_merge_safe_paths = ["**/*.md", "docs/"]
 auto_merge_deny_paths = ["db/migrations/**"]
 auto_merge_model = "sonnet"
@@ -1198,7 +1196,6 @@ remote = "git@github.com:acme/web.git"
       reviewLabel: "needs-human-review",
       once: false,
       policy: "strict",
-      reviewLargeDiffs: true,
       agent: { model: "sonnet" },
     });
     const [api, web] = config.repos;

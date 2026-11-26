@@ -62,7 +62,6 @@ export function autoMergeCliArgs(
     policy.method,
     ...(policy.review ? [] : ["--no-review"]),
     ...(policy.once ? ["--once"] : []),
-    ...(policy.reviewLargeDiffs ? ["--review-large-diffs"] : []),
     ...(policy.reviewPolicy ? ["--policy", policy.reviewPolicy] : []),
     // `=` form: the text may start with "-" (a bullet list).
     ...(policy.reviewInstructions ? [`--review-instructions=${policy.reviewInstructions}`] : []),
