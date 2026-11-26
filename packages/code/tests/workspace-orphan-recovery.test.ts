@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { execSync } from "child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -20,6 +21,7 @@ import {
 } from "../src/lib/workspace/injected-recovery";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunRecord } from "../src/lib/state/run-recorder";
+import { listNotifications } from "../src/lib/notifications/store";
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import type { InjectedTask } from "../src/lib/state/injected-tasks";
@@ -500,6 +502,57 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     retryStore.close();
   });
 
+  test("production order: an auto-resumed ad-hoc task raises no retries_exhausted alarm", async () => {
+    // The real startup runs the pre-lock sweep first, then the injected-row
+    // recovery under the lock. The sweep reaps the ad-hoc run and must defer
+    // its finish rules so the resume decision can suppress the false alarm.
+    const taskKey = "local-interrupted";
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, taskKey);
+    const runId = store.createRun({
+      origin: "local",
+      taskKey,
+      tracker: "local",
+      repo: "web-app",
+      branch: `feature/${taskKey}`,
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      undefined,
+      JSON.stringify({ report: "prior implementation report" }),
+    );
+
+    const recovery = await recoverOrphanedWorkspaceRuns({
+      config: workspaceConfig(),
+      workspaceDir,
+      dbPath,
+    });
+    expect(recovery.deferredRunIds).toEqual([runId]);
+
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+      deferredRunIds: recovery.deferredRunIds,
+    });
+
+    const row = injected.getById(claimedId)!;
+    expect(row.status).toBe("pending");
+    expect(row.autoResumeCount).toBe(1);
+    expect(store.getRun(runId)?.status).toBe("failed");
+
+    const reader = new Database(dbPath);
+    try {
+      const notifications = listNotifications(reader, { includeMuted: true }).notifications;
+      expect(notifications.filter((n) => n.kind === "retries_exhausted")).toHaveLength(0);
+      expect(notifications).toHaveLength(0);
+    } finally {
+      reader.close();
+      injected.close();
+    }
+  });
+
   test("does not settle injected running rows before the singleton lock is held", async () => {
     process.env.TASK_TRACKER = "jira";
     delete process.env.JIRA_BASE_URL;
@@ -717,6 +770,13 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     expect(after.status).toBe("pending");
     expect(after.autoResumeCount).toBe(1);
     expect(store.getRun(runId)?.status).toBe("failed");
+    // The row continues as a new run, so no "will not be retried" alarm.
+    const reader = new Database(dbPath);
+    try {
+      expect(listNotifications(reader).notifications).toHaveLength(0);
+    } finally {
+      reader.close();
+    }
     injected.close();
   });
 

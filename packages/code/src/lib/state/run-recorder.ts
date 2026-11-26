@@ -30,6 +30,19 @@ import {
   RUN_OUTPUTS_ENV,
 } from "./run-outputs";
 import type { RunOutputRecord, StoredRunOutput } from "./run-outputs";
+import { notifyRunFinished } from "../notifications/run-rules";
+import type { RunFinishRuleOptions } from "../notifications/run-rules";
+
+/** Options shared by the orphan reap entry points. */
+export interface ReapOrphanedRunsOptions {
+  /**
+   * Evaluate the run-finish notification rules for each reaped run (default
+   * true). Recovery passes false and evaluates the rules itself once it knows
+   * which runs will be resumed, so an interrupted-and-continuing run does not
+   * raise a false "will not be retried automatically" alarm.
+   */
+  notify?: boolean;
+}
 
 export type RunOrigin =
   | "task"
@@ -647,6 +660,8 @@ export class RunStore {
       );
       this.replaceOutcomeStage(runId, status, reason);
     })();
+    // Best-effort and outside the transaction: never fails or rolls back the finish.
+    notifyRunFinished(this.db, runId);
   }
 
   /**
@@ -700,12 +715,26 @@ export class RunStore {
    * stage are one transaction, and the sweep only touches rows that are still
    * `in_progress`, so repeated calls are no-ops.
    *
+   * @param options - `notify: false` leaves the finish rules to the caller,
+   *   which may know which runs it is about to resume
    * @returns Number of reaped runs
    */
-  reapOrphanedRuns(): number {
+  reapOrphanedRuns(options: ReapOrphanedRunsOptions = {}): number {
+    return this.reapOrphanedRunIds(options).length;
+  }
+
+  /**
+   * Same sweep as {@link reapOrphanedRuns}, returning the ids it reaped so a
+   * recovery path can evaluate the finish rules once it knows which runs will
+   * be resumed instead of failed for good.
+   *
+   * @param options - `notify: false` leaves the finish rules to the caller
+   * @returns Ids of the runs reaped by this call
+   */
+  reapOrphanedRunIds(options: ReapOrphanedRunsOptions = {}): number[] {
     const reason = "orphaned: worker exited before the run finished";
     const now = Date.now();
-    const reaped = this.db
+    const reapedIds = this.db
       .transaction(() => {
         // Select inside the immediate transaction and update per id so a
         // concurrent writer (an outlived subprocess committing `finishRun`)
@@ -718,7 +747,7 @@ export class RunStore {
         const orphans = this.db
           .query(`SELECT id, clean_stop FROM runs WHERE status = 'in_progress'`)
           .all() as Array<{ id: number; clean_stop: number }>;
-        let reaped = 0;
+        const ids: number[] = [];
         for (const orphan of orphans) {
           const orphanReason =
             orphan.clean_stop === 1
@@ -731,15 +760,35 @@ export class RunStore {
           );
           if (result.changes === 1) {
             this.replaceOutcomeStage(orphan.id, "failed", orphanReason);
-            reaped += 1;
+            ids.push(orphan.id);
           }
         }
-        return reaped;
+        return ids;
       })
       .immediate();
     // Reaped runs never reached `endRun`, so their outputs files are still on disk.
     this.ingestSettledRunOutputs();
-    return reaped;
+    // A reaped run is a failed run nothing retried: evaluate the finish rules
+    // now that its outputs are readable. Best-effort; a later successful late
+    // finish auto-resolves via the normal rule path. Recovery paths defer this
+    // until their resume decision is known, so they pass `notify: false` and
+    // call {@link notifySettledRun} for each run afterwards.
+    if (options.notify ?? true) {
+      for (const runId of reapedIds) notifyRunFinished(this.db, runId);
+    }
+    return reapedIds;
+  }
+
+  /**
+   * Evaluate the run-finish notification rules for a run that settled outside
+   * {@link finishRun} (a reaped orphan or a late recovery).
+   *
+   * @param runId - The settled run
+   * @param options - Rule options; recovery skips the retry-exhausted alarm
+   *   for a run it is about to resume
+   */
+  notifySettledRun(runId: number, options: RunFinishRuleOptions = {}): void {
+    notifyRunFinished(this.db, runId, Date.now, options);
   }
 
   /**
