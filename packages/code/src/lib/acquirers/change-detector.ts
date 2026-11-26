@@ -99,6 +99,8 @@ export interface ChangeDetectorOptions {
    * same tracker never share a cursor or dedupe bucket.
    */
   source?: string;
+  /** Current poll interval in ms (a getter when the cadence can be reloaded); widens the look-back. */
+  pollIntervalMs?: number | (() => number);
 }
 
 /**
@@ -113,7 +115,22 @@ export interface ChangeDetectorOptions {
  * `(key, updated)` dedupe keeps the extra window from running a task twice.
  * The same overlap absorbs cursor clock skew ahead of the tracker clock.
  */
-export const DELTA_LOOKBACK_MS = 5 * 60_000;
+export const DELTA_LOOKBACK_MS = 15 * 60_000;
+
+/**
+ * Look-back for one tick: never less than {@link DELTA_LOOKBACK_MS}, and at
+ * least three poll intervals so a slow cadence still overlaps its own index lag.
+ */
+export function deltaLookbackMs(pollIntervalMs?: number): number {
+  const interval =
+    typeof pollIntervalMs === "number" && Number.isFinite(pollIntervalMs) ? pollIntervalMs : 0;
+  return Math.max(DELTA_LOOKBACK_MS, 3 * interval);
+}
+
+function currentPollMs(options: ChangeDetectorOptions): number | undefined {
+  const value = options.pollIntervalMs;
+  return typeof value === "function" ? value() : value;
+}
 
 /**
  * Build a detector that runs one cheap tracker query per tick asking "did
@@ -128,12 +145,13 @@ export const DELTA_LOOKBACK_MS = 5 * 60_000;
  * @param buildDeltaQuery - Tracker-specific "changed since" query builder
  */
 function createQueryChangeDetector(
+  options: ChangeDetectorOptions,
   source: string,
   searchTasks: SearchTasksFn,
   buildDeltaQuery: (sinceEpochMs: number) => string,
 ): ChangeDetector {
   return {
-    source,
+    source: options.source ?? source,
     async changesSince(cursor: string | null): Promise<DetectionResult> {
       const now = Date.now();
       if (cursor === null) {
@@ -148,7 +166,9 @@ function createQueryChangeDetector(
 
       // Never step past an update the tracker index had not published yet:
       // re-query an overlapping window instead of exactly `since`.
-      const { tasks } = await searchTasks(buildDeltaQuery(since - DELTA_LOOKBACK_MS));
+      const { tasks } = await searchTasks(
+        buildDeltaQuery(since - deltaLookbackMs(currentPollMs(options))),
+      );
       return { changed: tasks.length > 0, nextCursor: String(now) };
     },
   };
@@ -159,7 +179,7 @@ export function createJiraChangeDetector(
   searchTasks: SearchTasksFn,
   options: ChangeDetectorOptions = {},
 ): ChangeDetector {
-  return createQueryChangeDetector(options.source ?? "jira", searchTasks, (since) => {
+  return createQueryChangeDetector(options, "jira", searchTasks, (since) => {
     const minutes = Math.max(1, Math.ceil((Date.now() - since) / 60_000) + 1);
     return `updated >= "-${minutes}m"`;
   });
@@ -170,7 +190,7 @@ export function createLinearChangeDetector(
   searchTasks: SearchTasksFn,
   options: ChangeDetectorOptions = {},
 ): ChangeDetector {
-  return createQueryChangeDetector(options.source ?? "linear", searchTasks, (since) =>
+  return createQueryChangeDetector(options, "linear", searchTasks, (since) =>
     JSON.stringify({ updatedAt: { gt: new Date(since).toISOString() } }),
   );
 }
@@ -180,7 +200,7 @@ export function createGitHubChangeDetector(
   searchTasks: SearchTasksFn,
   options: ChangeDetectorOptions = {},
 ): ChangeDetector {
-  return createQueryChangeDetector(options.source ?? "github", searchTasks, (since) => {
+  return createQueryChangeDetector(options, "github", searchTasks, (since) => {
     const iso = new Date(since).toISOString().replace(/\.\d{3}Z$/, "Z");
     return `updated:>=${iso}`;
   });
@@ -194,7 +214,7 @@ export function createGitLabChangeDetector(
   searchTasks: SearchTasksFn,
   options: ChangeDetectorOptions = {},
 ): ChangeDetector {
-  return createQueryChangeDetector(options.source ?? "gitlab", searchTasks, (since) => {
+  return createQueryChangeDetector(options, "gitlab", searchTasks, (since) => {
     const iso = new Date(since).toISOString().replace(/\.\d{3}Z$/, "Z");
     return `updated:>=${iso}`;
   });
@@ -210,7 +230,7 @@ export function createAzureDevOpsChangeDetector(
   searchTasks: SearchTasksFn,
   options: ChangeDetectorOptions = {},
 ): ChangeDetector {
-  return createQueryChangeDetector(options.source ?? "azure-devops", searchTasks, (since) => {
+  return createQueryChangeDetector(options, "azure-devops", searchTasks, (since) => {
     const day = new Date(since).toISOString().slice(0, 10);
     return `SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= '${day}'`;
   });

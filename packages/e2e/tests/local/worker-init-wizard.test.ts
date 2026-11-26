@@ -235,8 +235,8 @@ ptyTest(
         /1\. Automation entitlement: Run `devintern worker login( --workspace \S+)? github`/,
       );
       expect(run.output).not.toContain("🎉 Worker setup complete");
-      // Setup is saved, so the wizard itself still exits 0; the next steps carry the failure.
-      expect(run.exitCode, run.output).toBe(0);
+      // Setup is saved and only signing in is left: exit 2, like non-interactive init.
+      expect(run.exitCode, run.output).toBe(2);
       // The setup itself is kept.
       expect(fixture.config().defaults).toMatchObject({
         tracker: "markdown",

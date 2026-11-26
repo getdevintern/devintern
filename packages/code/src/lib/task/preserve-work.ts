@@ -30,7 +30,6 @@
  */
 
 import { isWorkerTaskProcess, runContext } from "../cli/context";
-import { committerEnv } from "../dependencies/stack-git";
 import type { Git } from "../dependencies/stack-git";
 import { getActiveRunContext, hasRunStage } from "../state/run-recorder";
 import { finishTaskRun } from "../state/task-run";
@@ -93,25 +92,6 @@ function tail(text: string): string {
     .join(" | ");
 }
 
-/** Identity for the WIP commit when git has none configured. */
-async function identityEnv(git: Git): Promise<NodeJS.ProcessEnv | undefined> {
-  const committer = await committerEnv(git, "HEAD");
-  if (committer) {
-    return {
-      ...committer,
-      GIT_AUTHOR_NAME: committer.GIT_COMMITTER_NAME,
-      GIT_AUTHOR_EMAIL: committer.GIT_COMMITTER_EMAIL,
-    };
-  }
-  if ((await git(["var", "GIT_COMMITTER_IDENT"])).success) return undefined;
-  return {
-    GIT_AUTHOR_NAME: "DevIntern",
-    GIT_AUTHOR_EMAIL: "devintern@localhost",
-    GIT_COMMITTER_NAME: "DevIntern",
-    GIT_COMMITTER_EMAIL: "devintern@localhost",
-  };
-}
-
 /** Result of {@link commitUnfinished}: what went into the WIP commit, or why it failed. */
 type WipCommit =
   | { committedPaths: string[]; withheld: string[]; message?: string }
@@ -142,16 +122,16 @@ async function commitUnfinished(
   const message = `wip(${input.taskKey}): preserve unfinished work${
     input.runId === undefined ? "" : ` from run #${input.runId}`
   }`;
-  const commit = await git(
-    [
-      "commit",
-      "-m",
-      message,
-      "-m",
-      "Saved by DevIntern because the run stopped before delivering. Not reviewed.",
-    ],
-    await identityEnv(git),
-  );
+  // On a host without a git identity, `executeGitCommand` supplies the
+  // workspace setting, the token's user, or the DevIntern fallback
+  // (`utils/git-identity.ts`), never HEAD's author.
+  const commit = await git([
+    "commit",
+    "-m",
+    message,
+    "-m",
+    "Saved by DevIntern because the run stopped before delivering. Not reviewed.",
+  ]);
   if (!commit.success) return { error: tail(commit.error || commit.output) };
   return { committedPaths, withheld, message };
 }

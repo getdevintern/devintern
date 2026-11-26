@@ -22,6 +22,7 @@ import { applyAgentSelectionEnv } from "../agent/selection";
 import type { AgentSelection } from "../agent/selection";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
 import { WORKER_SUBPROCESS_ENV } from "../config/config-dir";
+import { GIT_AUTHOR_EMAIL_ENV, GIT_AUTHOR_NAME_ENV } from "../utils/git-identity";
 import {
   normalizeCodeHostUrl,
   parseGitLabHostAliases,
@@ -338,6 +339,13 @@ function composeRepoEnv(
   // when the config sets none, an env-provided value survives untouched.
   if (repo.prLabels && repo.prLabels.length > 0) {
     env.PR_LABELS = repo.prLabels.join(",");
+  }
+
+  // Commit identity for hosts without one (`utils/git-identity.ts`); a git
+  // identity configured on the host still wins.
+  if (repo.gitAuthor) {
+    env[GIT_AUTHOR_NAME_ENV] = repo.gitAuthor.name;
+    env[GIT_AUTHOR_EMAIL_ENV] = repo.gitAuthor.email;
   }
 
   applyAgentSelectionEnv(env, options.agentSelection);
@@ -681,4 +689,21 @@ function pinWorkerRuntimeEnv(env: Record<string, string | undefined>, workspaceD
   env[ANALYTICS_CONFIG_DIR_ENV] = workspaceDir;
   env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
   env[WORKER_SUBPROCESS_ENV] = "1";
+}
+
+/** Env for a team's tracker client; throws naming the variables a team still lacks. */
+export function requireTeamTrackerEnv(
+  team: Parameters<typeof buildTeamEnv>[0],
+  workspaceDir: string,
+  required: string[],
+): ReturnType<typeof buildTeamEnv> {
+  const env = buildTeamEnv(team, workspaceDir);
+  const missing = required.filter((key) => !env[key]);
+  if (missing.length > 0) {
+    throw new Error(
+      `Team "${team.name}" (${team.tracker}) is missing required variables: ${missing.join(", ")}. ` +
+        "Add them to the workspace .env or the team's env_file.",
+    );
+  }
+  return env;
 }

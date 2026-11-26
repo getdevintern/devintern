@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import { statSync } from "fs";
 import { gitCredentialEnv, redactGitCredentials } from "./git-credentials";
+import { commitIdentityEnv, isGitCommitCommand } from "./git-identity";
 import { Utils } from "./registry";
 
 /**
@@ -25,10 +26,17 @@ export async function executeGitCommand(
     console.log(`🔧 Executing: git ${args.join(" ")}${cwd ? ` (in ${cwd})` : ""}`);
   }
 
+  const spawnCwd = cwd || process.cwd();
+  const callerEnv = options?.env ? { ...process.env, ...options.env } : process.env;
+  // A commit on a host without `user.name`/`user.email` gets the missing
+  // identity fields for this one process (`git-identity.ts`).
+  const identity = isGitCommitCommand(args)
+    ? await commitIdentityEnv(args, spawnCwd, callerEnv)
+    : undefined;
+  const baseEnv = identity ? { ...callerEnv, ...identity } : callerEnv;
+
   return new Promise((resolve) => {
     const useProcessGroup = Boolean(options?.timeoutMs) && process.platform !== "win32";
-    const spawnCwd = cwd || process.cwd();
-    const baseEnv = options?.env ? { ...process.env, ...options.env } : process.env;
     const git = spawn("git", args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: spawnCwd,

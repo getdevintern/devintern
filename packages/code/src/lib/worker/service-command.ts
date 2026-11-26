@@ -12,7 +12,10 @@
 
 import { resolve } from "path";
 import type { ReadinessCheck } from "../observability/readiness";
-import { resolveWorkspaceDir, workspaceConfigPath } from "../workspace/paths";
+import { blockerNextSteps, toReportCheck } from "../observability/readiness-json";
+import type { ReportCheck } from "../observability/readiness-json";
+import { parseEnvFile } from "../workspace/env";
+import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 import { checkServiceManager, detectWorkerService } from "./service";
 import type { ServiceInstallResult, WorkerServiceDeps } from "./service";
 import {
@@ -169,8 +172,8 @@ export interface ServiceCommandReport {
   workspaceDir: string;
   /** install: an existing service was updated instead of installed. */
   updated?: boolean;
-  /** install: the `worker doctor` checks that ran first. */
-  checks?: ReadinessCheck[];
+  /** install: the `worker doctor` checks that ran first (same shape as `worker init --json`). */
+  checks?: ReportCheck[];
   start?: StartCheck;
   warnings: string[];
   service?: WorkerServiceStatus;
@@ -264,16 +267,16 @@ async function runInstall(
     const onlyActions = blockers.every((check) => check.status === "action");
     return {
       ...base,
-      checks,
+      checks: checks?.map(toReportCheck),
       result: onlyActions ? "action_required" : "refused",
       error: onlyActions
         ? "Not installed: the worker would not start until you sign in."
         : "Not installed: the worker would not start with the problems above.",
       nextSteps: [
-        ...blockers.map((check) => ({
-          message: `${check.label}: ${check.detail ?? "not ready"}`,
-          command: check.hint ?? "devintern worker doctor",
-        })),
+        ...blockerNextSteps(blockers, {
+          workspaceDir,
+          env: { ...process.env, ...parseEnvFile(workspaceEnvPath(workspaceDir)) },
+        }),
         {
           message: "Then install the service (or pass --force to install it anyway)",
           command: "devintern worker service install",
@@ -313,8 +316,9 @@ function installReport(
   base: ServiceCommandReport,
   install: ServiceInstallResult,
   start: StartCheck | undefined,
-  checks: ReadinessCheck[] | undefined,
+  readiness: ReadinessCheck[] | undefined,
 ): ServiceCommandReport {
+  const checks = readiness?.map(toReportCheck);
   if (!install.ok) {
     return {
       ...base,

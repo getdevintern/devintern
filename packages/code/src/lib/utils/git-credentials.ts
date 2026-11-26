@@ -71,7 +71,7 @@ const ENV_VAR_NAME = /^[A-Z_][A-Z0-9_]*$/;
  * The git subcommand in `args`, skipping global options such as `-C <dir>` or
  * `-c key=value`.
  */
-function gitSubcommand(args: readonly string[]): string | undefined {
+export function gitSubcommand(args: readonly string[]): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index] ?? "";
     if (GIT_OPTIONS_WITH_VALUE.has(arg)) {

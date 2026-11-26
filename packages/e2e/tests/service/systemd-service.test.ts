@@ -59,13 +59,14 @@ exit [lindex $status 3]
  * No license bypass yet: the first install must see an unlicensed worker.
  */
 const SETUP = String.raw`set -eu
-git config --global user.name "DevIntern E2E"
-git config --global user.email e2e@example.invalid
-git config --global init.defaultBranch main
+# No global git config at all, like a fresh box: the seed commit names its
+# author inline, and the worker must commit without any configured identity.
+test ! -e ~/.gitconfig
 cp -r ~/fixture ~/seed-src
-git -C ~/seed-src init -q
+git -C ~/seed-src init -q -b main
 git -C ~/seed-src add .
-git -C ~/seed-src commit -qm "Seed service E2E fixture"
+git -C ~/seed-src -c user.name="Fixture Seed" -c user.email=seed@example.invalid \
+  commit -qm "Seed service E2E fixture"
 git clone -q --bare ~/seed-src ~/remote.git
 git clone -q ~/remote.git ~/app
 mkdir -p ~/tasks
@@ -241,6 +242,19 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
         `git --git-dir ~/remote.git show feature/${TASK_KEY}:src/greeting.ts`,
       ),
     ).toBe('export const greeting = "Hello, world!";\n');
+    // The host has no git identity and no token: the task commit carries the
+    // DevIntern fallback, never the seed commit's author, and no git config
+    // was written to get there.
+    expect(
+      (
+        await container.checkedUser(
+          `git --git-dir ~/remote.git log -1 --format='%an <%ae>|%cn <%ce>' feature/${TASK_KEY}`,
+        )
+      ).trim(),
+    ).toBe(
+      "DevIntern <devintern@users.noreply.github.com>|DevIntern <devintern@users.noreply.github.com>",
+    );
+    expect((await container.user("test -e ~/.gitconfig")).exitCode).not.toBe(0);
     const journal = await container.journal();
     expect(journal).toContain("License check skipped (DEVINTERN_SKIP_LICENSE_CHECK=1)");
     // The daemon tees its own output into the dashboard capture files.

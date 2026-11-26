@@ -50,6 +50,8 @@ import { collectHarnessPreflight } from "../agent/sandbox";
 import { resolveWorkerStatus } from "./dashboard-api";
 import type { WorkerStatusView } from "./dashboard-api";
 import type { ReadinessCheck } from "./readiness";
+import { gitCommitIdentityCheck } from "./git-identity-readiness";
+import type { GitIdentityCheckInput } from "./git-identity-readiness";
 
 type Env = Record<string, string | undefined>;
 
@@ -89,6 +91,8 @@ export interface WorkerDoctorDeps {
   checkHarness?: (env: Env) => Promise<ReadinessCheck>;
   /** Sandbox provider check over the composed workspace environment. */
   checkSandbox?: (env: Env) => Promise<ReadinessCheck>;
+  /** Which identity the worker's commits will carry (see `git-identity-readiness.ts`). */
+  checkGitIdentity?: (input: GitIdentityCheckInput) => Promise<ReadinessCheck>;
   /** True when the TCP port is already bound on the dashboard host. */
   isPortInUse?: (port: number) => Promise<boolean>;
   /** Timeout for each query/repository probe. */
@@ -922,6 +926,10 @@ export async function collectWorkerDoctorChecks(
       });
     }
   }
+
+  // 4b. Git commit identity (warning only; never throws)
+  const identityInput = { config, workspaceDir, processEnv: workspaceEnv, offline };
+  checks.push(await (deps.checkGitIdentity ?? gitCommitIdentityCheck)(identityInput));
 
   // 5. Automation entitlement
   if (offline) {
