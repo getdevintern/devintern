@@ -3,7 +3,11 @@
  * re-sends what it already delivered and never floods a channel with backlog.
  *
  * - `notification_delivery_channels`: per channel, when delivery started
- *   (older notifications are never sent) and the last digest.
+ *   (older notifications are never sent), the last tick that had the channel
+ *   configured, and the last digest.
+ * - `notification_delivery_ticks`: when the dispatcher last ticked, so a
+ *   channel that was removed and later re-added is told apart from a worker
+ *   that was simply stopped.
  * - `notification_deliveries`: per channel and notification row, the count
  *   last handled (sent, skipped by filters, routed to the digest, or failed)
  *   and whether the resolve message went out.
@@ -42,8 +46,15 @@ export function initDeliverySchema(db: Database): void {
     CREATE TABLE IF NOT EXISTS notification_delivery_channels (
       channel TEXT PRIMARY KEY,
       since INTEGER NOT NULL,
+      last_active_at INTEGER,
       last_digest_day TEXT,
       last_digest_at INTEGER
+    )
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS notification_delivery_ticks (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_tick_at INTEGER NOT NULL
     )
   `);
   db.run(`
@@ -74,6 +85,49 @@ export class DeliveryStateStore {
     initDeliverySchema(db);
   }
 
+  /** When the previous dispatcher tick ran, if ever. */
+  lastTickAt(): number | undefined {
+    const raw = this.db
+      .query("SELECT last_tick_at FROM notification_delivery_ticks WHERE id = 1")
+      .get();
+    if (!raw) return undefined;
+    return requireNumber(
+      parseRowObject(raw, "notification_delivery_ticks row"),
+      "last_tick_at",
+      "notification_delivery_ticks row",
+    );
+  }
+
+  recordTick(at: number): void {
+    this.db.run(
+      `INSERT INTO notification_delivery_ticks (id, last_tick_at) VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET last_tick_at = excluded.last_tick_at`,
+      [at],
+    );
+  }
+
+  /**
+   * Mark the channel configured at `now`. A channel that missed an earlier
+   * tick (removed or `enabled = false`, then turned back on) restarts with
+   * `since = now` and no digest window, so what it missed is not sent, right
+   * away or in the next digest. A stopped worker ticks nothing, so a restart
+   * still catches up.
+   */
+  activate(channel: string, now: number, previousTickAt: number | undefined): void {
+    // SQLite evaluates every SET expression against the old row, so all three
+    // CASEs see the same pre-update `last_active_at`.
+    const missedTick = "last_active_at IS NOT NULL AND ?4 IS NOT NULL AND last_active_at < ?4";
+    this.db.run(
+      `INSERT INTO notification_delivery_channels (channel, since, last_active_at) VALUES (?, ?, ?)
+       ON CONFLICT(channel) DO UPDATE SET
+         since = CASE WHEN ${missedTick} THEN excluded.since ELSE since END,
+         last_digest_day = CASE WHEN ${missedTick} THEN NULL ELSE last_digest_day END,
+         last_digest_at = CASE WHEN ${missedTick} THEN NULL ELSE last_digest_at END,
+         last_active_at = excluded.last_active_at`,
+      [channel, now, now, previousTickAt ?? null],
+    );
+  }
+
   /** The channel's state, created with `since = now` on first sight. */
   channel(channel: string, now: number): ChannelState {
     this.db.run(
@@ -92,6 +146,17 @@ export class DeliveryStateStore {
       ...(lastDigestDay !== undefined ? { lastDigestDay } : {}),
       ...(lastDigestAt !== undefined ? { lastDigestAt } : {}),
     };
+  }
+
+  /**
+   * Forget the digest window of a channel ticked without `digest_time`, so
+   * adding it back later starts a fresh window instead of reporting the gap.
+   */
+  clearDigest(channel: string): void {
+    this.db.run(
+      "UPDATE notification_delivery_channels SET last_digest_day = NULL, last_digest_at = NULL WHERE channel = ? AND last_digest_at IS NOT NULL",
+      [channel],
+    );
   }
 
   recordDigest(channel: string, day: string, at: number): void {

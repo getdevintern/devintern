@@ -22,12 +22,12 @@ export interface ChannelDeps {
   platform: NodeJS.Platform;
   /** Path of an executable on PATH, or null. */
   which: (command: string) => string | null;
-  /** Run a command without a shell. */
-  run: (argv: string[]) => Promise<{ exitCode: number; stderr: string }>;
+  /** Run a command without a shell; throws once it runs longer than `timeoutMs`. */
+  run: (argv: string[], timeoutMs: number) => Promise<{ exitCode: number; stderr: string }>;
   sleep: (ms: number) => Promise<void>;
   /** Delay before each retry; its length is the retry budget. Default `[1000, 4000]`. */
   retryDelaysMs?: readonly number[];
-  /** Per-request timeout for HTTP channels. Default 10 s. */
+  /** Per-attempt timeout: HTTP requests and the desktop notifier. Default 10 s. */
   timeoutMs?: number;
 }
 
@@ -43,13 +43,41 @@ export function defaultChannelDeps(env: Env = process.env): ChannelDeps {
     fetch: (url, init) => fetch(url, init),
     platform: process.platform,
     which: (command) => Bun.which(command),
-    run: async (argv) => {
-      const proc = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe", stdin: "ignore" });
-      const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-      return { exitCode, stderr };
-    },
+    run: runCommand,
     sleep: (ms) => Bun.sleep(ms),
   };
+}
+
+/**
+ * Spawn a command (no shell) and wait for it, killing it after `timeoutMs`.
+ * A notifier that blocks (a hung D-Bus activation, an osascript permission
+ * prompt) must not stall the delivery tick.
+ *
+ * @throws A transient Error when the command timed out, so the retry applies
+ */
+export async function runCommand(
+  argv: string[],
+  timeoutMs: number,
+): Promise<{ exitCode: number; stderr: string }> {
+  const proc = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe", stdin: "ignore" });
+  const done = Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([done, timeout]);
+    if (result === "timeout") {
+      // Do not wait on stderr: a grandchild can keep the pipe open.
+      proc.kill("SIGKILL");
+      done.catch(() => {});
+      throw new Error(`${argv[0]} timed out after ${timeoutMs}ms`);
+    }
+    const [exitCode, stderr] = result;
+    return { exitCode, stderr };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** A failure that retrying cannot fix (bad config, 4xx). */
@@ -296,7 +324,7 @@ async function sendOnce(
         throw new PermanentDeliveryError(
           `desktop notifications are not available on ${deps.platform}`,
         );
-      const result = await deps.run(argv);
+      const result = await deps.run(argv, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS);
       if (result.exitCode !== 0) {
         throw new Error(
           `${argv[0]} exited ${result.exitCode}: ${result.stderr.trim().slice(0, 200)}`,

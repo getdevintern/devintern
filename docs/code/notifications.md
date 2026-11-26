@@ -53,7 +53,7 @@ By default a channel sends only **high** severity items: failures, escalations, 
 
 ### Daily digest
 
-With `digest_time` set, a channel sends one summary a day at that local time: the count of items per kind and the most frequent items, with links. The digest collects normal-severity items and escalations where a review or merge rule held a PR for you. On that channel those items are no longer sent one by one, so the urgent messages stand out. A day with nothing to report sends no digest.
+With `digest_time` set, a channel sends one summary a day at that local time: the count of items per kind and the most frequent items, with links. The digest collects normal-severity items and escalations where a review or merge rule held a PR for you. On that channel those items are no longer sent one by one, so the urgent messages stand out. A day with nothing to report sends no digest. If the channel is unavailable or the send fails at digest time, the same digest goes out once the channel works again.
 
 ## Settings
 

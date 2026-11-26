@@ -15,7 +15,10 @@
  *    once a day after that local time.
  *
  * Delivery is fully isolated from runs and storage: every failure is logged,
- * the row is marked handled, and the tick moves on. Only the worker that holds
+ * the row is marked handled, and the tick moves on. A send that fails its
+ * retry budget stops that channel for the rest of the tick (later candidates,
+ * resolves and the digest wait for the next tick); channels run concurrently
+ * so one dead endpoint never delays the others. Only the worker that holds
  * the workspace lock runs a dispatcher, so two daemons never double-send.
  */
 
@@ -44,6 +47,8 @@ const CANDIDATE_LIMIT = 100;
 const RESOLVED_LIMIT = 50;
 const DIGEST_ROW_LIMIT = 1_000;
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+/** Minimum gap between attempts to resend a digest whose delivery failed. */
+const DIGEST_RETRY_MS = 15 * 60 * 1000;
 const PRUNE_GROUPS_OLDER_THAN_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface DeliveryLogger {
@@ -90,6 +95,8 @@ export class NotificationDispatcher {
   private readonly log: DeliveryLogger;
   private readonly warnedUnavailable = new Set<string>();
   private lastPruneAt = 0;
+  /** Last failed digest send per channel, to space out retries. */
+  private readonly digestFailedAt = new Map<string, number>();
 
   constructor(
     private readonly db: Database,
@@ -103,6 +110,17 @@ export class NotificationDispatcher {
   /** Run one delivery pass over every enabled channel. Never throws. */
   async tick(): Promise<TickSummary> {
     const summary = emptySummary();
+    try {
+      await this.runTick(summary);
+    } catch (error) {
+      // Delivery state reads and writes (SQLITE_BUSY, a malformed or dropped
+      // table) must never escape: the interval caller does not await.
+      this.log.warn(`⚠️  [notifications] delivery tick failed: ${(error as Error).message}`);
+    }
+    return summary;
+  }
+
+  private async runTick(summary: TickSummary): Promise<void> {
     let config: ReturnType<DispatcherOptions["config"]>;
     try {
       config = this.options.config();
@@ -110,31 +128,50 @@ export class NotificationDispatcher {
       this.log.warn(
         `⚠️  [notifications] could not read delivery config: ${(error as Error).message}`,
       );
-      return summary;
+      return;
     }
+    const tickAt = this.now();
+    const previousTickAt = this.state.lastTickAt();
     const channels = config.notifications?.channels ?? [];
-    if (channels.length === 0 || !hasTable(this.db, "notifications")) return summary;
+    // Mark every configured channel active in the same write as the tick,
+    // before any send awaits. A worker stopped mid-tick (sends to one channel
+    // can take many seconds) must not leave later channels looking like they
+    // missed this tick, or activate() would reset them on restart.
+    this.db.transaction(() => {
+      this.state.recordTick(tickAt);
+      for (const channel of channels) this.state.activate(channel.type, tickAt, previousTickAt);
+    })();
+    if (channels.length === 0 || !hasTable(this.db, "notifications")) return;
     const base = resolveDashboardBaseUrl(config, this.options.deps.env);
     const clock = new WallClock(config.notifications?.timezone);
-    for (const channel of channels) {
-      try {
-        await this.deliverChannel(channel, base, clock, summary);
-      } catch (error) {
-        this.log.warn(
-          `⚠️  [notifications] ${channel.type} delivery pass failed: ${(error as Error).message}`,
-        );
-      }
-    }
-    this.maybePrune();
-    return summary;
+    // Channels run concurrently, so a slow or hanging endpoint on one does not
+    // delay the others. Their state is keyed by channel type, one per type.
+    await Promise.all(
+      channels.map(async (channel) => {
+        try {
+          await this.deliverChannel(channel, base, clock, summary);
+        } catch (error) {
+          this.log.warn(
+            `⚠️  [notifications] ${channel.type} delivery pass failed: ${(error as Error).message}`,
+          );
+        }
+      }),
+    );
+    // Keep a group's send time while its held repeats can still be released
+    // (see pendingCandidates), even for windows longer than the prune age.
+    const longestWindowMs = Math.max(
+      0,
+      ...channels.map((channel) => channel.rateLimitMinutes * 60_000),
+    );
+    this.maybePrune(Math.max(PRUNE_GROUPS_OLDER_THAN_MS, MAX_LOOKBACK_MS + longestWindowMs));
   }
 
-  private maybePrune(): void {
+  private maybePrune(groupsOlderThanMs: number): void {
     const now = this.now();
     if (now - this.lastPruneAt < PRUNE_INTERVAL_MS) return;
     this.lastPruneAt = now;
     try {
-      this.state.prune(now, PRUNE_GROUPS_OLDER_THAN_MS);
+      this.state.prune(now, groupsOlderThanMs);
     } catch (error) {
       this.log.warn(
         `⚠️  [notifications] could not prune delivery state: ${(error as Error).message}`,
@@ -165,7 +202,12 @@ export class NotificationDispatcher {
     }
 
     const since = Math.max(channelState.since, now - MAX_LOOKBACK_MS);
-    for (const candidate of this.pendingCandidates(name, since)) {
+    // Circuit breaker: after one send fails its whole retry budget, stop using
+    // this channel for the rest of the tick. Remaining candidates stay
+    // unrecorded and go out on a later tick, instead of each spending the
+    // retry budget (and being marked failed) against a dead endpoint.
+    let broken = false;
+    for (const candidate of this.pendingCandidates(channel, channelState.since, since, now)) {
       const { notification } = candidate;
       const decision = decideImmediate(channel, candidate);
       if (decision !== "send" || !availability.available) {
@@ -194,20 +236,38 @@ export class NotificationDispatcher {
       // A failed send also starts the window, so a broken endpoint is not
       // hammered by every repeat of the same cause.
       this.state.recordSent(name, notification.groupKey, this.now());
-      if (ok) summary.sent++;
-      else summary.failed++;
+      if (ok) {
+        summary.sent++;
+      } else {
+        summary.failed++;
+        broken = true;
+        break;
+      }
     }
 
-    if (channel.notifyResolved && availability.available) {
+    if (channel.notifyResolved && availability.available && !broken) {
+      // A failed resolve stays unmarked and is retried on a later tick; the
+      // `resolved_at >= since` bound stops retrying after the lookback.
       for (const notification of this.resolvedToAnnounce(name, since)) {
-        await this.send(channel, buildNotificationMessage(notification, "resolved", base));
+        const ok = await this.send(
+          channel,
+          buildNotificationMessage(notification, "resolved", base),
+        );
+        if (!ok) {
+          summary.failed++;
+          broken = true;
+          break;
+        }
         this.state.markResolvedSent(name, notification.id);
         summary.resolved++;
       }
     }
 
     if (channel.digestTime) {
-      await this.maybeSendDigest(channel, base, clock, availability.available, summary);
+      // A broken channel leaves the digest window open for a later tick.
+      await this.maybeSendDigest(channel, base, clock, availability.available && !broken, summary);
+    } else {
+      this.state.clearDigest(name);
     }
   }
 
@@ -235,8 +295,17 @@ export class NotificationDispatcher {
     const since = Math.max(channelState.lastDigestAt, now - MAX_DIGEST_WINDOW_MS);
     const items = this.digestCandidates(since, now).filter((item) => digestIncludes(channel, item));
     const digest = buildDigest(items, { since, until: now }, base);
-    if (digest && available) {
-      await this.send(channel, digest);
+    if (digest) {
+      // Leave the window open when the digest could not go out, so a later
+      // tick (today, or tomorrow with the same `since`) still covers it.
+      if (!available) return;
+      const failedAt = this.digestFailedAt.get(name);
+      if (failedAt !== undefined && now - failedAt < DIGEST_RETRY_MS) return;
+      if (!(await this.send(channel, digest))) {
+        this.digestFailedAt.set(name, now);
+        return;
+      }
+      this.digestFailedAt.delete(name);
       summary.digests++;
     }
     this.state.recordDigest(name, today, now);
@@ -278,19 +347,57 @@ export class NotificationDispatcher {
     };
   }
 
-  private pendingCandidates(channel: string, since: number): DeliveryCandidate[] {
+  /**
+   * Open rows the channel has not handled at their current count. Groups still
+   * inside their rate-limit window are left out here, not just skipped in the
+   * loop: held rows are never recorded, so they would otherwise fill the
+   * LIMIT and starve newer notifications until the window ends.
+   */
+  private pendingCandidates(
+    channel: NotificationChannelConfig,
+    channelSince: number,
+    since: number,
+    now: number,
+  ): DeliveryCandidate[] {
     const { select, join } = this.runJoin();
+    const windowMs = Math.max(0, channel.rateLimitMinutes) * 60_000;
+    // Mirrors rateLimitAllows: held while now - last_sent_at < window.
+    const heldAfter = windowMs > 0 ? now - windowMs : Number.MAX_SAFE_INTEGER;
+    // A repeat held by the rate limit keeps its updated_at from while it was
+    // held, which can be older than the lookback once a long window ends.
+    // Groups whose window ended within the lookback stay eligible.
+    const releasedAfter = now - MAX_LOOKBACK_MS - windowMs;
     return this.db
       .query(
         `SELECT n.*${select} FROM notifications n
          ${join}
          LEFT JOIN notification_deliveries d ON d.channel = ? AND d.notification_id = n.id
          WHERE n.resolved_at IS NULL AND n.muted = 0 AND n.updated_at >= ?
+           AND (
+             n.updated_at >= ?
+             OR EXISTS (
+               SELECT 1 FROM notification_delivery_groups g
+               WHERE g.channel = ? AND g.group_key = n.group_key AND g.last_sent_at >= ?
+             )
+           )
            AND (d.notification_id IS NULL OR d.delivered_count < n.count)
+           AND NOT EXISTS (
+             SELECT 1 FROM notification_delivery_groups g
+             WHERE g.channel = ? AND g.group_key = n.group_key AND g.last_sent_at > ?
+           )
          ORDER BY n.updated_at ASC, n.id ASC
          LIMIT ?`,
       )
-      .all(channel, since, CANDIDATE_LIMIT)
+      .all(
+        channel.type,
+        channelSince,
+        since,
+        channel.type,
+        releasedAfter,
+        channel.type,
+        heldAfter,
+        CANDIDATE_LIMIT,
+      )
       .map((raw) => this.toCandidate(raw));
   }
 
@@ -364,7 +471,13 @@ export function startNotificationDelivery(
     });
     return running;
   };
-  const timer = setInterval(() => void tick(), intervalMs);
+  const timer = setInterval(() => {
+    tick().catch((error: unknown) => {
+      (options.log ?? consoleLogger).warn(
+        `⚠️  [notifications] delivery tick failed: ${(error as Error).message}`,
+      );
+    });
+  }, intervalMs);
   timer.unref?.();
   return {
     tick,

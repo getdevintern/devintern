@@ -8,6 +8,7 @@ import { join } from "path";
 import {
   channelAvailability,
   desktopCommand,
+  runCommand,
   sendToChannel,
   slackPayload,
   webhookPayload,
@@ -590,6 +591,94 @@ describe("NotificationDispatcher", () => {
     expect((await d.tick()).sent).toBe(0);
   });
 
+  test("held groups never crowd new notifications out of a tick", async () => {
+    const d = dispatcher();
+    await d.tick();
+    clock += 1_000;
+    // More held groups than one tick reads (CANDIDATE_LIMIT = 100).
+    for (let group = 0; group < 120; group++) emit({ groupKey: `flood:${group}`, runId: group });
+    expect((await d.tick()).sent).toBe(100);
+    expect((await d.tick()).sent).toBe(20);
+    clock += MINUTE;
+    for (let group = 0; group < 120; group++) {
+      emit({ groupKey: `flood:${group}`, runId: 1_000 + group });
+    }
+    emit({ groupKey: "brand-new", runId: 999 });
+    const summary = await d.tick();
+    expect(summary.sent).toBe(1);
+    expect(sentBodies().at(-1)).toMatchObject({ notification: { groupKey: "brand-new" } });
+
+    // The held groups still go out, with their latest count, after the window.
+    clock += 60 * MINUTE;
+    expect((await d.tick()).sent).toBe(100);
+    expect((await d.tick()).sent).toBe(20);
+    expect(sentBodies().at(-1)).toMatchObject({ event: "resurfaced", notification: { count: 2 } });
+  });
+
+  test("a channel turned back on does not send what it missed while off", async () => {
+    const d = dispatcher();
+    await d.tick();
+    settings = { channels: [] };
+    clock += MINUTE;
+    await d.tick();
+    for (let group = 0; group < 5; group++) emit({ groupKey: `off:${group}`, runId: group });
+    clock += 60 * MINUTE;
+    await d.tick();
+    settings = { channels: [channel()] };
+    clock += MINUTE;
+    expect((await d.tick()).sent).toBe(0);
+    clock += 1_000;
+    emit({ groupKey: "after", runId: 99 });
+    expect((await d.tick()).sent).toBe(1);
+  });
+
+  test("a worker restart still catches up on what it missed while stopped", async () => {
+    await dispatcher().tick();
+    clock += 1_000;
+    emit({ runId: 1 });
+    clock += 30 * MINUTE;
+    expect((await dispatcher().tick()).sent).toBe(1);
+  });
+
+  test("a worker stopped mid-tick keeps later channels' catch-up and digest state", async () => {
+    let hang = false;
+    const base = fakeDeps();
+    deps = {
+      ...base,
+      fetch: (url, init) =>
+        hang && url === SLACK_URL ? new Promise<Response>(() => {}) : base.fetch(url, init),
+    };
+    const webhookUrl = "https://hooks.example.com/devintern";
+    settings = {
+      timezone: "UTC",
+      channels: [
+        channel({ type: "slack", url: undefined, urlEnv: DEFAULT_SLACK_URL_ENV }),
+        channel({ url: webhookUrl, digestTime: { spec: "23:00", minutes: 23 * 60 } }),
+      ],
+    };
+    await dispatcher().tick();
+    const webhookRow = () =>
+      db
+        .query(
+          "SELECT since, last_digest_at FROM notification_delivery_channels WHERE channel = 'webhook'",
+        )
+        .get() as { since: number; last_digest_at: number | null };
+    const before = webhookRow();
+    expect(before.last_digest_at).toBe(clock);
+    clock += 1_000;
+    emit({ runId: 1 });
+    clock += 30 * MINUTE;
+    hang = true;
+    // The Slack send never returns: the worker is stopped before webhook runs.
+    void dispatcher().tick();
+    await Bun.sleep(0);
+    hang = false;
+    clock += MINUTE;
+    await dispatcher().tick();
+    expect(webhookRow()).toEqual(before);
+    expect(base.sent.filter((request) => request.url === webhookUrl)).toHaveLength(1);
+  });
+
   test("filters by severity and kind, and never sends on auto-resolve by default", async () => {
     const d = dispatcher();
     await d.tick();
@@ -651,6 +740,107 @@ describe("NotificationDispatcher", () => {
     expect(warnings.filter((line) => line.includes("MISSING_URL is not set"))).toHaveLength(1);
   });
 
+  test("tick resolves even when delivery state reads fail", async () => {
+    const d = dispatcher();
+    await d.tick();
+    // A malformed state row makes lastTickAt() throw inside tick().
+    db.run("DROP TABLE notification_delivery_ticks");
+    db.run("CREATE TABLE notification_delivery_ticks (id INTEGER PRIMARY KEY, last_tick_at TEXT)");
+    db.run("INSERT INTO notification_delivery_ticks (id, last_tick_at) VALUES (1, 'junk')");
+    clock += 1_000;
+    expect(await d.tick()).toMatchObject({ sent: 0, failed: 0 });
+    expect(warnings.some((line) => line.includes("delivery tick failed"))).toBe(true);
+  });
+
+  test("a repeat held by a window longer than a day still goes out", async () => {
+    settings = { channels: [channel({ rateLimitMinutes: 2 * 24 * 60 })] };
+    const d = dispatcher();
+    await d.tick();
+    clock += 1_000;
+    emit({ runId: 1 });
+    expect((await d.tick()).sent).toBe(1);
+    clock += MINUTE;
+    emit({ runId: 2 });
+    expect((await d.tick()).sent).toBe(0);
+    clock += 49 * 60 * MINUTE;
+    expect((await d.tick()).sent).toBe(1);
+    expect(sentBodies()[1]).toMatchObject({ event: "resurfaced", notification: { count: 2 } });
+  });
+
+  test("a group held by a window longer than the prune age keeps its send time", async () => {
+    settings = { channels: [channel({ rateLimitMinutes: 10 * 24 * 60 })] };
+    const d = dispatcher();
+    await d.tick();
+    clock += 1_000;
+    emit({ runId: 1 });
+    expect((await d.tick()).sent).toBe(1);
+    clock += MINUTE;
+    emit({ runId: 2 });
+    // Past the 7-day prune age (prune runs hourly), still inside the window.
+    clock += 8 * 24 * 60 * MINUTE;
+    expect((await d.tick()).sent).toBe(0);
+    clock += 2 * 24 * 60 * MINUTE;
+    expect((await d.tick()).sent).toBe(1);
+  });
+
+  test("a digest that could not go out is sent once the channel is back", async () => {
+    settings = {
+      timezone: "UTC",
+      channels: [
+        channel({
+          type: "slack",
+          url: undefined,
+          urlEnv: DEFAULT_SLACK_URL_ENV,
+          digestTime: { spec: "13:00", minutes: 13 * 60 },
+        }),
+      ],
+    };
+    const d = dispatcher();
+    await d.tick();
+    clock += MINUTE;
+    emit({ kind: "pr_opened", severity: "normal", groupKey: "pr:day", title: "1 PR opened" });
+    await d.tick();
+    const env = deps.env as Record<string, string | undefined>;
+    delete env[DEFAULT_SLACK_URL_ENV];
+    clock = Date.UTC(2026, 10, 26, 13, 1);
+    expect((await d.tick()).digests).toBe(0);
+    env[DEFAULT_SLACK_URL_ENV] = SLACK_URL;
+    clock = Date.UTC(2026, 10, 26, 13, 6);
+    expect((await d.tick()).digests).toBe(1);
+    expect(deps.sent).toHaveLength(1);
+    expect((await d.tick()).digests).toBe(0);
+  });
+
+  test("a failed digest send is retried later, not every tick", async () => {
+    let fail = true;
+    const base = fakeDeps();
+    deps = {
+      ...base,
+      fetch: async (url, init) => {
+        if (fail) throw new TypeError("network down");
+        return base.fetch(url, init);
+      },
+    };
+    settings = {
+      timezone: "UTC",
+      channels: [channel({ digestTime: { spec: "13:00", minutes: 13 * 60 } })],
+    };
+    const d = dispatcher();
+    await d.tick();
+    clock += MINUTE;
+    emit({ kind: "pr_opened", severity: "normal", groupKey: "pr:day", title: "1 PR opened" });
+    await d.tick();
+    clock = Date.UTC(2026, 10, 26, 13, 1);
+    expect((await d.tick()).digests).toBe(0);
+    fail = false;
+    clock += MINUTE;
+    expect((await d.tick()).digests).toBe(0);
+    expect(base.sent).toHaveLength(0);
+    clock += 15 * MINUTE;
+    expect((await d.tick()).digests).toBe(1);
+    expect(base.sent).toHaveLength(1);
+  });
+
   test("daily digest: routine items once a day after the configured time", async () => {
     // 12:00 UTC; digest at 13:00 UTC.
     settings = {
@@ -689,6 +879,159 @@ describe("NotificationDispatcher", () => {
     // Next day with nothing new: no empty digest.
     clock = Date.UTC(2026, 10, 27, 13, 5);
     expect((await d.tick()).digests).toBe(0);
+  });
+
+  test("a digest channel turned back on does not digest what it missed while off", async () => {
+    const digestChannel = channel({ digestTime: { spec: "13:00", minutes: 13 * 60 } });
+    settings = { timezone: "UTC", channels: [digestChannel] };
+    const d = dispatcher();
+    await d.tick();
+    settings = { timezone: "UTC", channels: [] };
+    clock += MINUTE;
+    await d.tick();
+    emit({ kind: "pr_opened", severity: "normal", groupKey: "pr:off", title: "While off" });
+    clock += MINUTE;
+    await d.tick();
+    settings = { timezone: "UTC", channels: [digestChannel] };
+    clock += MINUTE;
+    await d.tick();
+    clock += MINUTE;
+    emit({ kind: "pr_opened", severity: "normal", groupKey: "pr:on", title: "After" });
+    clock = Date.UTC(2026, 10, 26, 13, 5);
+    expect((await d.tick()).digests).toBe(1);
+    const digest = sentBodies().find((body) => body.type === "digest") as {
+      digest: { top: Array<{ title: string }> };
+    };
+    expect(digest.digest.top.map((item) => item.title)).toEqual(["After"]);
+  });
+
+  test("digest_time removed and added back does not digest the gap", async () => {
+    const plain = channel();
+    const withDigest = channel({ digestTime: { spec: "13:00", minutes: 13 * 60 } });
+    settings = { timezone: "UTC", channels: [withDigest] };
+    const d = dispatcher();
+    await d.tick();
+    settings = { timezone: "UTC", channels: [plain] };
+    clock += MINUTE;
+    emit({ kind: "pr_opened", severity: "normal", groupKey: "pr:gap", title: "Gap" });
+    await d.tick();
+    settings = { timezone: "UTC", channels: [withDigest] };
+    clock += MINUTE;
+    await d.tick();
+    clock += MINUTE;
+    emit({ kind: "pr_opened", severity: "normal", groupKey: "pr:on", title: "After" });
+    clock = Date.UTC(2026, 10, 26, 13, 5);
+    expect((await d.tick()).digests).toBe(1);
+    const digest = sentBodies().find((body) => body.type === "digest") as {
+      digest: { top: Array<{ title: string }> };
+    };
+    expect(digest.digest.top.map((item) => item.title)).toEqual(["After"]);
+  });
+
+  test("a failed resolve message is retried on a later tick, not marked sent", async () => {
+    let down = false;
+    let fetches = 0;
+    const base = fakeDeps();
+    deps = fakeDeps({
+      fetch: async (url, init) => {
+        fetches++;
+        if (down) return new Response("", { status: 503 });
+        return base.fetch(url, init);
+      },
+    });
+    settings = { channels: [channel({ notifyResolved: true })] };
+    const d = dispatcher();
+    await d.tick();
+    clock += 1_000;
+    emit({ groupKey: "g1", runId: 1 });
+    expect((await d.tick()).sent).toBe(1);
+    clock += 1_000;
+    emitter.resolve({ kinds: ["internal_error"], groupKey: "g1" });
+    down = true;
+    expect(await d.tick()).toMatchObject({ resolved: 0, failed: 1 });
+    expect(fetches).toBe(1 + 3);
+    down = false;
+    clock += 1_000;
+    expect((await d.tick()).resolved).toBe(1);
+    expect((await d.tick()).resolved).toBe(0);
+    const events = base.sent.map(
+      (request) => (JSON.parse(request.body) as { event: string }).event,
+    );
+    expect(events).toEqual(["created", "resolved"]);
+  });
+
+  test("a dead endpoint costs one retry budget per tick; the rest go out later", async () => {
+    let down = true;
+    let fetches = 0;
+    let sleeps = 0;
+    const delivered = new Set<number>();
+    deps = fakeDeps({
+      fetch: async (_url, init) => {
+        fetches++;
+        if (down) return new Response("", { status: 503 });
+        const body = JSON.parse(String(init.body)) as { notification: { id: number } };
+        delivered.add(body.notification.id);
+        return new Response("ok", { status: 200 });
+      },
+      sleep: async () => {
+        sleeps++;
+      },
+    });
+    const d = dispatcher();
+    await d.tick();
+    clock += 1_000;
+    for (let group = 0; group < 100; group++) emit({ groupKey: `dead:${group}`, runId: group });
+    expect(await d.tick()).toMatchObject({ sent: 0, failed: 1 });
+    expect({ fetches, sleeps }).toEqual({ fetches: 3, sleeps: 2 });
+    down = false;
+    clock += 1_000;
+    expect(await d.tick()).toMatchObject({ sent: 99, failed: 0 });
+    expect(delivered.size).toBe(99);
+  });
+
+  test("a hanging channel does not delay the other channels", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    deps = fakeDeps({
+      run: async () => {
+        await gate;
+        return { exitCode: 0, stderr: "" };
+      },
+    });
+    settings = { channels: [channel({ type: "desktop", url: undefined }), channel()] };
+    const d = dispatcher();
+    await d.tick();
+    clock += 1_000;
+    emit({ runId: 1 });
+    const pending = d.tick();
+    await Bun.sleep(20);
+    // The webhook (listed after desktop) sent while desktop is still blocked.
+    expect(deps.sent).toHaveLength(1);
+    release();
+    expect(await pending).toMatchObject({ sent: 2, failed: 0 });
+  });
+});
+
+describe("runCommand", () => {
+  test("returns the exit code and stderr", async () => {
+    expect(await runCommand(["sh", "-c", "echo oops >&2; exit 3"], 5_000)).toEqual({
+      exitCode: 3,
+      stderr: "oops\n",
+    });
+  });
+
+  test("kills a command that hangs and throws a transient error", async () => {
+    const started = Date.now();
+    await expect(runCommand(["sleep", "30"], 200)).rejects.toThrow("sleep timed out after 200ms");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("does not wait on a grandchild that keeps stderr open", async () => {
+    const started = Date.now();
+    await expect(runCommand(["sh", "-c", "sleep 3 & wait"], 200)).rejects.toThrow("timed out");
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
 
