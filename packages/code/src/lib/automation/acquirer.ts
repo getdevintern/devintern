@@ -930,9 +930,13 @@ export function spawnAutomationProcess(
         if (!options.harnessPin && failover) {
           const outcome =
             code === USAGE_LIMIT_EXIT_CODE
-              ? failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]))
+              ? failover.reportFromHint(
+                  readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]),
+                  env.AGENT_HARNESS ?? failover.activeName,
+                )
               : failover.manager.reportHarnessUnavailable(
                   Date.now() + HARNESS_UNAVAILABLE_COOLDOWN_MS,
+                  env.AGENT_HARNESS ?? failover.activeName,
                 );
           if (outcome.kind !== "exhausted") {
             cleanupHint();
@@ -948,7 +952,7 @@ export function spawnAutomationProcess(
         return;
       }
       exitResult = code === 0;
-      if (exitResult) getWorkerFailover()?.recordSuccess();
+      if (exitResult) getWorkerFailover()?.recordSuccess(env.AGENT_HARNESS);
       cleanupHint();
       settle(exitResult);
     });
