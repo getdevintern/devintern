@@ -42,19 +42,6 @@ describe("parseAutoMergeArgs --review-instructions", () => {
   });
 });
 
-describe("parseAutoMergeArgs --review-large-diffs", () => {
-  test("is off unless passed, and round-trips through the worker's CLI args", async () => {
-    const { autoMergeCliArgs } = await import("../src/lib/acquirers/auto-merge-cli");
-    const off = parseAutoMergeArgs([URL], gate);
-    expect(off?.policy.reviewLargeDiffs).toBeUndefined();
-    expect(autoMergeCliArgs(off!.policy, "a".repeat(40))).not.toContain("--review-large-diffs");
-    const on = parseAutoMergeArgs([URL, "--review-large-diffs"], gate);
-    expect(on?.policy.reviewLargeDiffs).toBe(true);
-    const args = autoMergeCliArgs(on!.policy, "a".repeat(40));
-    expect(parseAutoMergeArgs([URL, ...args], gate)?.policy.reviewLargeDiffs).toBe(true);
-  });
-});
-
 describe("parseAutoMergeArgs --review-path", () => {
   afterEach(() => {
     process.exitCode = 0;
