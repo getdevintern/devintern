@@ -82,6 +82,12 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     status: "skip",
   },
   {
+    name: "worker init blank-machine smoke (Docker)",
+    script: "test:docker",
+    reason: "needs a Docker daemon; installs the packed CLI in a clean container",
+    status: "skip",
+  },
+  {
     name: "Jira tracker lifecycle E2E",
     script: "test:e2e:tracker:jira",
     reason: "planned in Layer 2 of docs/coverage/trackers.md",
