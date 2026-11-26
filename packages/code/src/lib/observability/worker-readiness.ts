@@ -22,7 +22,6 @@ import {
   activeSandboxName,
   detectSandboxProviders,
   removedSandboxProviderMessage,
-  resolveHarnessChainSync,
   sandboxInheritsEnclosingSandbox,
 } from "@devintern/agent-harness";
 import { WorkspaceConfigError, parseWorkspaceConfig } from "../workspace/config";
@@ -51,6 +50,8 @@ import { collectHarnessPreflight } from "../agent/sandbox";
 import { resolveWorkerStatus } from "./dashboard-api";
 import type { WorkerStatusView } from "./dashboard-api";
 import type { ReadinessCheck } from "./readiness";
+import { defaultCheckHarness, harnessEnvScopes } from "./harness-readiness";
+import type { HarnessEnvScope } from "./harness-readiness";
 import { notificationDoctorCheck } from "../notifications/delivery/doctor";
 import { gitCommitIdentityCheck } from "./git-identity-readiness";
 import { relayReadinessCheck } from "./relay-readiness";
@@ -69,6 +70,7 @@ const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 export type { WorkerEntitlementLike } from "./worker-entitlement";
 export { entitlementCheck } from "./worker-entitlement";
 export { workerDoctorClosingLine } from "./worker-liveness-readiness";
+export { defaultCheckHarness } from "./harness-readiness";
 
 /** Outcome of one repository access probe. */
 export type RepoAccessResult = { ok: true; detail?: string } | { ok: false; reason: string };
@@ -96,7 +98,7 @@ export interface WorkerDoctorDeps extends CiPermissionDoctorDeps {
   /** Automation entitlement for the workspace (license, trial, or grace). */
   checkEntitlement?: (workspaceDir: string) => Promise<WorkerEntitlementLike>;
   /** Agent harness chain check over the composed workspace environment. */
-  checkHarness?: (env: Env) => Promise<ReadinessCheck>;
+  checkHarness?: (env: Env, scopes: HarnessEnvScope[]) => Promise<ReadinessCheck>;
   /** Sandbox provider check over the composed workspace environment. */
   checkSandbox?: (env: Env) => Promise<ReadinessCheck>;
   /** Which identity the worker's commits will carry (see `git-identity-readiness.ts`). */
@@ -384,43 +386,6 @@ async function defaultCheckEntitlement(workspaceDir: string): Promise<WorkerEnti
     setup: true,
     loginCommand: "devintern worker login",
   });
-}
-
-/** Default harness check: resolve the `AGENT_HARNESS` chain like the worker does. */
-export async function defaultCheckHarness(env: Env): Promise<ReadinessCheck> {
-  const label = "Agent harness";
-  try {
-    const chain = resolveHarnessChainSync({ raw: env.AGENT_HARNESS, warnDeprecated: false });
-    const installed = chain.entries.filter((entry) => entry.installed);
-    const names = chain.entries.map((entry) => entry.name).join(", ");
-    if (installed.length === 0) {
-      return {
-        id: "harness",
-        label,
-        status: "fail",
-        detail: chain.issues[0]?.message ?? `no harness CLI found for AGENT_HARNESS=${names}`,
-        hint: "Install the agent CLI, or set AGENT_HARNESS / <HARNESS>_CLI_PATH in the workspace .env",
-      };
-    }
-    if (chain.issues.length > 0) {
-      return {
-        id: "harness",
-        label,
-        status: "warn",
-        detail: chain.issues.map((issue) => issue.message).join(" "),
-        hint: "Remove or install the skipped AGENT_HARNESS entries in the workspace .env",
-      };
-    }
-    return { id: "harness", label, status: "ok", detail: names };
-  } catch (error) {
-    return {
-      id: "harness",
-      label,
-      status: "fail",
-      detail: errorMessage(error),
-      hint: "Set AGENT_HARNESS in the workspace .env to a registered harness",
-    };
-  }
 }
 
 /**
@@ -944,9 +909,12 @@ export async function collectWorkerDoctorChecks(
     }
   }
 
-  // 6. Harness and sandbox chain (local only)
+  // 6. Harness and sandbox chain (local only). The harness check resolves CLI
+  // paths from each repo's spawn env, the way the task subprocess does.
+  const scopes = harnessEnvScopes(processEnv, workspaceDir, config);
+  const checkHarness = deps.checkHarness ?? defaultCheckHarness;
   for (const run of [
-    deps.checkHarness ?? defaultCheckHarness,
+    (env: Env) => checkHarness(env, scopes),
     deps.checkSandbox ?? defaultCheckSandbox,
   ]) {
     try {
