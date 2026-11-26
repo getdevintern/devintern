@@ -151,15 +151,15 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
   test("happy path with a stub agent: one JSON document, 0600 .env, doctor agrees", async () => {
     await onBlankMachine(
       async (machine) => {
-        // No license or session on a blank machine: init saves the setup but
-        // fails the entitlement check, with a sign-in next step.
+        // No license or session on a blank machine: init saves the setup and
+        // reports signing in as the one step left (action_required, exit 2).
         const result = await machine.sh(`${INIT_MARKDOWN} --json`);
-        expect(result.exitCode, result.stdout + result.stderr).toBe(1);
+        expect(result.exitCode, result.stdout + result.stderr).toBe(2);
         const report = parseReport(result.stdout);
         expect(report).toMatchObject({
           schema: "devintern.worker-init",
           version: 1,
-          result: "failure",
+          result: "action_required",
           workspaceDir: WS,
           tracker: "markdown",
           taskQuery: "status=todo",
@@ -167,10 +167,18 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
         });
         const status = Object.fromEntries(report.checks.map((check) => [check.name, check.status]));
         expect(status).toMatchObject({ query: "pass", repo: "pass", harness: "pass" });
-        expect(report.checks.filter((check) => check.status === "fail")).toEqual([
-          expect.objectContaining({ name: expect.stringMatching(/entitlement/) }),
+        expect(report.checks.filter((check) => check.status === "fail")).toEqual([]);
+        expect(report.checks.filter((check) => check.status === "action")).toEqual([
+          expect.objectContaining({
+            name: "entitlement",
+            message:
+              "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+          }),
         ]);
-        expect(report.nextSteps.map((step) => step.id)).toContain("sign-in");
+        expect(report.nextSteps[0]).toMatchObject({
+          id: "sign-in",
+          command: "devintern worker login github",
+        });
 
         expect(await machine.workspaceFiles()).toEqual(
           expect.arrayContaining(["600 .env", expect.stringMatching(/^6\d\d workspace\.toml$/)]),
@@ -183,11 +191,14 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
         expect(config.defaults).toMatchObject({ tracker: "markdown", task_query: "status=todo" });
         expect(config.repos).toEqual([expect.objectContaining({ name: "app", remote: REMOTE })]);
 
-        // Doctor reads the same files and agrees: it fails on the entitlement
-        // alone, and passes once the license check is skipped.
+        // Doctor reads the same files and agrees: sign-in is the one step left
+        // (exit 2), and it passes once the license check is skipped.
         const doctor = await machine.sh("devintern worker doctor");
-        expect(doctor.exitCode, doctor.stdout).toBe(1);
-        expect(doctor.stdout).toMatch(/❌ Automation entitlement/);
+        expect(doctor.exitCode, doctor.stdout).toBe(2);
+        expect(doctor.stdout).toContain(
+          "👉 Automation entitlement — Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+        );
+        expect(doctor.stdout).not.toContain("❌");
         for (const line of [
           "✅ Tracker credentials — markdown ([defaults])",
           "✅ Task query — markdown ([defaults]): 1 task matches",

@@ -502,9 +502,21 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     }
   }
 
-  // 3. No valid license. LICENSE_KEY is the recommended remedy: it's more
-  // reliable than auth, which can fail when the purchase was made under a
-  // different email than the Supabase login. Sign-in is the alternative path.
+  return noLicenseResult(options, user !== null, entitlementCheckError);
+}
+
+/**
+ * Step 3 of {@link checkLicense}: no valid license. LICENSE_KEY is the
+ * recommended remedy: it's more reliable than auth, which can fail when the
+ * purchase was made under a different email than the Supabase login. Sign-in
+ * is the alternative path.
+ */
+function noLicenseResult(
+  options: LicenseCheckOptions,
+  signedIn: boolean,
+  entitlementCheckError: string | undefined,
+): LicenseCheckResult {
+  const { requireAutomation = false, allowTrial = false } = options;
   const messages: string[] = [];
   const loginCommand = options.loginCommand ?? "devintern login";
   if (requireAutomation) {
@@ -519,7 +531,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     messages.push(
       "Set LICENSE_KEY to a Supporter, Team, or Business license key from https://devintern.com/account, or purchase one at https://devintern.com/pricing.",
     );
-    if (!user) {
+    if (!signedIn) {
       messages.push(
         allowTrial
           ? `Alternatively, run \`${loginCommand}\` to start your 14-day free Worker Pilot (no card required).`
@@ -527,7 +539,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
       );
     }
   } else {
-    if (!user) {
+    if (!signedIn) {
       messages.push("No LICENSE_KEY is set and you are not signed in.");
     } else if (entitlementCheckError) {
       messages.push(`License entitlement check failed: ${entitlementCheckError}.`);
@@ -543,7 +555,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     valid: false,
     source: "none",
     message: messages.join(" "),
-    ...(!user && requireAutomation && allowTrial ? { signInRequired: true } : {}),
+    ...(!signedIn && requireAutomation && allowTrial ? { signInRequired: true } : {}),
   };
 }
 
