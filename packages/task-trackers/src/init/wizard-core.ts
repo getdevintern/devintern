@@ -64,22 +64,27 @@ export function isInteractive(argv: string[], stdin: { isTTY?: boolean }): boole
 export async function defaultProbe(trackerId: string, env: Record<string, string>): Promise<void> {
   switch (trackerId) {
     case "jira":
+      // /myself, not project search: Jira Cloud answers 200 with an empty list
+      // to a bad token on the latter.
       await new JiraClient(
         env.JIRA_BASE_URL ?? "",
         env.JIRA_EMAIL ?? "",
         env.JIRA_API_TOKEN ?? "",
-      ).getProjects();
+      ).verifyCredentials();
       return;
     case "linear":
       await new LinearClient({ apiKey: env.LINEAR_API_KEY ?? "" }).getTeams();
       return;
     case "github": {
       const [owner, repo] = (env.GITHUB_REPO || "/").split("/");
-      await new GitHubClient({
+      const github = new GitHubClient({
         token: env.GITHUB_TOKEN ?? "",
         owner: owner ?? "",
         repo: repo ?? "",
-      }).getRepositories();
+      });
+      // Check the repo itself when one is configured; otherwise only the token.
+      if (env.GITHUB_REPO && owner && repo) await github.verifyRepoAccess();
+      else await github.verifyToken();
       return;
     }
     case "gitlab":

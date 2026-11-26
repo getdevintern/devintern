@@ -1163,7 +1163,9 @@ async function connectTrelloTarget({ env, connectOpts }: TrackerConnectContext):
   try {
     const { ingestUrl } = await registerRelaySource({ source: "trello", ...connectOpts });
     const { TrelloClient } = await import("@devintern/task-trackers");
-    const webhook = await new TrelloClient({ apiKey, apiToken }).createWebhook(ingestUrl, boardId);
+    const trello = new TrelloClient({ apiKey, apiToken });
+    // Webhooks need the 24-character id; TRELLO_DEFAULT_BOARD_ID may be the short URL id.
+    const webhook = await trello.createWebhook(ingestUrl, await trello.resolveBoardId(boardId));
     console.log(
       `✅ Trello webhook registered (${webhook.id}); card events on board ${boardId} now relay instantly.`,
     );

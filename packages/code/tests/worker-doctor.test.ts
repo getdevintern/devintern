@@ -76,6 +76,7 @@ function writeWorkspace(toml: string, env?: string): string {
 function passingDeps(overrides: Partial<WorkerDoctorDeps> = {}): WorkerDoctorDeps {
   return {
     processEnv: {},
+    probeCredentials: async () => {},
     dryRunQuery: async () => 3,
     checkRepoAccess: async () => ({ ok: true }),
     checkEntitlement: async () => ({ valid: true, source: "entitlement", message: "" }),
@@ -270,6 +271,41 @@ repo = "backend"
     expect(byId(checks, "entitlement")).toHaveLength(1);
     expect(byId(checks, "dashboard-port")).toHaveLength(1);
     expect(renderReadinessReport(checks).hasFailures).toBe(true);
+  });
+
+  test("a rejected tracker credential fails the credentials check and skips the query", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    let queried = false;
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        probeCredentials: async () => {
+          throw new Error("JIRA API Error: 401 Unauthorized");
+        },
+        dryRunQuery: async () => {
+          queried = true;
+          return 1;
+        },
+      }),
+    );
+    const [credentials] = byId(checks, "credentials");
+    expect(credentials?.status).toBe("fail");
+    expect(credentials?.detail).toContain("401");
+    expect(byId(checks, "query")[0]?.status).toBe("fail");
+    expect(queried).toBe(false);
+  });
+
+  test("--offline skips the credential probe", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath, offline: true },
+      passingDeps({
+        probeCredentials: async () => {
+          throw new Error("must not be called");
+        },
+      }),
+    );
+    expect(byId(checks, "credentials")[0]?.status).toBe("ok");
   });
 
   test("a missing Markdown tasks folder hints to create it, not to fix task_query", async () => {

@@ -1035,6 +1035,21 @@ export class JiraClient {
   }
 
   /**
+   * Verify the configured credentials with `GET /rest/api/3/myself`.
+   *
+   * Unlike project listing, this endpoint answers 401 for a bad token; Jira
+   * Cloud treats bad basic-auth as anonymous on other endpoints and returns an
+   * empty 200.
+   *
+   * @returns The authenticated user's display name when Jira provides one.
+   * @throws When the credentials are rejected or the request fails.
+   */
+  async verifyCredentials(): Promise<{ displayName?: string }> {
+    const me = await this.jiraApiCall("GET", "/rest/api/3/myself");
+    return { displayName: me?.displayName };
+  }
+
+  /**
    * List projects visible to the authenticated user (cached after first call).
    *
    * @returns Up to 100 accessible projects.

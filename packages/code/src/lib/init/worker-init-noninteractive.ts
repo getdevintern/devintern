@@ -632,7 +632,10 @@ async function credentialCheck(
   for (const [key, value] of Object.entries(plan.credentialEnv)) if (value) env[key] = value;
   try {
     await withTimeout(probe(plan.tracker, env), timeoutMs, `${name} credential check`);
-    return { ...base, status: "pass", message: `${name} accepted ${keys.join(", ")}` };
+    // Only name variables the probe actually exercised: without GITHUB_REPO
+    // the GitHub check covers the token alone.
+    const verified = keys.filter((key) => env[key] || key !== "GITHUB_REPO");
+    return { ...base, status: "pass", message: `${name} accepted ${verified.join(", ")}` };
   } catch (error) {
     const message = errorMessage(error);
     const status = httpStatusOf(message);
@@ -656,7 +659,8 @@ async function runChecks(
   const timeoutMs = deps.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
   const auth = await credentialCheck(plan, deps.probe ?? defaultProbe, timeoutMs);
   const authFailed = auth.status === "fail";
-  const doctorDeps: WorkerDoctorDeps = { ...deps.doctor };
+  // The credential probe above already ran; do not repeat it inside doctor.
+  const doctorDeps: WorkerDoctorDeps = { probeCredentials: async () => {}, ...deps.doctor };
   let entitlement: WorkerEntitlementLike | undefined;
   const checkEntitlement = doctorDeps.checkEntitlement;
   doctorDeps.checkEntitlement = async (dir) => {
