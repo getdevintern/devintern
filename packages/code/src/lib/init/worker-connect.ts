@@ -715,9 +715,8 @@ async function runGitHubConnectTargets(
     return 1;
   }
   if (pairingStarted) {
-    console.log(
-      "⏳ GitHub pairing started. Authorize the App, then run: devintern worker connect github --status",
-    );
+    // The per-account step already printed the URL and the `--status` command.
+    console.log("⏳ GitHub pairing started.");
     return 0;
   }
   console.log("✅ All workspace GitHub repositories are verified for relay delivery.");

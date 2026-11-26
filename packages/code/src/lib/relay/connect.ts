@@ -37,6 +37,7 @@ import type {
 import {
   clearPendingGitHubPairing,
   connectGitHubRepo,
+  describeGitHubPairingFailure,
   loadPendingGitHubPairing,
   pollGitHubPairing,
   startGitHubRepoPairing,
@@ -827,8 +828,15 @@ async function connectGitHubStatus(
         "pairing_expired",
       );
     }
+    if (polled.kind === "failure") {
+      return fail(describeGitHubPairingFailure(polled), polled.code);
+    }
     console.log("⏳ Waiting for the GitHub App authorization. Open this URL and approve it:");
     console.log(`   ${pairing.installUrl}`);
+    console.log(
+      "   If GitHub showed the App's settings page instead of an install, saving there won't finish pairing.",
+    );
+    console.log("   Re-run `devintern worker connect github` to verify without a browser.");
     deps.onOutcome?.({ kind: "pending", target: "github", pairing });
     return 0;
   } catch (error) {
