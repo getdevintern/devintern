@@ -9,7 +9,7 @@ dateModified: 2026-11-26
 
 # DevIntern Code Configuration
 
-DevIntern Code keeps its settings in `~/.devintern`, outside your repositories. `devintern init` registers the current repository in `~/.devintern/workspace.toml` (as a `manual_only` repo, which the [worker](./worker.md) skips) and writes its settings to `~/.devintern/env/<repo>.env`. Each repository has its own file, so several projects can use different trackers and credentials. A repository without a GitHub, GitLab, or Bitbucket `origin` (for example a fresh `git init`) is registered by its directory instead.
+DevIntern Code keeps its settings in `~/.devintern`, outside your repositories. `devintern init` registers the current repository in `~/.devintern/workspace.toml` (as a `manual_only` repo, which the [worker](./worker.md) skips) and writes its settings to `~/.devintern/env/<repo>.env`. To let the worker run tasks there too, run `devintern worker init` or `devintern worker add-repo` in the checkout: either one turns the manual-only entry into a worker repository. Each repository has its own file, so several projects can use different trackers and credentials. A repository without a GitHub, GitLab, or Bitbucket `origin` (for example a fresh `git init`) is registered by its directory instead.
 
 In a terminal, the wizard asks which tracker you use, links to the provider's token page, checks the credentials, and writes the file. With `--yes` (or `--no-interactive`), or when stdin is not a terminal, it writes a commented template for you to fill in instead. Run `devintern init` again in the repository to update the file.
 

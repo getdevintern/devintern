@@ -19,7 +19,7 @@ cd ~/code/backend && devintern worker add-repo
 cd ~/code/frontend && devintern worker add-repo
 ```
 
-`worker add-repo` adds a `[[repos]]` entry from the checkout's `origin` remote, merges new keys from a legacy `.devintern-code/.env` (if the checkout still has one) into the shared `.env` (conflicting values go to that repo's `[repos.env]`), and seeds a routing rule for a Jira or Linear project key. Running it again is a no-op, and comments in `workspace.toml` are preserved. The repo's `.devintern-code/settings.json` needs no changes.
+`worker add-repo` adds a `[[repos]]` entry from the checkout's `origin` remote, merges new keys from a legacy `.devintern-code/.env` (if the checkout still has one) into the shared `.env` (conflicting values go to that repo's `[repos.env]`), and seeds a routing rule for a Jira or Linear project key. On a repository `devintern init` registered as manual-only, it removes `manual_only` so the worker uses it. Running it again is a no-op, and comments in `workspace.toml` are preserved. The repo's `.devintern-code/settings.json` needs no changes.
 
 ## How it works
 

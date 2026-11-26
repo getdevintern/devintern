@@ -485,6 +485,8 @@ interface LoadedWorkspace {
   workspaceDir: string;
   configPath: string;
   config?: WorkspaceConfig;
+  /** `manual_only` repos removed from {@link config}, for the work-sources hint. */
+  manualOnlyRepos?: string[];
 }
 
 /** Read and parse `workspace.toml`, appending config checks. Never throws. */
@@ -532,7 +534,8 @@ function loadWorkspace(
         `${plural(config.automations.length, "automation")} (${configPath})`,
     });
     // The doctor checks what the worker runs; manual-only repos are skipped.
-    return { workspaceDir, configPath, config: workerWorkspaceView(config) };
+    const manualOnlyRepos = config.repos.filter((repo) => repo.manualOnly).map((r) => r.name);
+    return { workspaceDir, configPath, config: workerWorkspaceView(config), manualOnlyRepos };
   } catch (error) {
     const problems = error instanceof WorkspaceConfigError ? error.problems : [errorMessage(error)];
     for (const problem of problems) {
@@ -593,7 +596,7 @@ function polledSources(
 }
 
 /** Report the empty work-source state instead of letting the worker idle silently. */
-function workSourcesCheck(config: WorkspaceConfig): ReadinessCheck {
+function workSourcesCheck(config: WorkspaceConfig, manualOnlyRepos: string[] = []): ReadinessCheck {
   const queries = config.teams.length > 0 ? config.teams.length : config.defaults.taskQuery ? 1 : 0;
   const detail =
     `${plural(queries, "tracker query", "tracker queries")}, ${plural(config.automations.length, "automation")}, ` +
@@ -604,7 +607,12 @@ function workSourcesCheck(config: WorkspaceConfig): ReadinessCheck {
       label: "Work sources",
       status: "warn",
       detail,
-      hint: "Add a repository with `devintern worker add-repo` (run inside its checkout)",
+      hint:
+        manualOnlyRepos.length > 0
+          ? `${manualOnlyRepos.map((name) => `"${name}"`).join(", ")} ${manualOnlyRepos.length === 1 ? "is" : "are"} ` +
+            "manual-only (registered by `devintern init`); run `devintern worker add-repo` in its checkout " +
+            "so the worker uses it"
+          : "Add a repository with `devintern worker add-repo` (run inside its checkout)",
     };
   }
   if (queries === 0 && config.automations.length === 0 && config.errorMonitors.length === 0) {
@@ -628,11 +636,12 @@ async function collectConfigScopedChecks(
     offline: boolean;
     timeoutMs: number;
     deps: WorkerDoctorDeps;
+    manualOnlyRepos?: string[];
   },
   checks: ReadinessCheck[],
 ): Promise<void> {
   const { config, workspaceDir, processEnv, offline, timeoutMs, deps } = ctx;
-  checks.push(workSourcesCheck(config));
+  checks.push(workSourcesCheck(config, ctx.manualOnlyRepos));
   const sources = polledSources(config, workspaceDir, processEnv);
 
   // 2. Tracker credentials per source
@@ -848,13 +857,13 @@ export async function collectWorkerDoctorChecks(
   const checks: ReadinessCheck[] = [];
 
   // 1. Workspace config
-  const { workspaceDir, config } = loadWorkspace(options, deps, checks);
+  const { workspaceDir, config, manualOnlyRepos } = loadWorkspace(options, deps, checks);
   const workspaceEnv: Env = { ...processEnv, ...parseEnvFile(workspaceEnvPath(workspaceDir)) };
 
   if (config) {
     try {
       await collectConfigScopedChecks(
-        { config, workspaceDir, processEnv, offline, timeoutMs, deps },
+        { config, workspaceDir, processEnv, offline, timeoutMs, deps, manualOnlyRepos },
         checks,
       );
     } catch (error) {
