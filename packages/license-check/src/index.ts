@@ -223,6 +223,49 @@ function formatEntitlementHttpError(status: number, bodyText: string): string {
 }
 
 /**
+ * Baked in at build time (`DEVINTERN_RELEASE_BUILD=1` in the publish jobs).
+ * Undefined in source runs and tests, which keep the developer escape hatches.
+ */
+declare const __DEVINTERN_RELEASE_BUILD__: boolean | undefined;
+
+let releaseBuildOverride: boolean | undefined;
+
+/** True only in published release bundles. */
+export function isReleaseBuild(): boolean {
+  if (releaseBuildOverride !== undefined) return releaseBuildOverride;
+  return typeof __DEVINTERN_RELEASE_BUILD__ !== "undefined" && __DEVINTERN_RELEASE_BUILD__ === true;
+}
+
+/** Test seam: force the release flag; pass `undefined` to restore the build-time value. */
+export function setReleaseBuildForTests(value: boolean | undefined): void {
+  releaseBuildOverride = value;
+}
+
+/**
+ * Whether `DEVINTERN_SKIP_LICENSE_CHECK=1` is honoured. Release builds ignore
+ * it so a one-line env edit cannot bypass licensing.
+ */
+export function shouldSkipLicenseCheck(
+  env: Record<string, string | undefined> = process.env,
+  releaseBuild: boolean = isReleaseBuild(),
+): boolean {
+  return !releaseBuild && env.DEVINTERN_SKIP_LICENSE_CHECK === "1";
+}
+
+/**
+ * Entitlement API base URL. `DEVINTERN_API_BASE` is a test/staging override
+ * and is ignored in release builds.
+ */
+export function resolveApiBase(
+  env: Record<string, string | undefined> = process.env,
+  releaseBuild: boolean = isReleaseBuild(),
+): string {
+  return (!releaseBuild && env.DEVINTERN_API_BASE) || DEFAULT_API_BASE;
+}
+
+let warnedSkipIgnored = false;
+
+/**
  * Checks entitlement for the signed-in user via the devintern.com license API.
  *
  * Uses {@link fetchWithRetry} for transient failures (5xx, 429, network).
@@ -239,7 +282,7 @@ async function checkEntitlementViaWebsite(
   allowTrial: boolean,
   retryBaseDelayMs: number,
 ): Promise<EntitlementCheckResult> {
-  const base = process.env.DEVINTERN_API_BASE || DEFAULT_API_BASE;
+  const base = resolveApiBase();
   const params = new URLSearchParams({ productKey });
   if (requireAutomation) params.set("server", "1");
   if (allowTrial) params.set("trial", "1");
@@ -353,7 +396,8 @@ async function checkExplicitLicenseKey(
  * Infrastructure failures fall back to a cached last-known-good entitlement
  * for up to 72 hours; definitive denials clear the cache and fail.
  *
- * Skipped entirely when `DEVINTERN_SKIP_LICENSE_CHECK=1` (tests/CI).
+ * Skipped entirely when `DEVINTERN_SKIP_LICENSE_CHECK=1` (tests/CI), except in
+ * release builds, which ignore the flag.
  *
  * @param options - Product key, auth config, and optional license key / automation flag.
  * @returns Validation outcome with `valid`, `source`, and a human-readable `message`.
@@ -369,7 +413,11 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
   } = options;
 
   // Allow tests and CI to skip license checks
-  if (process.env.DEVINTERN_SKIP_LICENSE_CHECK === "1") {
+  if (isReleaseBuild() && process.env.DEVINTERN_SKIP_LICENSE_CHECK === "1" && !warnedSkipIgnored) {
+    warnedSkipIgnored = true;
+    process.stderr.write("DEVINTERN_SKIP_LICENSE_CHECK is ignored in release builds.\n");
+  }
+  if (shouldSkipLicenseCheck()) {
     return {
       valid: true,
       source: "license-key",
@@ -528,7 +576,7 @@ export async function activateWorkerTrial(options: {
     };
   }
 
-  const base = process.env.DEVINTERN_API_BASE || DEFAULT_API_BASE;
+  const base = resolveApiBase();
   try {
     const response = await fetchWithRetry(
       `${base}/api/license/trial`,
