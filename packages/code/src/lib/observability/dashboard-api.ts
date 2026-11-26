@@ -83,6 +83,7 @@ import type { ConfiguredSource, DashboardSourcesResult } from "./dashboard-sourc
 import { scheduledJobRunFilter, toAutomationView } from "./dashboard-automation-view";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
 import { RUN_ORIGINS, RUN_STATUSES } from "./dashboard-run-filters";
+import { withAgentStartFailures } from "./agent-start-health";
 
 const STATS_WINDOWS: Record<string, number | null> = {
   "7d": 7 * 24 * 60 * 60 * 1000,
@@ -1443,6 +1444,8 @@ export function handleWorkerStatus(data: DashboardData, serverPid?: number): Api
       // Additive: configured automation source health (empty on read errors).
       sources: sources.sources,
       ...(sources.error !== undefined ? { sourcesError: sources.error } : {}),
+      // Additive, only when present: tasks whose agent CLI failed to start.
+      ...withAgentStartFailures(data.dbPath),
     },
   };
 }

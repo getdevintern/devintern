@@ -15,6 +15,7 @@ import {
   resetShutdownState,
 } from "../src/lib/cli/shutdown-state";
 import { resolveWorkerStatus } from "../src/lib/observability/dashboard-api";
+import { RunStore } from "../src/lib/state/run-recorder";
 import { WorkerState } from "../src/lib/state/worker-state";
 import { workspaceDbPath, workspaceStateDir } from "../src/lib/workspace/paths";
 import { runWorkerReadCommand } from "../src/lib/worker/dashboard-read-cli";
@@ -712,6 +713,59 @@ describe("devintern worker service", () => {
     expect(text).toContain("License check failed");
     expect(text).toContain("devintern worker service restart");
     expect(text).toContain("journalctl --user -u devintern-worker.service");
+  });
+
+  test("text status of a running service names an agent CLI that fails to start", async () => {
+    mkdirSync(workspaceStateDir(workspaceDir), { recursive: true });
+    const runs = new RunStore(workspaceDbPath(workspaceDir));
+    try {
+      const id = runs.createRun({ origin: "task", taskKey: "APP-1", harness: "claude-code" });
+      runs.finishRun(
+        id,
+        "deferred",
+        "agent_start: Claude Code (claude) could not start: exited with code 1 before producing output: Invalid API key",
+      );
+    } finally {
+      runs.close();
+    }
+    const { deps } = linuxService((args) =>
+      args.includes("show")
+        ? { status: 0, stdout: "ActiveState=active\nSubState=running\n", stderr: "" }
+        : undefined,
+    );
+    const lines: string[] = [];
+    const code = await runWorkerServiceCommand(["status"], {
+      workspaceDir,
+      service: deps,
+      log: (line) => lines.push(line),
+      error: (line) => lines.push(line),
+    });
+    expect(code).toBe(0);
+    const text = lines.join("\n");
+    expect(text).toContain("the agent CLI is failing to start");
+    expect(text).toContain("APP-1: retrying with backoff (1 attempt(s) so far)");
+    expect(text).toContain("Invalid API key");
+    expect(text).toContain("run `claude` once in a terminal to log in");
+
+    let out = "";
+    expect(
+      await runWorkerServiceCommand(["status", "--json"], {
+        workspaceDir,
+        service: deps,
+        write: (chunk) => (out += chunk),
+      }),
+    ).toBe(0);
+    const doc = JSON.parse(out);
+    expect(doc.agentStartFailures).toHaveLength(1);
+    expect(doc.agentStartFailures[0]).toMatchObject({ taskKey: "APP-1", state: "retrying" });
+    expect(doc.nextSteps).toEqual([
+      {
+        id: "agent-start",
+        message: expect.stringContaining("run `claude` once in a terminal to log in"),
+        command: "devintern worker status",
+        url: expect.stringContaining("worker-troubleshooting#the-agent-cli-fails-to-start"),
+      },
+    ]);
   });
 
   test("logs prints the journal", async () => {

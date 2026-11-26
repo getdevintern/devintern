@@ -11,6 +11,12 @@
  */
 
 import { resolve } from "path";
+import {
+  agentStartNextStep,
+  readAgentStartFailures,
+  renderAgentStartFailures,
+} from "../observability/agent-start-health";
+import type { AgentStartFailureView } from "../observability/agent-start-health";
 import type { ReadinessCheck } from "../observability/readiness";
 import {
   blockerNextSteps,
@@ -20,7 +26,12 @@ import {
 } from "../observability/readiness-json";
 import type { NextStep, ReportCheck } from "../observability/readiness-json";
 import { parseEnvFile } from "../workspace/env";
-import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
+import {
+  resolveWorkspaceDir,
+  workspaceConfigPath,
+  workspaceDbPath,
+  workspaceEnvPath,
+} from "../workspace/paths";
 import {
   checkServiceManager,
   detectWorkerService,
@@ -190,6 +201,8 @@ export interface ServiceCommandReport {
   start?: StartCheck;
   warnings: string[];
   service?: WorkerServiceStatus;
+  /** status: tasks whose agent CLI failed to start on their latest run (present when any). */
+  agentStartFailures?: AgentStartFailureView[];
   nextSteps: ServiceNextStep[];
 }
 
@@ -460,7 +473,18 @@ export async function runServiceAction(
               },
             ]
           : [];
-      return { ...base, result: service.state, service, nextSteps };
+      // A running service can still be doing nothing: say when the agent CLI
+      // keeps failing to start.
+      const agentStartFailures = readAgentStartFailures(workspaceDbPath(workspaceDir));
+      const agentStep = agentStartNextStep(agentStartFailures);
+      if (agentStep) nextSteps.push(agentStep);
+      return {
+        ...base,
+        result: service.state,
+        service,
+        nextSteps,
+        ...(agentStartFailures.length > 0 ? { agentStartFailures } : {}),
+      };
     }
     case "logs":
       return { ...base, result: "logs" };
@@ -501,6 +525,9 @@ export function renderServiceReport(
       break;
     case "status":
       if (report.service) lines.push(...renderServiceStatus(report.service, report.workspaceDir));
+      if (report.agentStartFailures?.length) {
+        lines.push("", ...renderAgentStartFailures(report.agentStartFailures));
+      }
       break;
     default:
       break;

@@ -28,6 +28,8 @@ import type { ApiResponse, DashboardData } from "./dashboard-api";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
 import type { JobKind, QueuedJobSnapshot, QueuedJobWaitReason } from "../worker/supervisor";
 import { deriveTaskTitle } from "./task-title";
+import { readAgentStartFailures } from "./agent-start-health";
+import type { AgentStartFailureView } from "./agent-start-health";
 
 /** Where a queued item came from. */
 export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job" | "tracker";
@@ -108,6 +110,13 @@ export interface QueuedWorkResponse {
   total: number;
   /** Most recently cancelled ad-hoc tasks, newest first. */
   cancelled: CancelledTaskItem[];
+  /**
+   * Tasks whose agent CLI failed to start on their latest run: waiting to
+   * retry with backoff, or given up. Present only when there are any. A
+   * polled ticket has no queue row while it waits, so this is the only place
+   * the queue shows it.
+   */
+  agentStartFailures?: AgentStartFailureView[];
 }
 
 /** Characters of an ad-hoc prompt served to the Overview. */
@@ -526,6 +535,7 @@ export function collectQueuedWork(sources: QueuedWorkSources): QueuedWorkRespons
   } catch {
     // Missing DB or table: nothing cancelled yet.
   }
+  const agentStartFailures = readAgentStartFailures(sources.dbPath);
   // Waiting automations, supervisor jobs, and held-back tracker tickets are not
   // counted by the durable queues behind pendingTotal.
   return {
@@ -535,6 +545,7 @@ export function collectQueuedWork(sources: QueuedWorkSources): QueuedWorkRespons
       sources.pendingTotal + automations.length + prJobs.length + tracker.length,
     ),
     cancelled,
+    ...(agentStartFailures.length > 0 ? { agentStartFailures } : {}),
   };
 }
 

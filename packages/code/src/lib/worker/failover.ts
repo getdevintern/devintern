@@ -29,6 +29,7 @@ import type {
   ResolvedHarnessChain,
 } from "@devintern/agent-harness";
 
+import { AGENT_START_RETRY_BASE_MS, agentStartRetryDelayMs } from "../agent/agent-start-failure";
 import { HarnessFailover } from "../agent/harness-failover";
 import type { FailoverOutcome } from "../agent/harness-failover";
 import { HARNESS_CHAIN_ENV, resolveAgentModel } from "../agent/model";
@@ -53,10 +54,11 @@ import type { UsageLimitHint } from "./usage-limit-protocol";
 export type CliFailoverResult = "ok" | "failed" | "deferred" | "skipped";
 
 /**
- * How long a harness that could not start is skipped for this process. Short
- * enough that a fixed path is retried without restarting the worker.
+ * How long a harness that could not start is first skipped for this process.
+ * Short enough that a fixed path is retried without restarting the worker;
+ * repeated failures back off from here ({@link WorkerFailover.reportStartFailure}).
  */
-export const HARNESS_UNAVAILABLE_COOLDOWN_MS = 60_000;
+export const HARNESS_UNAVAILABLE_COOLDOWN_MS = AGENT_START_RETRY_BASE_MS;
 
 export interface WorkerFailoverOptions {
   /** Queue used to persist windows and the active harness across restarts. */
@@ -105,6 +107,8 @@ export class WorkerFailover {
    * again from {@link RATE_LIMIT_FALLBACK_MS}.
    */
   private readonly unknownResetStreak = new Map<string, number>();
+  /** Consecutive start failures per harness (in memory; see {@link reportStartFailure}). */
+  private readonly startFailureStreak = new Map<string, number>();
   private readonly now: () => number;
 
   constructor(options: WorkerFailoverOptions = {}) {
@@ -259,6 +263,29 @@ export class WorkerFailover {
    */
   recordSuccess(harness: string = this.manager.activeName): void {
     this.unknownResetStreak.delete(harness);
+    this.startFailureStreak.delete(harness);
+  }
+
+  /**
+   * Record that a child could not start `harness` and cool it down. Each
+   * consecutive start failure doubles the cooldown (1m, 2m, 4m, ... up to
+   * 30m), so an agent CLI with a bad API key is not relaunched every couple
+   * of minutes. A successful run resets the streak ({@link recordSuccess}).
+   *
+   * @param harness - Harness the failed child ran on
+   * @returns What the failover decided
+   */
+  reportStartFailure(harness: string = this.manager.activeName): FailoverOutcome {
+    const streak = (this.startFailureStreak.get(harness) ?? 0) + 1;
+    this.startFailureStreak.set(harness, streak);
+    const delayMs = agentStartRetryDelayMs(streak);
+    if (streak > 1) {
+      this.log(
+        `🛠️  ${harness} failed to start ${streak} times in a row; ` +
+          `not trying it again for ${Math.round(delayMs / 60_000)}m.`,
+      );
+    }
+    return this.manager.reportHarnessUnavailable(this.now() + delayMs, harness);
   }
 
   /**
@@ -492,10 +519,7 @@ export async function runWithFailover(
       if (code === HARNESS_UNAVAILABLE_EXIT_CODE) {
         // The child never started: skip this entry for the process and try
         // the next one without recording a usage-limit window.
-        const outcome = failover.manager.reportHarnessUnavailable(
-          Date.now() + HARNESS_UNAVAILABLE_COOLDOWN_MS,
-          harness,
-        );
+        const outcome = failover.reportStartFailure(harness);
         if (outcome.kind === "exhausted") {
           return "deferred";
         }

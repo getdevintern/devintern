@@ -58,6 +58,16 @@ export interface RunFailure {
   cause?: string;
 }
 
+/**
+ * Failure stage of an agent CLI that could not start. Start-failure runs also
+ * record their reason as `agent_start: <cause>` while deferred (a deferred run
+ * stores no classification), so the prefix finds both.
+ */
+export const AGENT_START_STAGE = "agent_start";
+
+/** Outcome-reason prefix of a start-failure run (see {@link AGENT_START_STAGE}). */
+export const AGENT_START_REASON_PREFIX = `${AGENT_START_STAGE}: `;
+
 /** Cap on a recorded cause, so a long stack or git dump stays one readable line. */
 export const MAX_FAILURE_CAUSE_CHARS = 240;
 

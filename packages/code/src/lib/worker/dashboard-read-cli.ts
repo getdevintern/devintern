@@ -50,6 +50,8 @@ import type {
 import { resolveWorkspaceArgPath } from "../observability/dashboard-db";
 import { handleOverview } from "../observability/dashboard-overview";
 import type { OverviewResponse } from "../observability/dashboard-overview";
+import { renderAgentStartFailures } from "../observability/agent-start-health";
+import type { AgentStartFailureView } from "../observability/agent-start-health";
 import { handleQueuedWork, queuedDependencyStatus } from "../observability/queued-work";
 import type { QueuedWorkResponse } from "../observability/queued-work";
 import type { TaskArtifactContent, TaskArtifactFile } from "../observability/task-artifacts";
@@ -839,8 +841,14 @@ function renderMergedPrs(body: { prs: AgentPrView[] }): string {
   );
 }
 
+/** Start-failure section shared by `worker queue` and `worker status` (blank line first). */
+function agentStartSection(failures: AgentStartFailureView[] | undefined): string[] {
+  const lines = renderAgentStartFailures(failures ?? [], formatTime);
+  return lines.length > 0 ? ["", ...lines] : [];
+}
+
 function renderQueue(body: QueuedWorkResponse): string {
-  const cancelled = renderCancelled(body);
+  const cancelled = [...agentStartSection(body.agentStartFailures), ...renderCancelled(body)];
   if (body.items.length === 0) return ["Nothing queued.", ...cancelled].join("\n");
   return [
     table(
@@ -904,6 +912,7 @@ function renderStatus(body: {
   dbPath: string;
   dbMissing: boolean;
   relay?: RelayWorkerView | null;
+  agentStartFailures?: AgentStartFailureView[];
 }): string {
   const { queue } = body;
   const lines = [
@@ -914,6 +923,7 @@ function renderStatus(body: {
     `Ad-hoc:     ${queue.injected.pending} pending, ${queue.injected.running} running`,
     `Retries:    ${queue.retries.pending} pending, ${queue.retries.running} running`,
     `Agent PRs:  ${body.agentPrs.open} open, ${body.agentPrs.closed} closed`,
+    ...agentStartSection(body.agentStartFailures),
   ];
   if (body.cursors.length > 0) {
     lines.push("", "Poll cursors:");
