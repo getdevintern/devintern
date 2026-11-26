@@ -17,7 +17,11 @@ If `devintern worker init` was interrupted (Ctrl+C or Ctrl+D), run it again. It 
 
 If `worker doctor` reports `Markdown tasks directory not found: ./tasks`, the folder was saved as a relative path by an older version. Set `MARKDOWN_TASKS_DIR` in `~/.devintern/.env` to the folder's absolute path.
 
-If `worker doctor` reports `Agent harness — <harness>: AGENT_CLI_PATH=<path> (set in <file>) does not exist` (or `is not executable`), the agent CLI path in that file is wrong. Fix it there, or remove the line to use the CLI on your `PATH`. Doctor checks the same files a worker task reads: `~/.devintern/.env`, then the repository's `env_file` (for example `~/.devintern/env/<repo>.env`) and `[repos.env]`, with later ones winning.
+If `worker doctor` reports `Agent harness — <harness>: AGENT_CLI_PATH=<path> (set in <file>) does not exist` (or `is not executable`), the agent CLI path in that file is wrong. Fix it there, or remove the line to use the CLI on your `PATH`. Doctor checks the same files a worker task reads: `~/.devintern/.env`, then the repository's `env_file` (for example `~/.devintern/env/<repo>.env`) and `[repos.env]`, then, for tasks a team picks up, that team's `env_file` and `[teams.env]`, with later ones winning. A problem that only affects one team's tasks is reported as `repo "<repo>" (team "<team>")`.
+
+If it warns `worker failover: Harness "<harness>" is not installed`, the worker skips that `AGENT_HARNESS` entry. The worker chooses its failover entries using `~/.devintern/.env` only, so set that harness's `<HARNESS>_CLI_PATH` there, not in a repository `env_file` or `[repos.env]`.
+
+If it warns `<harness>: after failover the task runs AGENT_CLI_PATH=<path>`, worker tasks that fail over to that harness would start the primary's CLI. Replace `AGENT_CLI_PATH` with the primary harness's own path key (for example `CLAUDE_CODE_CLI_PATH`).
 
 ## The service keeps failing
 

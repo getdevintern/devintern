@@ -874,7 +874,7 @@ export async function collectWorkerDoctorChecks(
 
   // 6. Harness and sandbox chain (local only). The harness check resolves CLI
   // paths from each repo's spawn env, the way the task subprocess does.
-  const scopes = harnessEnvScopes(processEnv, workspaceDir, config?.repos);
+  const scopes = harnessEnvScopes(processEnv, workspaceDir, config);
   const checkHarness = deps.checkHarness ?? defaultCheckHarness;
   for (const run of [
     (env: Env) => checkHarness(env, scopes),
