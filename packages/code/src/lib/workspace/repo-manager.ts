@@ -28,6 +28,8 @@ import { withRepoGitLock } from "../utils/repo-git-lock";
 import { worktreeKeepReason } from "../utils/worktree-keep";
 import type { RepoConfig } from "./config";
 import { reposDir, resolveWorkspaceDir, worktreesDir } from "./paths";
+import { buildRepoCredentialEnv } from "./env";
+import { pickGitCredentialEnv } from "../utils/git-credentials";
 import { migrateCommittedTrackerSettings } from "./migrate-checkout";
 
 /** Name of the persistent per-repo worktree used for review/mention runs. */
@@ -51,9 +53,30 @@ function isRefLockError(message: string | undefined): boolean {
 export class RepoManager {
   private workspaceDir: string;
   private readonly adminTails = new Map<string, Promise<void>>();
+  /**
+   * Per-repo code-host credentials (`env_file` / `[repos.env]` overrides of
+   * GITHUB_TOKEN and friends) for this process's own clone and fetch, so they
+   * authenticate like the repo's task subprocesses and `worker doctor` do.
+   */
+  private readonly gitEnvs = new Map<string, NodeJS.ProcessEnv>();
 
   constructor(workspaceDir: string = resolveWorkspaceDir()) {
     this.workspaceDir = workspaceDir;
+  }
+
+  private rememberGitEnv(repo: RepoConfig): void {
+    try {
+      const env = pickGitCredentialEnv(buildRepoCredentialEnv(repo, this.workspaceDir));
+      if (Object.keys(env).length > 0) this.gitEnvs.set(repo.name, env);
+      else this.gitEnvs.delete(repo.name);
+    } catch {
+      // An unreadable env file leaves git on the process environment.
+    }
+  }
+
+  private gitEnvOption(repoName: string): { env?: NodeJS.ProcessEnv } {
+    const env = this.gitEnvs.get(repoName);
+    return env ? { env } : {};
   }
 
   /** Absolute path of a repo's bare clone. */
@@ -85,6 +108,7 @@ export class RepoManager {
    * @throws When cloning or configuring the repository fails.
    */
   async ensureBareClone(repo: RepoConfig): Promise<string> {
+    this.rememberGitEnv(repo);
     return this.withAdminLock(repo.name, () => this.ensureBareCloneUnlocked(repo));
   }
 
@@ -127,6 +151,7 @@ export class RepoManager {
 
     const clone = await Utils.executeGitCommand(["clone", "--bare", repo.remote, clonePath], {
       cwd: parent,
+      ...this.gitEnvOption(repo.name),
     });
     if (!clone.success) {
       throw new Error(`Failed to clone ${repo.remote} for repo "${repo.name}": ${clone.error}`);
@@ -151,7 +176,10 @@ export class RepoManager {
 
     // origin/HEAD backs Utils.getMainBranchName; ignore failure (repos with
     // an explicit default_branch never consult it).
-    await Utils.executeGitCommand(["remote", "set-head", "origin", "-a"], { cwd: clonePath });
+    await Utils.executeGitCommand(["remote", "set-head", "origin", "-a"], {
+      cwd: clonePath,
+      ...this.gitEnvOption(repo.name),
+    });
 
     return clonePath;
   }
@@ -177,9 +205,11 @@ export class RepoManager {
   }
 
   private async fetchUnlocked(repoName: string, options?: { timeoutMs?: number }): Promise<void> {
-    const gitOptions = options?.timeoutMs
-      ? { cwd: this.bareClonePath(repoName), timeoutMs: options.timeoutMs }
-      : { cwd: this.bareClonePath(repoName) };
+    const gitOptions = {
+      cwd: this.bareClonePath(repoName),
+      ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+      ...this.gitEnvOption(repoName),
+    };
     for (let attempt = 1; ; attempt++) {
       const result = await Utils.executeGitCommand(["fetch", "--prune", "origin"], gitOptions);
       if (result.success) return;
