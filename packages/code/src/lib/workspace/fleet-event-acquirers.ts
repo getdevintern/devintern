@@ -280,6 +280,7 @@ async function buildAutoMergeWatcher(params: {
           parseHarnessList(process.env.AGENT_HARNESS)[0])
         : undefined,
     policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug, workspaceDir),
+    recheckOnPush: () => config.workspace.autoMerge.recheckOnPush,
     isStackedBase: params.isStackedBase,
     quietSeconds: parseEnvInteger(
       "WORKER_AUTO_MERGE_QUIET_SECONDS",
@@ -345,6 +346,42 @@ async function startRelayAutoVerify(
   });
   if (options.reloadHooksOut) options.reloadHooksOut.verifyRelayRepos = verifyRelayRepos;
   void verifyRelayRepos();
+}
+
+/**
+ * Register (or reuse) this workspace's relay worker identity before polling,
+ * claiming the registrations it connected. Never throws: a relay without
+ * per-worker routing, or a failed registration, keeps account-level delivery.
+ *
+ * @returns The cursor a worker without one starts from, and its label
+ */
+async function startRelayWorkerIdentity(
+  options: FleetEventAcquirerOptions,
+  relayUrl: string,
+  relayToken: string,
+): Promise<{ initialCursor?: number; label?: string }> {
+  const { describeWorkerConflicts, registerRelayWorker } = await import("../relay/worker-identity");
+  try {
+    const result = await registerRelayWorker({
+      relayToken,
+      workingDir: options.workspaceDir,
+      relayUrl,
+      fetchImpl: options.relayFetchImpl,
+    });
+    if (result.kind === "unsupported") return {};
+    for (const line of describeWorkerConflicts(result.conflicts)) {
+      console.warn(`⚠️  [relay] ${line}`);
+    }
+    return { initialCursor: result.worker.startCursor, label: result.worker.label };
+  } catch (error) {
+    console.warn(
+      `⚠️  [relay] worker identity registration failed (${(error as Error).message}); ` +
+        "events keep arriving through the account-level route.",
+    );
+    const { loadRelayState } = await import("../relay/connect");
+    const persisted = loadRelayState(options.workspaceDir)?.worker;
+    return persisted ? { initialCursor: persisted.startCursor, label: persisted.label } : {};
+  }
 }
 
 /** Inputs for {@link buildFleetEventAcquirers}. */
@@ -755,6 +792,7 @@ export async function buildFleetEventAcquirers(
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
+      const relayWorker = await startRelayWorkerIdentity(options, relayUrl, relayToken);
       await startRelayAutoVerify(options, relayUrl, relayToken);
       const { RelayAcquirer } = await import("../relay/acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
@@ -797,6 +835,8 @@ export async function buildFleetEventAcquirers(
         new RelayAcquirer({
           relayUrl,
           relayToken,
+          initialCursor: relayWorker.initialCursor,
+          workerLabel: relayWorker.label,
           workerState: state.workerState,
           queue: state.queue,
           isAgentPr: (repo, prNumber) =>

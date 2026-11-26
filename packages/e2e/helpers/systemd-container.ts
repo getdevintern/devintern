@@ -20,12 +20,11 @@ const packageRoot = resolve(import.meta.dir, "..");
 export const SERVICE_IMAGE = "devintern-e2e-systemd:local";
 
 /** Environment for `tester` commands, so `systemctl --user` reaches the user bus. */
-const USER_ENV = [
+const BUS_ENV = [
   "XDG_RUNTIME_DIR=/run/user/1000",
   "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
-  "DEVINTERN_TELEMETRY_DISABLED=1",
-  "DEVINTERN_NO_UPDATE=1",
 ];
+const BASE_ENV = ["DEVINTERN_TELEMETRY_DISABLED=1", "DEVINTERN_NO_UPDATE=1"];
 
 async function docker(args: string[], timeout = 120_000, stdin?: string): Promise<CommandResult> {
   if (stdin === undefined)
@@ -116,8 +115,13 @@ export class SystemdContainer {
     return docker(["exec", "-i", this.name, "bash", "-s"], timeout, script);
   }
 
-  /** Run a bash script as `tester` with the user bus available. */
-  user(script: string, timeout = 120_000): Promise<CommandResult> {
+  /**
+   * Run a bash script as `tester` with the user bus available. `plain` leaves
+   * XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS unset, like a bare
+   * `docker exec -u` or `sudo -u` shell without a PAM session.
+   */
+  user(script: string, timeout = 120_000, plain = false): Promise<CommandResult> {
+    const env = plain ? BASE_ENV : [...BUS_ENV, ...BASE_ENV];
     return docker(
       [
         "exec",
@@ -126,7 +130,7 @@ export class SystemdContainer {
         "tester",
         "-w",
         "/home/tester",
-        ...USER_ENV.flatMap((entry) => ["-e", entry]),
+        ...env.flatMap((entry) => ["-e", entry]),
         this.name,
         "bash",
         "-s",

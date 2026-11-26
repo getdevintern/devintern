@@ -68,7 +68,7 @@ test.skipIf(!builtCli)(
         `✅ Workspace config — 1 repo, 0 teams, 1 automation (${configPath})`,
         "✅ Work sources — 0 tracker queries, 1 automation, 0 error monitors, 1 repo",
         `✅ Repository access — [[repos]] "fixture" (${worker.remote}): remote reachable`,
-        "✅ Automation entitlement — license-key",
+        "✅ Automation entitlement — skipped (DEVINTERN_SKIP_LICENSE_CHECK=1; non-release build, no license was checked)",
         "✅ Agent harness — claude-code",
         "✅ Agent sandbox — none (agents run unsandboxed)",
         "✅ Dashboard port — dashboard disabled",
@@ -115,11 +115,33 @@ test.skipIf(!builtCli)(
       );
       expect(elapsedMs).toBeLessThan(15_000);
 
-      // Doctor has no JSON mode: --json is rejected as an unknown option.
-      const json = await doctor(["--json"]);
-      expect(json.exitCode).toBe(1);
-      expect(json.stdout).toBe("");
-      expect(json.stderr).toContain("Unknown option for worker doctor: --json");
+      // --json: one document on stdout with the same verdict and exit codes.
+      const json = await doctor(["--json"], { DEVINTERN_SKIP_LICENSE_CHECK: "0" });
+      expect(json.exitCode).toBe(2);
+      const document = JSON.parse(json.stdout);
+      expect(document).toMatchObject({
+        schema: "devintern.worker-doctor",
+        version: 1,
+        result: "action_required",
+        offline: false,
+      });
+      expect(document.checks).toContainEqual(
+        expect.objectContaining({ name: "entitlement", status: "action" }),
+      );
+      expect(document.checks).toContainEqual(
+        expect.objectContaining({ name: "repo", status: "pass" }),
+      );
+      expect(document.nextSteps).toEqual([
+        expect.objectContaining({
+          id: "sign-in",
+          command: expect.stringMatching(
+            /^devintern worker login( --workspace \S+)? github --no-wait --json$/,
+          ),
+        }),
+      ]);
+      const readyJson = await doctor(["--json"]);
+      expect(readyJson.exitCode).toBe(0);
+      expect(JSON.parse(readyJson.stdout)).toMatchObject({ result: "success" });
 
       // A busy dashboard port is a warning only.
       blocker = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("busy") });

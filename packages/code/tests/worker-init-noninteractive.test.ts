@@ -28,6 +28,7 @@ import type {
   NonInteractiveInitArgs,
   NonInteractiveInitDeps,
 } from "../src/lib/init/worker-init-noninteractive";
+import { gitCommitIdentityCheck } from "../src/lib/observability/git-identity-readiness";
 import type { WorkerDoctorDeps } from "../src/lib/observability/worker-readiness";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
 import { workspaceCodeStateDir } from "../src/lib/workspace/paths";
@@ -50,6 +51,11 @@ function doctorStubs(overrides: WorkerDoctorDeps = {}): WorkerDoctorDeps {
     checkEntitlement: async () => ({ valid: true, source: "license-key", message: "ok" }),
     checkHarness: async () => ({ id: "harness", label: "Agent harness", status: "ok" }),
     checkSandbox: async () => ({ id: "sandbox", label: "Agent sandbox", status: "ok" }),
+    checkGitIdentity: async () => ({
+      id: "git-identity",
+      label: "Git commit identity",
+      status: "ok",
+    }),
     isPortInUse: async () => false,
     workerStatus: () => ({ status: "stopped" }),
     ...overrides,
@@ -187,7 +193,10 @@ describe("runNonInteractiveWorkerInit", () => {
       name: "app",
       remote: "git@github.com:acme/app.git",
       added: true,
+      defaultBranch: "main",
+      branch: "main",
     });
+    expect(config.repos[0]?.defaultBranch).toBe("main");
     expect(report.filesWritten).toEqual([
       join(workspaceDir, ".env"),
       join(workspaceDir, "workspace.toml"),
@@ -203,10 +212,38 @@ describe("runNonInteractiveWorkerInit", () => {
     const env = readFileSync(join(workspaceDir, ".env"), "utf8");
     expect(env).toContain("JIRA_API_TOKEN=ATATT-very-secret-token");
     expect(statSync(join(workspaceDir, ".env")).mode & 0o777).toBe(0o600);
-    expect(report.nextSteps.map((step) => step.id)).toEqual(["connect", "start", "service"]);
+    // The background service comes first; nothing blocks an agent waiting for a browser.
+    expect(report.nextSteps.map((step) => step.id)).toEqual(["service", "connect"]);
+    expect(report.nextSteps.map((step) => step.command)).toEqual([
+      `DEVINTERN_WORKSPACE_DIR=${workspaceDir} devintern worker service install --json`,
+      `devintern worker connect github --no-wait --json --workspace ${join(workspaceDir, "workspace.toml")}`,
+    ]);
+    expect(report.changed).toBe(true);
+    expect(report.persisted).toBe(true);
     // Nothing secret in the report.
     expect(JSON.stringify(report)).not.toContain(JIRA_ENV.JIRA_API_TOKEN);
     expect(existsSync(join(workspaceDir, WORKER_INIT_LOCK_FILE))).toBe(false);
+  });
+
+  test("a host without a git identity gets a Git commit identity warning, not a failure", async () => {
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, json: true },
+      {
+        processEnv: {
+          ...JIRA_ENV,
+          PATH: process.env.PATH,
+          HOME: join(root, "home"),
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+        },
+        doctorOverrides: { checkGitIdentity: gitCommitIdentityCheck },
+      },
+    );
+    expect(report.result).toBe("success");
+    const identity = report.checks.find((check) => check.name === "git-identity");
+    expect(identity).toMatchObject({ label: "Git commit identity", status: "warn" });
+    expect(identity?.message).toContain("DevIntern <devintern@users.noreply.github.com>");
+    expect(identity?.hint).toContain("git_author_name");
   });
 
   test("0 matching tasks is a warning, not a failure", async () => {
@@ -219,6 +256,51 @@ describe("runNonInteractiveWorkerInit", () => {
       status: "warn",
       message: "jira ([defaults]): 0 tasks match",
     });
+  });
+
+  test("a failed harness check offers install-agent and withholds start and service", async () => {
+    const failedHarness = async () => ({
+      id: "harness",
+      label: "Agent harness",
+      status: "fail" as const,
+      detail: "no harness CLI found",
+      hint: "Install the agent CLI",
+    });
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP" },
+      {
+        processEnv: { ...JIRA_ENV, AGENT_HARNESS: "codex" },
+        doctorOverrides: { checkHarness: failedHarness },
+      },
+    );
+    expect(report.result).toBe("failure");
+    const ids = report.nextSteps.map((step) => step.id);
+    expect(ids).toContain("install-agent");
+    expect(ids).not.toContain("start");
+    expect(ids).not.toContain("service");
+    expect(report.nextSteps.find((step) => step.id === "install-agent")?.command).toBe(
+      "npm install -g @openai/codex",
+    );
+
+    const unknown = await run(
+      { tracker: "jira", taskQuery: "project = APP", yes: true },
+      {
+        processEnv: { ...JIRA_ENV, AGENT_HARNESS: "goose" },
+        doctorOverrides: { checkHarness: failedHarness },
+      },
+    );
+    expect(unknown.nextSteps.find((step) => step.id === "install-agent")?.command).toBe(
+      "https://devintern.com/docs/code/agent-harness",
+    );
+  });
+
+  test("the credential probe and doctor's credentials row have distinct labels", async () => {
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP" },
+      { processEnv: { ...JIRA_ENV } },
+    );
+    const labels = report.checks.map((check) => check.label);
+    expect(new Set(labels).size).toBe(labels.length);
   });
 
   test("names every missing input and writes nothing", async () => {
@@ -413,7 +495,7 @@ describe("runNonInteractiveWorkerInit", () => {
       expect(signIn.id).toBe("sign-in");
       // A concrete command with a method, for this (non-default) workspace.
       expect(signIn.command).toBe(
-        `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")} github`,
+        `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")} github --no-wait --json`,
       );
       expect(signIn.message).toContain("14-day free Worker Pilot, no card required");
       expect(report.signIn).toBeUndefined();
@@ -496,7 +578,7 @@ describe("runNonInteractiveWorkerInit", () => {
       );
       expect(report.result).toBe("success");
       expect(report.checks.find((check) => check.name === "entitlement")?.message).toBe(
-        `Worker Pilot active, ends ${endsAt.slice(0, 10)} (10 days left)`,
+        `Worker Pilot, active until ${endsAt.slice(0, 10)} (10 days left)`,
       );
     });
 
@@ -525,7 +607,11 @@ describe("runNonInteractiveWorkerInit", () => {
         "url",
       ]);
       expect(report.result).toBe("action_required");
-      expect(report.nextSteps[0]).toMatchObject({ id: "sign-in", command: complete });
+      expect(report.nextSteps[0]).toMatchObject({
+        id: "complete-sign-in",
+        command: complete,
+        url: "https://example.supabase.co/auth/v1/authorize?provider=github",
+      });
       const text = renderNonInteractiveReport(report).join("\n");
       expect(text).toContain(
         "🔑 Sign in to begin your 14-day free Worker Pilot, no card required:",
@@ -710,6 +796,9 @@ describe("runNonInteractiveWorkerInit", () => {
       name: "app",
       remote: "https://gitlab.com/acme/app.git",
       added: true,
+      // `git init -b main` with no origin/HEAD: the checked-out branch is recorded.
+      defaultBranch: "main",
+      branch: "main",
     });
     const config = loadWorkspaceConfig(join(workspaceDir, "workspace.toml"));
     expect(config.repos.map((repo) => repo.remote)).toEqual(["https://gitlab.com/acme/app.git"]);

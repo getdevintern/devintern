@@ -121,6 +121,31 @@ describe("RepoManager", () => {
     ]);
   });
 
+  test("pruneTaskWorktrees keeps the newest debug worktrees of one task only", async () => {
+    await manager.ensureBareClone(repo);
+    const created: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      created.push(await manager.createTaskWorktree(repo, "BACK-7"));
+      await Bun.sleep(2);
+    }
+    // Different task whose key shares a prefix, a run still owning a worktree,
+    // and a worktree holding unsaved work are never pruned.
+    const other = await manager.createTaskWorktree(repo, "BACK-70");
+    const longer = await manager.createTaskWorktree(repo, "back-7-x");
+    expect(await markWorktreeKept(created[0]!, "push failed")).toBe(true);
+    const inUse = new Set([created[1]!]);
+
+    const removed = await manager.pruneTaskWorktrees(repo.name, "BACK-7", { keep: 1, inUse });
+
+    expect(removed).toEqual([created[2]!]);
+    expect(existsSync(created[0]!)).toBe(true);
+    expect(existsSync(created[1]!)).toBe(true);
+    expect(existsSync(created[2]!)).toBe(false);
+    expect(existsSync(created[3]!)).toBe(true);
+    expect(existsSync(other)).toBe(true);
+    expect(existsSync(longer)).toBe(true);
+  });
+
   test("task worktrees automatically isolate hooks from the bare clone", async () => {
     await manager.ensureBareClone(repo);
     const worktree = await manager.createTaskWorktree(repo, "BACK-50");

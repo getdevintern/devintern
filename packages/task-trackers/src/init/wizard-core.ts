@@ -338,7 +338,12 @@ export async function validateConnection(
       }
       if (answer === "e" && canEdit) {
         edits++;
-        await promptSteps(steps, prompt, log, values, promptSecret);
+        // What was entered (or defaulted) stays the Enter default, so fixing
+        // one value does not mean retyping the rest.
+        const editable = steps.map((step) =>
+          values[step.key] ? { ...step, defaultValue: values[step.key] } : step,
+        );
+        await promptSteps(editable, prompt, log, values, promptSecret);
       }
       // anything else (including 'r') retries with current values
     }

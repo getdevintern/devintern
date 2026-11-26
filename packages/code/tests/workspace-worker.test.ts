@@ -23,6 +23,7 @@ import {
   sweepAllWorktrees,
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
+import { MAX_DEBUG_WORKTREES_PER_TASK } from "../src/lib/workspace/fleet-executor";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import type { InjectedTask } from "../src/lib/state/injected-tasks";
 import { ScheduledRetryStore, isRunRetriable } from "../src/lib/state/run-retry";
@@ -653,6 +654,41 @@ describe("createFleetTaskExecutor serialization", () => {
     expect(result).toBe("skipped");
     expect(repoManager.calls).toContain("worktree:backend:T-SKIP");
     expect(repoManager.calls.some((call) => call.startsWith("remove:"))).toBe(true);
+  });
+
+  test("a deferred or failed run keeps its worktree and prunes older ones of the task", async () => {
+    const pruned: Array<{ repo: string; taskKey: string; keep: number; inUse: number }> = [];
+    const pruning = Object.assign(repoManager, {
+      async pruneTaskWorktrees(
+        repo: string,
+        taskKey: string,
+        options: { keep: number; inUse?: ReadonlySet<string> },
+      ): Promise<string[]> {
+        pruned.push({ repo, taskKey, keep: options.keep, inUse: options.inUse?.size ?? 0 });
+        return [];
+      },
+    });
+    for (const outcome of ["deferred", false] as const) {
+      const executor = createFleetTaskExecutor({
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager: pruning,
+        runTask: async () => outcome,
+      });
+      const result = await executor(
+        "T-START",
+        toRoutableTask({ key: "T-START", labels: ["backend"], components: [] }),
+      );
+      expect(result).toBe(outcome);
+    }
+
+    expect(repoManager.calls.some((call) => call.startsWith("remove:"))).toBe(false);
+    // The finished run no longer owns its worktree, so nothing is in use.
+    expect(pruned).toEqual([
+      { repo: "backend", taskKey: "T-START", keep: MAX_DEBUG_WORKTREES_PER_TASK, inUse: 0 },
+      { repo: "backend", taskKey: "T-START", keep: MAX_DEBUG_WORKTREES_PER_TASK, inUse: 0 },
+    ]);
   });
 
   test("an exhausted harness chain defers before creating a worktree", async () => {

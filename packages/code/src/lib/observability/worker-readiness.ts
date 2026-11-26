@@ -22,7 +22,6 @@ import {
   activeSandboxName,
   detectSandboxProviders,
   removedSandboxProviderMessage,
-  resolveHarnessChainSync,
   sandboxInheritsEnclosingSandbox,
 } from "@devintern/agent-harness";
 import { WorkspaceConfigError, parseWorkspaceConfig } from "../workspace/config";
@@ -37,6 +36,7 @@ import {
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 import { defaultProbe } from "@devintern/task-trackers";
 import { WORKER_PILOT_OFFER, signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
+import { resolveDashboardPort } from "./dashboard-port";
 import { entitlementCheck } from "./worker-entitlement";
 import type { WorkerEntitlementLike } from "./worker-entitlement";
 import { createTrackerClient, trackerRequiredEnv } from "../trackers/manager";
@@ -50,17 +50,27 @@ import { collectHarnessPreflight } from "../agent/sandbox";
 import { resolveWorkerStatus } from "./dashboard-api";
 import type { WorkerStatusView } from "./dashboard-api";
 import type { ReadinessCheck } from "./readiness";
+import { defaultCheckHarness, harnessEnvScopes } from "./harness-readiness";
+import type { HarnessEnvScope } from "./harness-readiness";
+import { notificationDoctorCheck } from "../notifications/delivery/doctor";
+import { gitCommitIdentityCheck } from "./git-identity-readiness";
+import { relayReadinessCheck } from "./relay-readiness";
+import type { GitIdentityCheckInput } from "./git-identity-readiness";
+import { workerLivenessCheck } from "./worker-liveness-readiness";
+import { ciPermissionChecks } from "./ci-permission-readiness";
+import type { CiPermissionDoctorDeps } from "./ci-permission-readiness";
+import { PUSH_FIX, gitPushDryRun, readRepoPermissions } from "./repo-push-probe";
+import type { PushProbeOutcome } from "./repo-push-probe";
 
 type Env = Record<string, string | undefined>;
-
-/** Default dashboard port, kept in sync with `DEFAULT_DASHBOARD_PORT` in `dashboard-server.ts`. */
-const DEFAULT_DASHBOARD_PORT = 4400;
 
 /** Per-probe timeout for query dry-runs and repository checks. */
 const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 
 export type { WorkerEntitlementLike } from "./worker-entitlement";
 export { entitlementCheck } from "./worker-entitlement";
+export { workerDoctorClosingLine } from "./worker-liveness-readiness";
+export { defaultCheckHarness } from "./harness-readiness";
 
 /** Outcome of one repository access probe. */
 export type RepoAccessResult = { ok: true; detail?: string } | { ok: false; reason: string };
@@ -70,9 +80,11 @@ export interface WorkerDoctorOptions {
   workspacePath?: string;
   /** Skip every network-touching probe (`--offline`). */
   offline?: boolean;
+  /** Send a test message through each configured notification channel (`--test-notifications`). */
+  testNotifications?: boolean;
 }
 
-export interface WorkerDoctorDeps {
+export interface WorkerDoctorDeps extends CiPermissionDoctorDeps {
   /** Environment of the doctor process. Defaults to `process.env`. */
   processEnv?: Env;
   /** Workspace home when `--workspace` is not given. */
@@ -86,9 +98,11 @@ export interface WorkerDoctorDeps {
   /** Automation entitlement for the workspace (license, trial, or grace). */
   checkEntitlement?: (workspaceDir: string) => Promise<WorkerEntitlementLike>;
   /** Agent harness chain check over the composed workspace environment. */
-  checkHarness?: (env: Env) => Promise<ReadinessCheck>;
+  checkHarness?: (env: Env, scopes: HarnessEnvScope[]) => Promise<ReadinessCheck>;
   /** Sandbox provider check over the composed workspace environment. */
   checkSandbox?: (env: Env) => Promise<ReadinessCheck>;
+  /** Which identity the worker's commits will carry (see `git-identity-readiness.ts`). */
+  checkGitIdentity?: (input: GitIdentityCheckInput) => Promise<ReadinessCheck>;
   /** True when the TCP port is already bound on the dashboard host. */
   isPortInUse?: (port: number) => Promise<boolean>;
   /** Timeout for each query/repository probe. */
@@ -100,6 +114,8 @@ export interface WorkerDoctorDeps {
    * `GET /api/worker`); `undefined` when nothing answers like a dashboard.
    */
   dashboardServerPid?: (port: number) => Promise<number | undefined>;
+  /** Side effects of notification channels (env is replaced by the workspace env). */
+  notificationChannelDeps?: Parameters<typeof notificationDoctorCheck>[3];
 }
 
 /** Timeout for asking a busy dashboard port who owns it. */
@@ -123,69 +139,6 @@ async function defaultDashboardServerPid(port: number): Promise<number | undefin
 /** Default liveness: the same lock lookup `devintern worker status` uses. */
 function defaultWorkerStatus(workspaceDir: string): WorkerStatusView {
   return resolveWorkerStatus(workspaceDir);
-}
-
-/**
- * `Worker` row for a running or unverifiable worker; `undefined` when the
- * worker is stopped or there is no lock, so that report stays unchanged.
- */
-function workerLivenessCheck(worker: WorkerStatusView): ReadinessCheck | undefined {
-  if (worker.status === "running") {
-    const facts = [
-      worker.pid === undefined ? undefined : `pid ${worker.pid}`,
-      worker.startedAt ? `since ${worker.startedAt}` : undefined,
-    ].filter(Boolean);
-    return {
-      id: "worker",
-      label: "Worker",
-      status: "ok",
-      detail: facts.length > 0 ? `running (${facts.join(", ")})` : "running",
-    };
-  }
-  if (worker.status === "unknown" && worker.reason === "pid-namespace") {
-    return {
-      id: "worker",
-      label: "Worker",
-      status: "warn",
-      detail: "unknown (cannot verify from this sandbox)",
-      hint: "Run `devintern worker status` on the host to see whether a worker is running",
-    };
-  }
-  return undefined;
-}
-
-/**
- * Closing line of `devintern worker doctor`, chosen from the report and the
- * `worker` row (if any) in `checks`. Never tells the operator to start a
- * worker that is already running or could not be verified.
- */
-export function workerDoctorClosingLine(
-  checks: ReadinessCheck[],
-  report: { hasFailures: boolean; hasWarnings: boolean; hasActions?: boolean },
-): string {
-  if (report.hasFailures) {
-    return "❌ Not ready — the worker would sit idle or fail. Fix the checks above.";
-  }
-  if (report.hasActions) {
-    const steps = checks
-      .filter((check) => check.status === "action")
-      .map((check) => check.hint ?? check.detail ?? check.label);
-    return `👉 Setup is fine; one step left before the worker can start. ${steps.join(" ")}`;
-  }
-  const worker = checks.find((check) => check.id === "worker");
-  if (worker?.status === "ok") {
-    const reload =
-      "config changes hot-reload; restart-only settings need a restart (see docs/code/workspaces.md).";
-    return report.hasWarnings
-      ? `✅ A worker is already running (with the warnings above) — ${reload}`
-      : `✅ Everything looks good — a worker is already running; ${reload}`;
-  }
-  if (worker) {
-    return "✅ Ready to run (with the warnings above); could not tell whether a worker is already running — check with `devintern worker status` on the host.";
-  }
-  return report.hasWarnings
-    ? "✅ Ready to run (with the warnings above) — start it with `devintern worker`."
-    : "✅ Everything looks good — start the worker with `devintern worker`.";
 }
 
 /** Error message without a stack trace. */
@@ -326,6 +279,8 @@ export interface RepoAccessProbes {
   lsRemote?: (remote: string, env: Env, timeoutMs: number) => Promise<RepoAccessResult>;
   /** Whether git has its own credential helper for a URL (default: ask git). */
   hasHelper?: (url: string, env: Env) => boolean;
+  /** Dry-run push with the worker's git credentials (default: {@link gitPushDryRun}). */
+  pushDryRun?: (remote: string, env: Env, timeoutMs: number) => Promise<PushProbeOutcome>;
 }
 
 /**
@@ -345,12 +300,16 @@ export function createDefaultRepoAccessCheck(
   const lsRemote = probes.lsRemote ?? gitLsRemote;
   const hasHelper =
     probes.hasHelper ?? ((url: string, env: Env) => hasConfiguredCredentialHelper(url, env));
+  const pushDryRun =
+    probes.pushDryRun ??
+    ((remote: string, env: Env, ms: number) =>
+      gitPushDryRun(remote, (args) => gitCredentialEnv(args, gitProbeEnv(env)), ms));
   return async (repo, env) => {
     const slug = gitHubSlugFromRemote(repo.remote);
     const token = env.GITHUB_TOKEN;
     if (slug && token) {
       // In parallel: the caller bounds the whole check with one timeout.
-      const [response, git] = await Promise.all([
+      const [response, git, push] = await Promise.all([
         fetchFn(`https://api.github.com/repos/${slug}`, {
           headers: {
             Accept: "application/vnd.github+json",
@@ -360,6 +319,10 @@ export function createDefaultRepoAccessCheck(
           signal: AbortSignal.timeout(timeoutMs),
         }),
         lsRemote(repo.remote, env, timeoutMs),
+        pushDryRun(repo.remote, env, timeoutMs).catch((error: unknown): PushProbeOutcome => ({
+          status: "unknown",
+          reason: errorMessage(error),
+        })),
       ]);
       if (!response.ok) {
         return {
@@ -369,7 +332,12 @@ export function createDefaultRepoAccessCheck(
           }`,
         };
       }
-      if (!git.ok) {
+      // `permissions` is the token owner's role; the dry run is what the token itself may do.
+      const permissions = await readRepoPermissions(response);
+      const pushDenied = permissions?.push === false || push.status === "denied";
+      // A refused clone names its own cause (helper precedence, Contents access);
+      // a clone that only timed out says less than a definite push denial.
+      if (!git.ok && !(pushDenied && /timed out/.test(git.reason))) {
         return {
           ok: false,
           reason: gitRefusedReason(
@@ -379,7 +347,16 @@ export function createDefaultRepoAccessCheck(
           ),
         };
       }
-      return { ok: true, detail: `GitHub ${slug} readable` };
+      if (pushDenied) {
+        const cause = push.status === "denied" ? ` (dry-run push: ${push.reason})` : "";
+        return {
+          ok: false,
+          reason: `GITHUB_TOKEN can read ${slug} but cannot push branches or open pull requests${cause}`,
+        };
+      }
+      return push.status === "ok"
+        ? { ok: true, detail: `GitHub ${slug} readable and writable (push verified)` }
+        : { ok: true, detail: `GitHub ${slug} readable; push not verified (${push.reason})` };
     }
     return lsRemote(repo.remote, env, timeoutMs);
   };
@@ -409,43 +386,6 @@ async function defaultCheckEntitlement(workspaceDir: string): Promise<WorkerEnti
     setup: true,
     loginCommand: "devintern worker login",
   });
-}
-
-/** Default harness check: resolve the `AGENT_HARNESS` chain like the worker does. */
-export async function defaultCheckHarness(env: Env): Promise<ReadinessCheck> {
-  const label = "Agent harness";
-  try {
-    const chain = resolveHarnessChainSync({ raw: env.AGENT_HARNESS, warnDeprecated: false });
-    const installed = chain.entries.filter((entry) => entry.installed);
-    const names = chain.entries.map((entry) => entry.name).join(", ");
-    if (installed.length === 0) {
-      return {
-        id: "harness",
-        label,
-        status: "fail",
-        detail: chain.issues[0]?.message ?? `no harness CLI found for AGENT_HARNESS=${names}`,
-        hint: "Install the agent CLI, or set AGENT_HARNESS / <HARNESS>_CLI_PATH in the workspace .env",
-      };
-    }
-    if (chain.issues.length > 0) {
-      return {
-        id: "harness",
-        label,
-        status: "warn",
-        detail: chain.issues.map((issue) => issue.message).join(" "),
-        hint: "Remove or install the skipped AGENT_HARNESS entries in the workspace .env",
-      };
-    }
-    return { id: "harness", label, status: "ok", detail: names };
-  } catch (error) {
-    return {
-      id: "harness",
-      label,
-      status: "fail",
-      detail: errorMessage(error),
-      hint: "Set AGENT_HARNESS in the workspace .env to a registered harness",
-    };
-  }
 }
 
 /**
@@ -538,6 +478,8 @@ interface LoadedWorkspace {
   workspaceDir: string;
   configPath: string;
   config?: WorkspaceConfig;
+  /** `manual_only` repos removed from {@link config}, for the work-sources hint. */
+  manualOnlyRepos?: string[];
 }
 
 /** Read and parse `workspace.toml`, appending config checks. Never throws. */
@@ -585,7 +527,8 @@ function loadWorkspace(
         `${plural(config.automations.length, "automation")} (${configPath})`,
     });
     // The doctor checks what the worker runs; manual-only repos are skipped.
-    return { workspaceDir, configPath, config: workerWorkspaceView(config) };
+    const manualOnlyRepos = config.repos.filter((repo) => repo.manualOnly).map((r) => r.name);
+    return { workspaceDir, configPath, config: workerWorkspaceView(config), manualOnlyRepos };
   } catch (error) {
     const problems = error instanceof WorkspaceConfigError ? error.problems : [errorMessage(error)];
     for (const problem of problems) {
@@ -646,7 +589,7 @@ function polledSources(
 }
 
 /** Report the empty work-source state instead of letting the worker idle silently. */
-function workSourcesCheck(config: WorkspaceConfig): ReadinessCheck {
+function workSourcesCheck(config: WorkspaceConfig, manualOnlyRepos: string[] = []): ReadinessCheck {
   const queries = config.teams.length > 0 ? config.teams.length : config.defaults.taskQuery ? 1 : 0;
   const detail =
     `${plural(queries, "tracker query", "tracker queries")}, ${plural(config.automations.length, "automation")}, ` +
@@ -657,7 +600,12 @@ function workSourcesCheck(config: WorkspaceConfig): ReadinessCheck {
       label: "Work sources",
       status: "warn",
       detail,
-      hint: "Add a repository with `devintern worker add-repo` (run inside its checkout)",
+      hint:
+        manualOnlyRepos.length > 0
+          ? `${manualOnlyRepos.map((name) => `"${name}"`).join(", ")} ${manualOnlyRepos.length === 1 ? "is" : "are"} ` +
+            "manual-only (registered by `devintern init`); run `devintern worker add-repo` in its checkout " +
+            "so the worker uses it"
+          : "Add a repository with `devintern worker add-repo` (run inside its checkout)",
     };
   }
   if (queries === 0 && config.automations.length === 0 && config.errorMonitors.length === 0) {
@@ -681,11 +629,12 @@ async function collectConfigScopedChecks(
     offline: boolean;
     timeoutMs: number;
     deps: WorkerDoctorDeps;
+    manualOnlyRepos?: string[];
   },
   checks: ReadinessCheck[],
 ): Promise<void> {
   const { config, workspaceDir, processEnv, offline, timeoutMs, deps } = ctx;
-  checks.push(workSourcesCheck(config));
+  checks.push(workSourcesCheck(config, ctx.manualOnlyRepos));
   const sources = polledSources(config, workspaceDir, processEnv);
 
   // 2. Tracker credentials per source
@@ -822,7 +771,9 @@ async function collectConfigScopedChecks(
               label: "Repository access",
               status: "fail",
               detail: `${name}: ${result.reason}`,
-              hint: `Check the remote URL for "${repo.name}" and that GITHUB_TOKEN (or your git credentials) can read it`,
+              hint: result.reason.includes("cannot push")
+                ? PUSH_FIX
+                : `Check the remote URL for "${repo.name}" and that GITHUB_TOKEN (or your git credentials) can read it`,
             },
       );
     } catch (error) {
@@ -835,6 +786,9 @@ async function collectConfigScopedChecks(
       });
     }
   }
+
+  // 4a. CI status access (auto-merge / CI fixes only)
+  checks.push(...(await ciPermissionChecks({ config, workspaceDir, offline, timeoutMs, deps })));
 }
 
 /**
@@ -851,9 +805,7 @@ async function dashboardPortCheck(
   if (!config.workspace.dashboard) {
     return { ...base, status: "ok", detail: "dashboard disabled" };
   }
-  const port =
-    config.workspace.dashboardPort ??
-    (Number.parseInt(workspaceEnv.DASHBOARD_PORT || "", 10) || DEFAULT_DASHBOARD_PORT);
+  const port = resolveDashboardPort(config.workspace.dashboardPort, workspaceEnv);
   let busy = false;
   try {
     busy = await (deps.isPortInUse ?? defaultIsPortInUse)(port);
@@ -903,13 +855,13 @@ export async function collectWorkerDoctorChecks(
   const checks: ReadinessCheck[] = [];
 
   // 1. Workspace config
-  const { workspaceDir, config } = loadWorkspace(options, deps, checks);
+  const { workspaceDir, config, manualOnlyRepos } = loadWorkspace(options, deps, checks);
   const workspaceEnv: Env = { ...processEnv, ...parseEnvFile(workspaceEnvPath(workspaceDir)) };
 
   if (config) {
     try {
       await collectConfigScopedChecks(
-        { config, workspaceDir, processEnv, offline, timeoutMs, deps },
+        { config, workspaceDir, processEnv, offline, timeoutMs, deps, manualOnlyRepos },
         checks,
       );
     } catch (error) {
@@ -922,6 +874,10 @@ export async function collectWorkerDoctorChecks(
       });
     }
   }
+
+  // 4b. Git commit identity (warning only; never throws)
+  const identityInput = { config, workspaceDir, processEnv: workspaceEnv, offline };
+  checks.push(await (deps.checkGitIdentity ?? gitCommitIdentityCheck)(identityInput));
 
   // 5. Automation entitlement
   if (offline) {
@@ -953,9 +909,12 @@ export async function collectWorkerDoctorChecks(
     }
   }
 
-  // 6. Harness and sandbox chain (local only)
+  // 6. Harness and sandbox chain (local only). The harness check resolves CLI
+  // paths from each repo's spawn env, the way the task subprocess does.
+  const scopes = harnessEnvScopes(processEnv, workspaceDir, config);
+  const checkHarness = deps.checkHarness ?? defaultCheckHarness;
   for (const run of [
-    deps.checkHarness ?? defaultCheckHarness,
+    (env: Env) => checkHarness(env, scopes),
     deps.checkSandbox ?? defaultCheckSandbox,
   ]) {
     try {
@@ -971,6 +930,9 @@ export async function collectWorkerDoctorChecks(
     }
   }
 
+  // 6b. Relay pairing (local state only; runs under --offline too)
+  checks.push(relayReadinessCheck(workspaceDir, config));
+
   // 7. Worker liveness (local lock file only; runs under --offline too)
   let worker: WorkerStatusView = { status: "stopped" };
   try {
@@ -983,6 +945,13 @@ export async function collectWorkerDoctorChecks(
 
   // 8. Dashboard port (warning only: the worker continues without it)
   if (config) checks.push(await dashboardPortCheck(config, workspaceEnv, worker, deps));
+
+  // 9. Notification delivery channels (warning only; never throws)
+  if (config) {
+    checks.push(
+      await notificationDoctorCheck(config, workspaceEnv, options, deps.notificationChannelDeps),
+    );
+  }
 
   return checks;
 }

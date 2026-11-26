@@ -2,12 +2,7 @@
  * The `worker doctor` entitlement row, shared by `worker init` (both modes).
  */
 
-import {
-  WORKER_PILOT_NOT_STARTED,
-  WORKER_PILOT_OFFER,
-  describePilotEnd,
-  signInHint,
-} from "../account/worker-pilot";
+import { WORKER_PILOT_NOT_STARTED, describePilotEnd, signInHint } from "../account/worker-pilot";
 import type { ReadinessCheck } from "./readiness";
 
 /** Minimal license result the entitlement check needs (subset of `LicenseCheckResult`). */
@@ -18,8 +13,52 @@ export interface WorkerEntitlementLike {
   trialAvailable?: boolean;
   /** Server-provided end of an active Worker Pilot (ISO 8601). */
   trialEndsAt?: string;
+  /** Underlying SKU of a paid entitlement or license key. */
+  entitlementSource?: string;
+  /** End of the offline grace window (ISO 8601), when source is `grace`. */
+  graceEndsAt?: string;
   /** Nothing is wrong except that nobody is signed in (see `LicenseCheckResult`). */
   signInRequired?: boolean;
+  /** No license was checked: `DEVINTERN_SKIP_LICENSE_CHECK=1` on a non-release build. */
+  skipped?: boolean;
+}
+
+/** Entitlement detail when the license check was skipped. */
+export const LICENSE_CHECK_SKIPPED_DETAIL =
+  "skipped (DEVINTERN_SKIP_LICENSE_CHECK=1; non-release build, no license was checked)";
+
+const SKU_NAMES: Record<string, string> = {
+  "solo-automation": "Supporter license",
+  "team-automation": "Team/Business license",
+};
+
+/** Product name from "Entitlement confirmed via <name>.", or the SKU's name. */
+function productName(license: WorkerEntitlementLike): string | undefined {
+  const match = /^Entitlement confirmed via (.+?)\.?$/.exec(license.message.trim());
+  const named = match?.[1];
+  if (named && named !== "your purchased license") return named;
+  return license.entitlementSource ? SKU_NAMES[license.entitlementSource] : undefined;
+}
+
+/** Human detail for a valid entitlement that is not a Worker Pilot. */
+function paidDetail(license: WorkerEntitlementLike): string {
+  const name = productName(license);
+  if (license.source === "license-key") {
+    const sku = license.entitlementSource ? SKU_NAMES[license.entitlementSource] : undefined;
+    return `LICENSE_KEY (${sku ?? "valid key"})`;
+  }
+  if (license.source === "entitlement") {
+    return `${name ?? "Purchased license"} (signed-in account)`;
+  }
+  if (license.source === "grace") {
+    const date = license.graceEndsAt ? Date.parse(license.graceEndsAt) : Number.NaN;
+    const until = Number.isFinite(date)
+      ? ` until ${new Date(date).toISOString().slice(0, 16).replace("T", " ")} UTC`
+      : "";
+    const sku = license.entitlementSource ? SKU_NAMES[license.entitlementSource] : undefined;
+    return `offline grace: cached ${sku ?? "entitlement"}${until}; the license server is unreachable`;
+  }
+  return license.message || license.source;
 }
 
 /**
@@ -35,11 +74,14 @@ export function entitlementCheck(
 ): ReadinessCheck {
   const base = { id: "entitlement", label: "Automation entitlement" } as const;
   if (license.valid) {
+    if (license.skipped) {
+      return { ...base, status: "ok", detail: LICENSE_CHECK_SKIPPED_DETAIL };
+    }
     if (license.trialAvailable) {
       return {
         ...base,
         status: "ok",
-        detail: `Worker Pilot: signed in; your ${WORKER_PILOT_OFFER} starts when the worker first starts`,
+        detail: `Worker Pilot available; it starts when the worker starts`,
       };
     }
     if (license.source === "trial") {
@@ -47,13 +89,15 @@ export function entitlementCheck(
       return {
         ...base,
         status: "ok",
-        detail: end ? `Worker Pilot active, ${end}` : `trial: ${license.message}`,
+        detail: end
+          ? `Worker Pilot, active until ${end.replace(/^ends /, "")}`
+          : `Worker Pilot active: ${license.message}`,
       };
     }
     return {
       ...base,
       status: "ok",
-      detail: `${license.source}${license.source === "grace" ? `: ${license.message}` : ""}`,
+      detail: paidDetail(license),
     };
   }
   if (license.signInRequired) {

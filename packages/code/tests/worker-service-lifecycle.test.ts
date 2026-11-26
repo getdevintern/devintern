@@ -15,6 +15,7 @@ import {
   resetShutdownState,
 } from "../src/lib/cli/shutdown-state";
 import { resolveWorkerStatus } from "../src/lib/observability/dashboard-api";
+import { RunStore } from "../src/lib/state/run-recorder";
 import { WorkerState } from "../src/lib/state/worker-state";
 import { workspaceDbPath, workspaceStateDir } from "../src/lib/workspace/paths";
 import { runWorkerReadCommand } from "../src/lib/worker/dashboard-read-cli";
@@ -563,9 +564,22 @@ describe("devintern worker service", () => {
     });
     expect(report.result).toBe("action_required");
     expect(serviceExitCode(report)).toBe(2);
+    // `command` is always runnable; the prose hint lives in `message`.
     expect(report.nextSteps.map((step) => step.command)).toEqual([
-      "Run `devintern worker login github`",
-      "devintern worker service install",
+      `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")} github --no-wait --json`,
+      `DEVINTERN_WORKSPACE_DIR=${workspaceDir} devintern worker service install --json`,
+    ]);
+    expect(report.nextSteps.map((step) => step.id)).toEqual(["sign-in", "service"]);
+    expect(report.nextSteps[0]?.message).toContain("sign in");
+    // Same check shape as `worker init --json`.
+    expect(report.checks).toEqual([
+      {
+        name: "entitlement",
+        label: "Automation entitlement",
+        status: "action",
+        message: "Not started",
+        hint: "Run `devintern worker login github`",
+      },
     ]);
     expect(commands.some((command) => command.includes("daemon-reload"))).toBe(false);
   });
@@ -586,6 +600,13 @@ describe("devintern worker service", () => {
     });
     expect(refused.result).toBe("refused");
     expect(serviceExitCode(refused)).toBe(1);
+    expect(refused.checks?.[0]).toMatchObject({ name: "harness", status: "fail" });
+    expect(refused.code).toBe("agent_missing");
+    // npm when it is on PATH, otherwise the standalone installer (never a bare npm on a Bun-only host).
+    expect([
+      "npm install -g @anthropic-ai/claude-code",
+      "curl -fsSL https://claude.ai/install.sh | bash",
+    ]).toContain(refused.nextSteps[0]?.command ?? "");
 
     const forced = await runServiceAction(baseArgs({ force: true }), {
       workspaceDir,
@@ -602,7 +623,7 @@ describe("devintern worker service", () => {
     expect(forced.result).toBe("failed");
     expect(serviceExitCode(forced)).toBe(1);
     expect(forced.nextSteps.map((step) => step.command)).toContain(
-      "devintern worker service restart",
+      "devintern worker service restart --json",
     );
   });
 
@@ -692,6 +713,59 @@ describe("devintern worker service", () => {
     expect(text).toContain("License check failed");
     expect(text).toContain("devintern worker service restart");
     expect(text).toContain("journalctl --user -u devintern-worker.service");
+  });
+
+  test("text status of a running service names an agent CLI that fails to start", async () => {
+    mkdirSync(workspaceStateDir(workspaceDir), { recursive: true });
+    const runs = new RunStore(workspaceDbPath(workspaceDir));
+    try {
+      const id = runs.createRun({ origin: "task", taskKey: "APP-1", harness: "claude-code" });
+      runs.finishRun(
+        id,
+        "deferred",
+        "agent_start: Claude Code (claude) could not start: exited with code 1 before producing output: Invalid API key",
+      );
+    } finally {
+      runs.close();
+    }
+    const { deps } = linuxService((args) =>
+      args.includes("show")
+        ? { status: 0, stdout: "ActiveState=active\nSubState=running\n", stderr: "" }
+        : undefined,
+    );
+    const lines: string[] = [];
+    const code = await runWorkerServiceCommand(["status"], {
+      workspaceDir,
+      service: deps,
+      log: (line) => lines.push(line),
+      error: (line) => lines.push(line),
+    });
+    expect(code).toBe(0);
+    const text = lines.join("\n");
+    expect(text).toContain("the agent CLI is failing to start");
+    expect(text).toContain("APP-1: retrying with backoff (1 attempt(s) so far)");
+    expect(text).toContain("Invalid API key");
+    expect(text).toContain("run `claude` once in a terminal to log in");
+
+    let out = "";
+    expect(
+      await runWorkerServiceCommand(["status", "--json"], {
+        workspaceDir,
+        service: deps,
+        write: (chunk) => (out += chunk),
+      }),
+    ).toBe(0);
+    const doc = JSON.parse(out);
+    expect(doc.agentStartFailures).toHaveLength(1);
+    expect(doc.agentStartFailures[0]).toMatchObject({ taskKey: "APP-1", state: "retrying" });
+    expect(doc.nextSteps).toEqual([
+      {
+        id: "agent-start",
+        message: expect.stringContaining("run `claude` once in a terminal to log in"),
+        command: "devintern worker status",
+        url: expect.stringContaining("worker-troubleshooting#the-agent-cli-fails-to-start"),
+      },
+    ]);
   });
 
   test("logs prints the journal", async () => {

@@ -70,6 +70,14 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: —
 - Last reviewed: 2026-11-17
 
+### Commit identity on a host without git config
+
+- Surface: task delivery (`git_author_*` setting, DevIntern fallback)
+- Status: `default`
+- Evidence: `tests/local/cli-git-delivery.test.ts` (`bun run --filter @devintern/e2e test`): the run gets no `GIT_AUTHOR_*`/`GIT_COMMITTER_*` and no global config, and the pushed commit carries the `DEVINTERN_GIT_AUTHOR_*` setting or the `DevIntern` fallback; no `user.*` is written to the checkout config
+- Missing: the `GITHUB_TOKEN`-derived identity against the real `GET /user` (unit-tested with a fake API)
+- Last reviewed: 2026-11-26
+
 ### `--estimate`
 
 - Surface: `devintern` command surface

@@ -183,9 +183,15 @@ remote = "git@github.com:acme/api.git"
       expect(result.nextSteps).toEqual([
         {
           id: "authorize-github-app",
+          message: expect.stringContaining("approves the DevIntern GitHub App"),
+          command: "https://github.com/apps/devintern-ai/installations/new?state=abc",
           url: "https://github.com/apps/devintern-ai/installations/new?state=abc",
         },
-        { id: "check-pairing", command: expect.stringContaining("github --status --json") },
+        {
+          id: "check-pairing",
+          message: expect.any(String),
+          command: expect.stringContaining("github --status --json"),
+        },
       ]);
       // Never polled: --no-wait returns right after the relay hands out the pairing.
       expect(relayCalls.some((call) => call.url.includes("/pairings/"))).toBe(false);
@@ -256,6 +262,46 @@ remote = "git@github.com:acme/api.git"
       expect(loadPendingGitHubPairing(workspaceDir)).toBeNull();
     });
 
+    test.each([
+      [401, "relay_unauthorized", "worker login"],
+      [403, "relay_unauthorized", "worker login"],
+      [500, "relay_unavailable", "Retry later"],
+      [503, "relay_unavailable", "Retry later"],
+    ])("--status reports HTTP %d as a failure, not pending", async (status, code, hint) => {
+      await run(["github", "--no-wait", "--json"]);
+      stdout.length = 0;
+      pairingStatus = { status, body: { error: "relay says no" } };
+
+      const exit = await run(["github", "--status", "--json"]);
+
+      expect(exit).toBe(1);
+      expect(doc()).toMatchObject({ result: "failure", code });
+      expect(doc().error).toContain(hint);
+      expect(doc().error).toContain(`HTTP ${status}`);
+      expect(loadPendingGitHubPairing(workspaceDir)).not.toBeNull();
+    });
+
+    test("--status pending text explains the App settings page case", async () => {
+      await run(["github", "--no-wait", "--json"]);
+      const logs: string[] = [];
+      console.log = (...values: unknown[]) => logs.push(values.join(" "));
+
+      expect(await run(["github", "--status"])).toBe(0);
+
+      expect(logs.join("\n")).toContain("settings page");
+      expect(logs.join("\n")).toContain("devintern worker connect github");
+    });
+
+    test("--no-wait prints the --status instruction once", async () => {
+      const logs: string[] = [];
+      console.log = (...values: unknown[]) => logs.push(values.join(" "));
+
+      await run(["github", "--no-wait"]);
+
+      const mentions = logs.filter((line) => line.includes("connect github --status"));
+      expect(mentions).toHaveLength(1);
+    });
+
     test("--status without a recorded pairing says how to start one", async () => {
       const code = await run(["github", "--status", "--json"]);
 
@@ -290,11 +336,14 @@ remote = "git@github.com:acme/api.git"
         result: "action_required",
       });
       expect(result.error).toContain("Not authenticated");
+      expect(result.code).toBe("not_signed_in");
       expect(result.nextSteps).toEqual([
         {
           id: "sign-in",
+          message: expect.stringContaining("Sign in first"),
+          // The same form as `worker init` and `worker doctor` print.
           command: expect.stringMatching(
-            /^devintern worker login <method> --no-wait --json --workspace /,
+            /^devintern worker login --workspace \S+ github --no-wait --json$/,
           ),
         },
       ]);

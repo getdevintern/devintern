@@ -4,7 +4,9 @@
  * Implements only the worker long-poll contract the relay acquirer
  * (`packages/code/src/lib/relay/acquirer.ts`) consumes:
  * `GET /v1/events?cursor=<n>` with `Authorization: Bearer <relay token>`,
- * answered with `{ events: RelayEnvelope[], cursor: number }`.
+ * answered with `{ events: RelayEnvelope[], cursor: number }`, plus the
+ * worker identity registration the worker makes at startup
+ * (`POST /v1/worker/register`, and the `GET /v1/status` read that follows).
  *
  * Envelopes are published by the test with a monotonically increasing `seq`;
  * a request returns every buffered envelope whose `seq` is greater than the
@@ -75,7 +77,28 @@ export interface FakeRelayOptions {
   token: string;
   /** Maximum time an empty long poll is held before answering. */
   holdMs?: number;
+  /**
+   * Answer a new worker identity with the buffer head (what the real relay
+   * does). Off by default: the identity then starts at 0, as if it had been
+   * registered by `worker connect` before the test published anything.
+   */
+  startAtHead?: boolean;
+  /** Answer `POST /v1/worker/register` with 404, like a relay without worker identities. */
+  legacy?: boolean;
 }
+
+/** One received `POST /v1/worker/register`. */
+export interface FakeRelayRegistration {
+  authorized: boolean;
+  label: string | null;
+  /** `workerId` the worker sent (its persisted identity), or null for a new one. */
+  workerId: string | null;
+  /** Start cursor the fake answered with. */
+  cursor: number;
+}
+
+/** Worker id the fake hands out. */
+export const FAKE_RELAY_WORKER_ID = `wkr_${"e2".repeat(16)}`;
 
 interface Hold {
   resolve: () => void;
@@ -85,8 +108,10 @@ interface Hold {
 /** Minimal relay `/v1/events` long-poll server bound to `127.0.0.1`. */
 export class FakeRelay {
   readonly requests: FakeRelayRequest[] = [];
-  /** Requests to any route other than `GET /v1/events`. */
+  /** Requests to any route other than the ones the worker is expected to call. */
   readonly unexpectedRequests: string[] = [];
+  /** Worker identity registrations received. */
+  readonly registrations: FakeRelayRegistration[] = [];
   readonly url: string;
 
   private readonly server: ReturnType<typeof Bun.serve>;
@@ -98,10 +123,15 @@ export class FakeRelay {
   private failuresRemaining = 0;
   private failureStatus = 503;
   private stopped = false;
+  private readonly startAtHead: boolean;
+  private readonly legacy: boolean;
+  private identityCursor: number | null = null;
 
   constructor(options: FakeRelayOptions) {
     this.token = options.token;
     this.holdMs = options.holdMs ?? 1_000;
+    this.startAtHead = options.startAtHead ?? false;
+    this.legacy = options.legacy ?? false;
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -215,8 +245,57 @@ export class FakeRelay {
     this.server.stop(true);
   }
 
+  private async handleRegister(request: Request): Promise<Response> {
+    const authorized = request.headers.get("authorization") === `Bearer ${this.token}`;
+    const body = (await request.json().catch(() => null)) as {
+      label?: unknown;
+      workerId?: unknown;
+    } | null;
+    const created = this.identityCursor === null;
+    this.identityCursor ??= this.startAtHead ? this.lastSeq : 0;
+    this.registrations.push({
+      authorized,
+      label: typeof body?.label === "string" ? body.label : null,
+      workerId: typeof body?.workerId === "string" ? body.workerId : null,
+      cursor: this.identityCursor,
+    });
+    if (!authorized) return Response.json({ error: "unauthorized" }, { status: 401 });
+    return Response.json({
+      customerId: "e2e-customer",
+      licenseSource: "e2e",
+      worker: {
+        workerId: FAKE_RELAY_WORKER_ID,
+        label: body?.label,
+        createdAt: 0,
+        lastSeenAt: Date.now(),
+      },
+      created,
+      // A new identity starts here; a known one is told the current head.
+      cursor: created ? this.identityCursor : this.lastSeq,
+      claimed: [],
+      conflicts: [],
+    });
+  }
+
   private async handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/v1/worker/register" && !this.legacy) {
+      return this.handleRegister(request);
+    }
+    if (request.method === "GET" && url.pathname === "/v1/status" && !this.legacy) {
+      return Response.json({
+        customerId: "e2e-customer",
+        licenseSource: "e2e",
+        buffered: this.envelopes.length,
+        registrations: [],
+        worker: { workerId: FAKE_RELAY_WORKER_ID, label: "e2e", lastSeenAt: Date.now() },
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/v1/worker/register") {
+      // A relay without worker identities: 404, which the worker tolerates.
+      this.registrations.push({ authorized: false, label: null, workerId: null, cursor: 0 });
+      return Response.json({ error: "not found" }, { status: 404 });
+    }
     if (request.method !== "GET" || url.pathname !== "/v1/events") {
       this.unexpectedRequests.push(`${request.method} ${url.pathname}`);
       return Response.json({ error: "not found" }, { status: 404 });

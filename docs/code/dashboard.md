@@ -61,6 +61,8 @@ Repeats of the same event share one row with a count such as **×88**, and the r
 - **Resolve** closes a row you have dealt with. Rows also resolve on their own when the problem goes away, for example when a later run of the same task succeeds. Turn on **Show resolved** to see them again.
 - **Mute** hides this row and every future notification from the same cause. Use it for a known, noisy problem you do not want to hear about. Muted groups are listed at the bottom of the inbox with **Unmute**.
 
+To get these on your desktop, in Slack, or at a webhook without keeping the dashboard open, see [Notifications](notifications.md).
+
 ## Why a run did not succeed
 
 A run that failed, escalated, or was abandoned has an outcome class. The runs list shows it as a badge with the cause underneath, and **Class** filters by it. Open the run for a banner with the class, the step that failed, its error, and where the unfinished work went.
@@ -153,11 +155,11 @@ Every read-only dashboard view is also a `devintern worker` subcommand. These co
 | `devintern worker automations`            | Automations with next and last run                                    |
 | `devintern worker prs`                    | PRs and MRs opened by the agent: open (default) or recently merged (`--state open\|merged`; `--limit N`, 1..500, default 50) |
 | `devintern worker queue`                  | Queued work that has not started                                      |
-| `devintern worker status`                 | Worker liveness, queue counts, poll cursors                           |
+| `devintern worker status`                 | Worker liveness, relay identity, queue counts, poll cursors           |
 | `devintern worker overview`               | Capacity, harness health, tracker freshness                           |
 | `devintern worker logs`                   | Recent worker log entries (`--lines N`, default 500; `--level`)       |
 
-With `--json`, a command prints exactly the body of the matching dashboard API route (for example `worker runs` matches `GET /api/runs`), so scripts that used `curl` can switch unchanged:
+With `--json`, a command prints exactly the body of the matching dashboard API route (for example `worker runs` matches `GET /api/runs`), so scripts that used `curl` can switch unchanged. `worker status --json` and `worker overview --json` also add `schema` (`devintern.worker-status`, `devintern.worker-overview`), `version` (1), and `result` (the worker's liveness, `worker.status`: for example `running` or `stopped`) in front of the body:
 
 ```bash
 devintern worker stats --window 7d --json | jq '.stats.successRate'

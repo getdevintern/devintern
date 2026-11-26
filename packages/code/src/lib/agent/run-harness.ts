@@ -58,6 +58,7 @@ import { harnessSpawnEnv } from "./spawn";
 import type { VerifyConfig } from "./verify";
 import { withImplementationSummary } from "./implementation-summary";
 import { readImplementationReport } from "./implementation-report";
+import { primeAgentCommitIdentity } from "../utils/git-identity";
 
 interface RunAgentHarnessOptions {
   taskFile: string;
@@ -128,6 +129,9 @@ export async function runAgentSession(
   const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
     displayName: harness.displayName,
   });
+  // A host without a git identity: agents get the one commits will use
+  // (`utils/git-identity.ts`), for commits they make themselves.
+  if (enableGit && !gitAuthor) await primeAgentCommitIdentity(process.cwd());
 
   return new Promise<AgentSessionResult>((resolve, reject) => {
     (async () => {

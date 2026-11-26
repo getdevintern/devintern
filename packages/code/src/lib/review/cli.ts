@@ -226,6 +226,8 @@ interface AutoMergeCommandArgs {
   expectedHeadSha?: string;
   dryRun: boolean;
   lastAttempt: boolean;
+  /** Worker-internal: the CI wait the PR already shows. */
+  ciWaitPosted?: string;
   verbose: boolean;
   policy: import("./auto-merge").AutoMergePolicy;
 }
@@ -234,6 +236,7 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log("Usage: devintern auto-merge <pr-url> [options]");
   console.log("");
   console.log("Merge a GitHub pull request when it is green, conflict-free, and safe:");
+  console.log("code PRs need at least one passing CI check (safe-path-only PRs do not);");
   console.log("PRs that only touch --safe-path globs merge without an agent run; other");
   console.log("PRs merge only when the agent's merge-safety review says so. A");
   console.log("--deny-path hit (or a built-in one such as .github/**) never merges, and a");
@@ -244,6 +247,9 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log("  --deny-path <glob>     Never-merge glob (repeatable)");
   console.log("  --review-path <glob>   Always-review glob, never safe (repeatable)");
   console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
+  console.log(
+    "  --require-checks       Code PRs need at least one passing CI check (failing or pending checks always block)",
+  );
   console.log("  --method <m>           merge | squash | rebase (default: squash)");
   console.log(
     "  --policy <p>           Review rubric: strict | standard | relaxed | custom (default: strict)",
@@ -384,10 +390,18 @@ function parseAutoMergeFlags(
       policy.rulesFile = resolveRulesFilePath(value, workspaceDir);
     } else if (arg === "--no-review") {
       policy.review = false;
+    } else if (arg === "--no-recheck-on-push") {
+      // Worker-internal: the PR is not re-checked after new commits (status comment wording).
+      policy.recheckOnPush = false;
+    } else if (arg === "--require-checks") {
+      policy.requireChecks = true;
     } else if (arg === "--no-review-label") {
       policy.reviewLabel = "";
     } else if (arg === "--dry-run") {
       parsed.dryRun = true;
+    } else if (arg.startsWith("--ci-wait-posted=")) {
+      // Worker-internal: the same CI wait is not re-posted to the PR.
+      parsed.ciWaitPosted = arg.slice("--ci-wait-posted=".length);
     } else if (arg === "--last-attempt") {
       // Worker-internal: a failure on this attempt is stated on the PR.
       parsed.lastAttempt = true;
@@ -435,7 +449,7 @@ function customRulesUsageError(policy: AutoMergeCommandArgs["policy"]): string |
 export async function runAutoMergeCommand(args: string[]): Promise<void> {
   const parsed = parseAutoMergeArgs(args, await import("./merge-gate"));
   if (!parsed) return;
-  const { prUrl, expectedHeadSha, dryRun, lastAttempt, verbose, policy } = parsed;
+  const { prUrl, expectedHeadSha, dryRun, lastAttempt, ciWaitPosted, verbose, policy } = parsed;
 
   if (!prUrl) {
     console.error("❌ Error: PR URL is required");
@@ -452,6 +466,7 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
       expectedHeadSha,
       dryRun,
       lastAttempt,
+      ...(ciWaitPosted ? { ciWaitPosted } : {}),
       verbose,
     });
     const resultFd = Number(process.env.DEVINTERN_RESULT_FD);

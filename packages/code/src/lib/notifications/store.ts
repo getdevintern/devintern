@@ -156,7 +156,7 @@ function parseLinksColumn(raw: string | undefined): NotificationLink[] {
 const CONTEXT = "notifications row";
 
 /** Map a raw row to a {@link Notification}; throws `RowParseError` on a malformed row. */
-function rowToNotification(value: unknown): Notification {
+export function rowToNotification(value: unknown): Notification {
   const row: RowRecord = parseRowObject(value, CONTEXT);
   const runId = optionalNumber(row, "run_id", CONTEXT);
   const repo = optionalString(row, "repo", CONTEXT);

@@ -20,6 +20,7 @@ import { dirname, join, resolve } from "path";
 import {
   createDefaultSupabaseAuthConfig,
   getAuthenticatedUser,
+  isLoginSkipped,
   login,
   requireAuthenticatedUser,
   resolveLogin,
@@ -40,16 +41,27 @@ import {
 } from "../code-host/github/app-setup";
 import { isPromptAbort } from "../cli/prompt-abort";
 import { resolveWizardPrompts } from "../cli/prompt-session";
-import { WORKER_PILOT_OFFER, signInCommand } from "../account/worker-pilot";
+import type { PromptSession } from "../cli/prompt-session";
+import { WORKER_PILOT_OFFER, signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
+import {
+  RECOMMENDED_WORKER_POLICY,
+  RECOMMENDED_WORKER_SETTINGS_SUMMARY,
+  askYesNo,
+  configureWorkerOperatingPolicy,
+  describeCustomWorkerSettings,
+} from "./worker-init-policy";
+import type { LogFn, PromptFn } from "./worker-init-policy";
+import { describeQueryFailure } from "./worker-init-query";
+import { readinessBlockers } from "./worker-init-readiness";
+import type { ReadinessBlocker } from "./worker-init-readiness";
 import { renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
 import { trackerRequiredEnv } from "../trackers/manager";
 import { runTrackerSetup } from "./wizard";
 import { PRManager } from "../code-host/index";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
-import { parseCronOrIntervalSchedule } from "../automation/config";
+import { Utils } from "../utils";
 import { writeSecretFile } from "../utils/secret-file";
-import { isValidTimeZone, parseTimeWindowSpec } from "../worker/schedule";
 import {
   TRACKER_CAPABILITIES,
   supportsPolling,
@@ -63,6 +75,7 @@ import {
 import { loadWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import { gitHubSlugFromRemote } from "../workspace/env";
+import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import {
   ensureWorkspaceCodeState,
   resolveWorkspaceDir,
@@ -91,12 +104,23 @@ import type {
 } from "../worker/service";
 import { installAndStartWorkerService } from "../worker/service-control";
 import type { StartCheck } from "../worker/service-control";
-import { SERVICE_RESTART_COMMAND, renderStartCheck } from "../worker/service-report";
+import {
+  SERVICE_RESTART_COMMAND,
+  dashboardUrlFor,
+  renderStartCheck,
+} from "../worker/service-report";
 
 export { renderLaunchdPlist, renderSystemdUnit } from "../worker/service";
 
-export type PromptFn = (question: string) => Promise<string>;
-export type LogFn = (message: string) => void;
+export type { LogFn, PromptFn } from "./worker-init-policy";
+export { describeQueryFailure } from "./worker-init-query";
+export {
+  RECOMMENDED_WORKER_POLICY,
+  RECOMMENDED_WORKER_SETTINGS_SUMMARY,
+  askYesNo,
+  configureWorkerOperatingPolicy,
+  describeCustomWorkerSettings,
+} from "./worker-init-policy";
 
 /** Env keys the worker wizard used to own in `.devintern-code/.env`. */
 export const WORKER_ENV_KEYS = [
@@ -153,6 +177,8 @@ export interface WorkerInitResult {
   ok: boolean;
   /** No failing readiness check (or license problem) is left after setup. */
   ready?: boolean;
+  /** Not ready, but only signing in remains (no failing check): exit code 2. */
+  signInOnly?: boolean;
 }
 
 export interface WorkerInitDeps {
@@ -252,6 +278,10 @@ interface InitContext {
   log: LogFn;
   prompt: PromptFn;
   promptSecret: PromptFn;
+  /** Turns Ctrl+C during a browser sign-in wait into a prompt abort. */
+  guard: PromptSession["guard"];
+  /** The user declined (or skipped) sign-in earlier in this run; do not ask again. */
+  signInDeclined?: boolean;
 }
 
 type GitHubAppOutcome = "connected" | "existing" | "skipped" | "unavailable";
@@ -283,165 +313,6 @@ interface ServiceRuntime {
   deps: WorkerServiceDeps;
 }
 
-/**
- * Ask a yes/no question until the answer is y/yes, n/no, or empty (the
- * default). Anything else re-asks instead of being read as either answer.
- */
-export async function askYesNo(
-  ctx: { prompt: PromptFn; log: LogFn },
-  question: string,
-  fallback: boolean,
-): Promise<boolean> {
-  for (;;) {
-    const answer = (await ctx.prompt(question)).trim().toLowerCase();
-    if (!answer) return fallback;
-    if (answer === "y" || answer === "yes") return true;
-    if (answer === "n" || answer === "no") return false;
-    ctx.log("   Enter y or n.");
-  }
-}
-
-/** Prompt for the conflict-resolution mode and, when scheduled, its cadence. */
-async function promptConflictPolicy(
-  ctx: { workspaceDir: string; prompt: PromptFn; log: LogFn },
-  current: WorkspaceConfig,
-): Promise<{
-  conflictResolution: WorkspaceConfig["workspace"]["conflictResolution"];
-  conflictResolutionCron?: string;
-  conflictResolutionInterval?: string;
-}> {
-  let conflictResolution = current.workspace.conflictResolution;
-  for (;;) {
-    const answer = (
-      await ctx.prompt(
-        `Conflict handling [auto/scheduled/disabled] [${current.workspace.conflictResolution}]: `,
-      )
-    )
-      .trim()
-      .toLowerCase();
-    if (!answer) break;
-    if (answer === "auto" || answer === "scheduled" || answer === "disabled") {
-      conflictResolution = answer;
-      break;
-    }
-    ctx.log("   Choose auto, scheduled, or disabled.");
-  }
-
-  let conflictResolutionCron: string | undefined;
-  let conflictResolutionInterval: string | undefined;
-  if (conflictResolution === "scheduled") {
-    const existingSchedule =
-      current.workspace.conflictSchedule?.cron ??
-      current.workspace.conflictSchedule?.interval ??
-      "0 3 * * *";
-    for (;;) {
-      const value =
-        (
-          await ctx.prompt(
-            `Conflict-resolution schedule (cron or interval) [${existingSchedule}]: `,
-          )
-        ).trim() || existingSchedule;
-      const errors: string[] = [];
-      const isCron = value.split(/\s+/).length > 1;
-      const parsed = parseCronOrIntervalSchedule(
-        isCron ? { cron: value } : { interval: value },
-        { label: "Conflict schedule" },
-        errors,
-      );
-      if (parsed) {
-        conflictResolutionCron = parsed.cron;
-        conflictResolutionInterval = parsed.interval;
-        break;
-      }
-      ctx.log(`   ${errors.join(" ")}`);
-    }
-  }
-
-  return { conflictResolution, conflictResolutionCron, conflictResolutionInterval };
-}
-
-/** Prompt for active-hours windows and timezone. */
-async function promptActiveSchedule(
-  ctx: { workspaceDir: string; prompt: PromptFn; log: LogFn },
-  currentSchedule: WorkspaceConfig["worker"]["schedule"],
-): Promise<{ activeWindows: string[]; blockedWindows: string[]; timezone: string }> {
-  const existingWindows =
-    currentSchedule?.active.map((window) => window.spec).join(",") || "22:00-06:00";
-  let activeWindows: string[] = [];
-  for (;;) {
-    activeWindows = (
-      (await ctx.prompt(`Active windows, comma-separated [${existingWindows}]: `)).trim() ||
-      existingWindows
-    )
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean);
-    try {
-      activeWindows.forEach(parseTimeWindowSpec);
-      break;
-    } catch (error) {
-      ctx.log(`   ${(error as Error).message}`);
-    }
-  }
-
-  const blockedWindows = currentSchedule?.blocked.map((window) => window.spec) ?? [];
-  const existingTimezone = currentSchedule?.timezone ?? "";
-  let timezone = "";
-  for (;;) {
-    timezone =
-      (await ctx.prompt(`Timezone [${existingTimezone || "worker machine local"}]: `)).trim() ||
-      existingTimezone;
-    if (!timezone || isValidTimeZone(timezone)) break;
-    ctx.log(`   "${timezone}" is not a valid IANA timezone.`);
-  }
-
-  return { activeWindows, blockedWindows, timezone };
-}
-
-export async function configureWorkerOperatingPolicy(ctx: {
-  workspaceDir: string;
-  prompt: PromptFn;
-  log: LogFn;
-}): Promise<void> {
-  const current = loadWorkspaceConfig(workspaceConfigPath(ctx.workspaceDir));
-  const yesNo = (question: string, fallback: boolean) => askYesNo(ctx, question, fallback);
-
-  const ciFailureFix = await yesNo(
-    `Automatically repair failing CI on worker-created PRs? [${current.workspace.ciFailureFix ? "Y/n" : "y/N"}]: `,
-    current.workspace.ciFailureFix,
-  );
-
-  const { conflictResolution, conflictResolutionCron, conflictResolutionInterval } =
-    await promptConflictPolicy(ctx, current);
-
-  const currentSchedule = current.worker.schedule;
-  const limitPickup = await yesNo(
-    `Limit new-task pickup to active hours? [${currentSchedule ? "Y/n" : "y/N"}]: `,
-    currentSchedule !== null,
-  );
-  let activeWindows: string[] = [];
-  let blockedWindows: string[] = [];
-  let timezone = "";
-  if (limitPickup) {
-    ({ activeWindows, blockedWindows, timezone } = await promptActiveSchedule(
-      ctx,
-      currentSchedule,
-    ));
-  }
-
-  writeWorkerOperatingPolicy(ctx.workspaceDir, {
-    ciFailureFix,
-    conflictResolution,
-    conflictResolutionCron,
-    conflictResolutionInterval,
-    activeWindows,
-    blockedWindows,
-    timezone,
-    catchUpMissed: currentSchedule?.catchUpMissed ?? true,
-  });
-  ctx.log("💾 Wrote worker operating policy to workspace.toml.");
-}
-
 function applyEnvFile(envPath: string): Record<string, string> {
   if (!existsSync(envPath)) {
     return {};
@@ -454,6 +325,13 @@ function applyEnvFile(envPath: string): Record<string, string> {
     }
   }
   return env;
+}
+
+/** `owner/repo` of the checkout's GitHub `origin`, or null (no origin, not GitHub). */
+async function originGitHubSlug(cwd: string): Promise<string | null> {
+  const result = await Utils.executeGitCommand(["remote", "get-url", "origin"], { cwd });
+  const remote = result.success ? result.output.trim() : "";
+  return remote ? gitHubSlugFromRemote(remote) : null;
 }
 
 export async function defaultEnsureTracker(
@@ -492,9 +370,18 @@ export async function defaultEnsureTracker(
     return configured.toLowerCase();
   }
 
+  // `devintern init` saved this checkout's tracker in its own env file
+  // (`~/.devintern/env/<repo>.env`). The worker polls with the workspace
+  // `.env`, so copy those settings there instead of asking for them again.
+  const reused = await reuseCheckoutTrackerEnv(cwd, workspaceDir, sharedEnvPath, log);
+  if (reused) return reused;
+
   log("   No tracker config yet — running that subset of `devintern init`.");
+  const originSlug = await originGitHubSlug(cwd);
   const result = await runTrackerSetup(prompt, log, defaultProbe, cwd, {
     promptSecret,
+    envLabel: sharedEnvPath,
+    stepDefaults: originSlug ? { GITHUB_REPO: originSlug } : undefined,
     writeEnv: async (envContent) => {
       mergeIntoSharedEnv(sharedEnvPath, envContent, log);
       return sharedEnvPath;
@@ -505,6 +392,39 @@ export async function defaultEnsureTracker(
   }
   applyEnvFile(sharedEnvPath);
   return result.trackerId;
+}
+
+/**
+ * Reuse the tracker settings `devintern init` saved for the checkout at `cwd`
+ * (its `[[repos]]` entry's `env_file`): when they name a tracker and hold its
+ * required keys, merge them into the workspace `.env` and apply them.
+ *
+ * @returns The tracker id, or null when the checkout has no usable settings
+ */
+async function reuseCheckoutTrackerEnv(
+  cwd: string,
+  workspaceDir: string,
+  sharedEnvPath: string,
+  log: LogFn,
+): Promise<string | null> {
+  let envFile: string | undefined;
+  try {
+    envFile = (await findWorkspaceRepoForCheckout({ cwd, workspaceDir }))?.repo.envFile;
+  } catch {
+    return null;
+  }
+  if (!envFile) return null;
+  const envPath = resolve(workspaceDir, envFile);
+  if (!existsSync(envPath)) return null;
+  const content = readFileSync(envPath, "utf8");
+  const env = parseEnvContent(content);
+  const tracker = env.TASK_TRACKER?.toLowerCase();
+  if (!tracker || !trackerRequiredEnv(tracker).every((key) => env[key])) return null;
+  const name = TRACKER_CAPABILITIES[tracker]?.displayName ?? tracker;
+  log(`   Using ${name} from ${envPath} (saved by \`devintern init\`).`);
+  mergeIntoSharedEnv(sharedEnvPath, content, log);
+  applyEnvFile(sharedEnvPath);
+  return tracker;
 }
 
 /**
@@ -581,7 +501,39 @@ async function defaultSignIn(
   workspaceDir?: string,
 ): Promise<InitUserLike | null> {
   const resolved = await resolveLogin(process.argv);
-  return login(projectAuthConfig(projectRoot, workspaceDir), resolved);
+  return login(projectAuthConfig(projectRoot, workspaceDir), resolved, {
+    skipCommand: workerSignInCommand(workspaceDir),
+  });
+}
+
+/** `devintern worker login github`, with `--workspace` for a non-default workspace. */
+function workerSignInCommand(workspaceDir?: string): string {
+  return signInCommand(
+    workspaceDir ? workerLoginCommandFor(workspaceConfigPath(workspaceDir)) : undefined,
+  );
+}
+
+/**
+ * Run the sign-in flow once. Ctrl+C stops setup (rethrown); a skipped or
+ * failed sign-in is reported and returns null.
+ */
+async function signInOnce(ctx: InitContext, workspaceDir: string): Promise<InitUserLike | null> {
+  const signIn = ctx.deps.signIn ?? defaultSignIn;
+  try {
+    const user = await ctx.guard(signIn(ctx.projectRoot, workspaceDir));
+    if (user) ctx.log(`✅ Signed in as ${user.email || user.id}.`);
+    else ctx.signInDeclined = true;
+    return user;
+  } catch (error) {
+    if (isPromptAbort(error)) throw error;
+    ctx.signInDeclined = true;
+    if (isLoginSkipped(error)) {
+      ctx.log(`⏭️  Sign-in skipped. Sign in later with \`${workerSignInCommand(workspaceDir)}\`.`);
+    } else {
+      ctx.log(`⚠️  Sign-in failed: ${(error as Error).message}`);
+    }
+    return null;
+  }
 }
 
 async function detectGitHubRepo(): Promise<string | null> {
@@ -799,7 +751,17 @@ async function promptReadyQuery(
       }
       break;
     } catch (error) {
-      ctx.log(`❌ Query failed against ${trackerName}: ${(error as Error).message}`);
+      const failure = describeQueryFailure((error as Error).message, process.env.GITHUB_REPO);
+      if (failure.access) {
+        // Not the query's fault: editing it cannot help.
+        ctx.log(`❌ ${failure.text}`);
+        ctx.log(
+          `   Keeping the query. Fix the token or GITHUB_REPO in ${workspaceEnvPath(resolveWorkspaceDir())}, ` +
+            "then check with `devintern worker doctor`.",
+        );
+        break;
+      }
+      ctx.log(`❌ Query failed against ${trackerName}: ${failure.text}`);
       if (!(await askYesNo(ctx, "Edit the query and try again? [Y/n]: ", true))) {
         ctx.log("   Keeping the query as entered; fix it later in workspace.toml.");
         break;
@@ -809,13 +771,54 @@ async function promptReadyQuery(
   return query;
 }
 
-/** Step 5: opt-in Sentry auto-fix project for the first workspace repo. */
+/**
+ * Step 4: worker settings. One question accepts the recommended settings (or
+ * keeps customized ones); "n" walks through CI repair, conflict handling,
+ * active hours, and Sentry one by one.
+ */
+async function runWorkerSettingsStep(
+  ctx: InitContext,
+  workspaceDir: string,
+  repoName: string | undefined,
+): Promise<void> {
+  ctx.log("\n4️⃣  Worker settings");
+  const current = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+  const custom = describeCustomWorkerSettings(current);
+  const question = custom
+    ? `Keep the current worker settings (${custom})? [Y/n]: `
+    : `Use the recommended worker settings (${RECOMMENDED_WORKER_SETTINGS_SUMMARY})? [Y/n]: `;
+  if (await askYesNo(ctx, question, true)) {
+    if (!custom) {
+      writeWorkerOperatingPolicy(workspaceDir, { ...RECOMMENDED_WORKER_POLICY, activeWindows: [] });
+      ctx.log("💾 Wrote the recommended worker settings to workspace.toml.");
+    } else {
+      ctx.log("   Kept the current worker settings.");
+    }
+    ctx.log(
+      "   Change them later in workspace.toml, or re-run `devintern worker init` and answer n.",
+    );
+    return;
+  }
+
+  ctx.log("   Choose when new tasks run and how the worker maintains its pull requests.");
+  await (ctx.deps.configureOperatingPolicy ?? configureWorkerOperatingPolicy)({
+    workspaceDir,
+    prompt: ctx.prompt,
+    log: ctx.log,
+  });
+
+  // Optional production-error source. Tracker tasks remain the worker's
+  // primary input; this adds a repo-pinned Sentry project alongside them.
+  await runSentryStep(ctx, workspaceDir, repoName);
+}
+
+/** Step 4b: opt-in Sentry auto-fix project for the first workspace repo. */
 async function runSentryStep(
   ctx: InitContext,
   workspaceDir: string,
   repoName: string | undefined,
 ): Promise<void> {
-  ctx.log("\n5️⃣  Sentry auto-fixes (optional)");
+  ctx.log("\n   Sentry auto-fixes (optional)");
   ctx.log("   Watch recurring production errors and run fixes through the normal PR pipeline.");
   if (
     await askYesNo(
@@ -848,25 +851,28 @@ async function runLicenseStep(
   workspaceDir: string,
 ): Promise<string | null | undefined> {
   if (!ctx.deps.checkAutomationLicense) return undefined;
-  ctx.log("\n6️⃣  Checking your automation license (the worker runs unattended)...");
+  ctx.log("\n5️⃣  Worker Pilot or license (the worker runs unattended)...");
   try {
     let failure = await ctx.deps.checkAutomationLicense(workspaceDir);
     if (failure === null) {
       ctx.log("✅ Automation license OK.");
     } else {
-      ctx.log(`⚠️  ${failure}`);
-      if (await askYesNo(ctx, `Sign in now to start your ${WORKER_PILOT_OFFER}? [Y/n]: `, true)) {
-        try {
-          const signIn = ctx.deps.signIn ?? defaultSignIn;
-          const user = await signIn(ctx.projectRoot, workspaceDir);
-          if (user) {
-            ctx.log(`✅ Signed in as ${user.email || user.id}.`);
-            failure = await ctx.deps.checkAutomationLicense(workspaceDir);
-          }
-        } catch (error) {
-          if (isPromptAbort(error)) throw error;
-          ctx.log(`⚠️  Sign-in failed: ${(error as Error).message}`);
-        }
+      const signedIn = await currentUser(ctx, workspaceDir);
+      if (signedIn || process.env.LICENSE_KEY) {
+        // Signed in (Pilot used or not granted) or a key that did not
+        // validate: the license check's own words explain it best.
+        ctx.log(`⚠️  ${failure}`);
+      } else {
+        ctx.log(`   The worker needs the ${WORKER_PILOT_OFFER} (or a paid license).`);
+      }
+      const offer = signedIn
+        ? false
+        : await askYesNo(ctx, "Sign in now to start the Worker Pilot? [Y/n]: ", true);
+      if (offer) {
+        const user = await signInOnce(ctx, workspaceDir);
+        if (user) failure = await ctx.deps.checkAutomationLicense(workspaceDir);
+      } else if (!signedIn) {
+        ctx.signInDeclined = true;
       }
       if (failure === null) {
         ctx.log(
@@ -874,9 +880,11 @@ async function runLicenseStep(
         );
       } else {
         ctx.log("   The worker will not start until this is done:");
-        ctx.log(`   run \`${signInCommand()}\` to begin your ${WORKER_PILOT_OFFER},`);
         ctx.log(
-          "   or get an automation license at https://devintern.com/pricing and set LICENSE_KEY in the workspace .env.",
+          `   run \`${workerSignInCommand(workspaceDir)}\` to begin your ${WORKER_PILOT_OFFER},`,
+        );
+        ctx.log(
+          "   or, with a paid license, set LICENSE_KEY in the workspace .env (https://devintern.com/pricing).",
         );
       }
     }
@@ -901,33 +909,29 @@ async function resolveRelayUser(
   ctx: InitContext,
   workspaceDir: string,
 ): Promise<InitUserLike | null> {
-  const getUser = ctx.deps.getUser ?? defaultGetUser;
-  const signIn = ctx.deps.signIn ?? defaultSignIn;
-  let user: InitUserLike | null = null;
-  try {
-    user = await getUser(ctx.projectRoot, workspaceDir);
-  } catch {
-    user = null;
-  }
-
+  const user = await currentUser(ctx, workspaceDir);
   if (user) {
     ctx.log(`   Signed in as ${user.email || user.id}.`);
     return user;
   }
+  // The user just said no to signing in; asking again for the relay would
+  // only repeat the question.
+  if (ctx.signInDeclined) return null;
 
   if (!(await askYesNo(ctx, "Sign in now to connect the relay? [Y/n]: ", true))) {
     return null;
   }
+  return signInOnce(ctx, workspaceDir);
+}
+
+/** The signed-in user for the workspace, or null (lookup errors count as signed out). */
+async function currentUser(ctx: InitContext, workspaceDir: string): Promise<InitUserLike | null> {
+  const getUser = ctx.deps.getUser ?? defaultGetUser;
   try {
-    user = await signIn(ctx.projectRoot, workspaceDir);
-    if (user) {
-      ctx.log(`✅ Signed in as ${user.email || user.id}.`);
-    }
-  } catch (error) {
-    if (isPromptAbort(error)) throw error;
-    ctx.log(`⚠️  Sign-in failed: ${(error as Error).message}`);
+    return await getUser(ctx.projectRoot, workspaceDir);
+  } catch {
+    return null;
   }
-  return user;
 }
 
 /**
@@ -941,7 +945,7 @@ async function runRelayStep(
 ): Promise<{ relayConnected: boolean; relayConnect: RelayConnectOutcome }> {
   let relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
   let relayConnect: RelayConnectOutcome = "skipped";
-  ctx.log("\n7️⃣  Instant events (optional; polling always stays on)");
+  ctx.log("\n6️⃣  Instant events (optional; polling always stays on)");
   if (
     !(await askYesNo(
       ctx,
@@ -956,7 +960,8 @@ async function runRelayStep(
   const user = await resolveRelayUser(ctx, workspaceDir);
   if (!user) {
     ctx.log(
-      "   Relay skipped. Run `devintern worker login`, then re-run `devintern worker init` later.",
+      `   Relay needs sign-in; skipped. Later: \`${workerSignInCommand(workspaceDir)}\`, ` +
+        "then `devintern worker connect`.",
     );
     return { relayConnected, relayConnect };
   }
@@ -990,7 +995,7 @@ async function runRelayStep(
 
 /** No-relay path: only a customer-owned App can deliver @mentions. */
 function runNoRelayGitHubAppStep(ctx: InitContext, githubRepo: string): GitHubAppOutcome {
-  ctx.log(`\n8️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
+  ctx.log(`\n7️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
   if (hasGitHubAppCredentials()) {
     ctx.log("✅ Customer-owned GitHub App credentials found in the environment.");
     ctx.log("   The worker will use that App for polling, @mentions, and GitHub API calls.");
@@ -1009,7 +1014,7 @@ function runRelayGitHubAppStep(
   workspaceDir: string,
   githubRepo: string,
 ): GitHubAppOutcome {
-  ctx.log(`\n8️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
+  ctx.log(`\n7️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
   ctx.log("   The central App delivers events through the relay; your GITHUB_TOKEN remains local");
   ctx.log("   and handles GitHub API reads/writes. No App ID or private key is needed here.");
   ctx.log("   @devintern-ai mentions on any PR then react through the relay in seconds.");
@@ -1050,7 +1055,7 @@ async function runGitHubAppStep(
   }
 
   if (!githubRepo) {
-    ctx.log("\n8️⃣  GitHub App (@mentions)");
+    ctx.log("\n7️⃣  GitHub App (@mentions)");
     ctx.log("   No GitHub remote detected; skipping the GitHub App step.");
     return "unavailable";
   }
@@ -1199,7 +1204,7 @@ async function runServiceStep(
   workspaceDir: string,
   blockers: ReadinessBlocker[],
 ): Promise<ServiceStepResult> {
-  ctx.log("\n9️⃣  Background service (optional)");
+  ctx.log("\n8️⃣  Background service (optional)");
   const platform = ctx.deps.platform ?? process.platform;
   const writeFile = ctx.deps.writeFile ?? ((path, content) => writeFileSync(path, content, "utf8"));
   const execPath = ctx.deps.execPath ?? (process.argv[1] ? resolve(process.argv[1]) : "devintern");
@@ -1275,41 +1280,6 @@ async function runServiceStep(
   }
   return installServiceStep(ctx, workspaceDir, runtime, printManual);
 }
-/**
- * What still keeps the worker from running, one line each: the failing
- * readiness checks when they ran, otherwise the license step's result.
- *
- * @param checks - `worker doctor` checks, or undefined when they did not run
- * @param licenseFailure - License step outcome (null when entitled)
- */
-export function readinessBlockers(
-  checks: ReadinessCheck[] | undefined,
-  licenseFailure: string | null | undefined,
-): ReadinessBlocker[] {
-  if (checks) {
-    return checks
-      .filter((check) => check.status === "fail" || check.status === "action")
-      .map((check) => ({
-        text: `${check.label}: ${check.hint ?? check.detail ?? "see the check above"}`,
-        action: check.status === "action",
-      }));
-  }
-  if (licenseFailure) {
-    return [
-      {
-        text: `Automation entitlement: run \`${signInCommand()}\` to begin your ${WORKER_PILOT_OFFER}, or set LICENSE_KEY in the workspace .env`,
-        action: false,
-      },
-    ];
-  }
-  return [];
-}
-
-/** Something that keeps the worker from starting; `action` is a step, not a failure. */
-export interface ReadinessBlocker {
-  text: string;
-  action: boolean;
-}
 
 /** Run the `worker doctor` checks and print them; undefined when they cannot run. */
 async function logReadiness(
@@ -1338,6 +1308,7 @@ function logWorkerNextSteps(
     githubAppOutcome: GitHubAppOutcome;
     relayConnected: boolean;
     blockers: ReadinessBlocker[];
+    dashboardUrl?: string | null;
   },
 ): void {
   const { serviceRunning, serviceInstalled, githubAppOutcome, relayConnected, blockers } = outcome;
@@ -1370,7 +1341,7 @@ function logWorkerNextSteps(
     } else {
       ctx.log("   1. Run `devintern worker`.");
     }
-    ctx.log("   2. Open http://localhost:4400 to see worker status and runs.");
+    ctx.log(`   2. Open ${outcome.dashboardUrl ?? "the dashboard"} to see worker status and runs.`);
     ctx.log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
   }
   if (githubAppOutcome !== "skipped") return;
@@ -1404,12 +1375,22 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
 
   const session = await resolveWizardPrompts(deps);
   const { prompt, promptSecret } = session;
+  // Set once the workspace is written: what a stopped setup leaves behind.
+  let savedWorkspaceDir: string | undefined;
 
   try {
     log("👷 Setting up the unattended devintern worker.");
     trackWorkerInitStarted();
 
-    const ctx: InitContext = { deps, cwd, projectRoot, log, prompt, promptSecret };
+    const ctx: InitContext = {
+      deps,
+      cwd,
+      projectRoot,
+      log,
+      prompt,
+      promptSecret,
+      guard: session.guard,
+    };
 
     // 1. Reuse tracker config from `devintern init`, or run that subset.
     const tracker = await resolveWorkerTracker(ctx);
@@ -1420,6 +1401,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     const workspace = await bootstrapWorkerWorkspace(ctx, tracker.trackerType);
     if (!workspace) return abort;
     const { workspaceDir, repoName } = workspace;
+    savedWorkspaceDir = workspaceDir;
 
     ensureWorkspaceCodeState(workspaceDir);
 
@@ -1444,28 +1426,19 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     writeWorkspaceDefaults(workspaceDir, { tracker: tracker.trackerType, taskQuery: query });
     log(`💾 Wrote [defaults].task_query to ${join(workspaceDir, "workspace.toml")}`);
 
-    // 4. Make consequential unattended behavior explicit instead of silently
-    // accepting token-spending defaults.
-    log("\n4️⃣  Worker operating policy");
-    log("   Choose when new tasks run and how the worker maintains its pull requests.");
-    await (deps.configureOperatingPolicy ?? configureWorkerOperatingPolicy)({
-      workspaceDir,
-      prompt,
-      log,
-    });
+    // 4. Worker settings: the recommended ones in one answer, or CI repair,
+    // conflicts, active hours, and Sentry one by one. Either way the choice
+    // is written explicitly instead of silently accepting defaults.
+    await runWorkerSettingsStep(ctx, workspaceDir, repoName);
 
-    // 5. Optional production-error source. Tracker tasks remain the worker's
-    // primary input; this adds a repo-pinned Sentry project alongside them.
-    await runSentryStep(ctx, workspaceDir, repoName);
-
-    // 6. Automation license — any SKU; do not special-case workspace.
+    // 5. Automation license — any SKU; do not special-case workspace.
     const licenseFailure = await runLicenseStep(ctx, workspaceDir);
 
-    // 7. Relay: polling remains the correctness layer, while a signed-in
+    // 6. Relay: polling remains the correctness layer, while a signed-in
     // worker can receive GitHub/tracker envelopes within seconds.
     const relay = await runRelayStep(ctx, workspaceDir, tracker.trackerType);
 
-    // 8. GitHub App: relay-backed workspaces install the central App and keep
+    // 7. GitHub App: relay-backed workspaces install the central App and keep
     // GitHub API access local through GITHUB_TOKEN. A customer-owned App is an
     // advanced, no-relay path for air-gapped/direct installations only.
     const githubAppOutcome = await runGitHubAppStep(ctx, workspaceDir, relay.relayConnected);
@@ -1476,10 +1449,11 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     const checks = await logReadiness(ctx, workspaceDir);
     const blockers = readinessBlockers(checks, licenseFailure);
 
-    // 9. Offer to install and launch the native user service.
+    // 8. Offer to install and launch the native user service.
     const service = await runServiceStep(ctx, workspaceDir, blockers);
 
     logWorkerNextSteps(ctx, {
+      dashboardUrl: dashboardUrlFor(workspaceDir),
       serviceRunning: service.serviceRunning,
       serviceInstalled: service.serviceInstalled === true,
       githubAppOutcome,
@@ -1493,7 +1467,19 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       serviceInstall: service.serviceInstall,
       githubApp: githubAppOutcome,
     });
-    return { ok: true, ready: blockers.length === 0 };
+    return {
+      ok: true,
+      ready: blockers.length === 0,
+      signInOnly: blockers.length > 0 && blockers.every((blocker) => blocker.action),
+    };
+  } catch (error) {
+    if (isPromptAbort(error) && savedWorkspaceDir) {
+      log(
+        `\n⏸️  Setup paused. Your answers so far are saved in ${workspaceConfigPath(savedWorkspaceDir)}; ` +
+          "run `devintern worker init` to continue (it offers them as defaults).",
+      );
+    }
+    throw error;
   } finally {
     session.close();
   }

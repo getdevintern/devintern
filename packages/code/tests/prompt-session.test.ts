@@ -95,4 +95,32 @@ describe("createPromptSession", () => {
     expect(idle).toBe(1);
     session.close();
   });
+
+  test("Ctrl+C during guarded work (a sign-in wait) rejects it as an interrupt", async () => {
+    const term = fakeTerminal();
+    let idle = 0;
+    const session = await createPromptSession({
+      input: term.input,
+      output: term.output,
+      onIdleInterrupt: () => idle++,
+    });
+    const waiting = session.guard(new Promise<string>(() => {}));
+    term.input.write("\x03");
+    const error = await waiting.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(isPromptInterrupt(error)).toBe(true);
+    expect(idle).toBe(0);
+  });
+
+  test("guarded work that settles first passes its result through", async () => {
+    const term = fakeTerminal();
+    const session = await createPromptSession({ input: term.input, output: term.output });
+    try {
+      expect(await session.guard(Promise.resolve("done"))).toBe("done");
+    } finally {
+      session.close();
+    }
+  });
 });

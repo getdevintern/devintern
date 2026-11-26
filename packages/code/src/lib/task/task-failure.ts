@@ -5,6 +5,11 @@
 import { UsageLimitError } from "@devintern/agent-harness";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { adoptAgentCreatedChangeRequest } from "../agent/adopt-change-request";
+import {
+  AGENT_START_STAGE,
+  agentStartMaxAttempts,
+  agentStartReason,
+} from "../agent/agent-start-failure";
 import { HarnessUnavailableError } from "../agent/harness-startup";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
 import { isWorkerTaskProcess, runContext } from "../cli/context";
@@ -13,10 +18,12 @@ import {
   getTodoStatusForProject,
   loadProjectSettings,
 } from "../config/project-settings";
+import { readAgentStartFailureStreak } from "../observability/agent-start-health";
 import { flushAnalytics, trackInteractiveTaskRun } from "../observability/analytics";
-import { failureFromError } from "../state/run-outcome";
+import { failureFromError, formatFailureCause } from "../state/run-outcome";
 import { currentRunStep, getActiveRunContext } from "../state/run-recorder";
 import { finishTaskRun } from "../state/task-run";
+import { resolveQueueDbPath } from "../state/webhook-queue";
 import {
   HARNESS_UNAVAILABLE_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
@@ -85,8 +92,38 @@ export async function handleTaskFailure(error: unknown, attempt: TaskAttempt): P
   // posting a failure comment, recording retry state, or transitioning the
   // ticket. Interactive runs keep the normal failure path below.
   if (error instanceof HarnessUnavailableError && isWorkerChild()) {
-    await finishTaskRun("deferred", error.message);
-    console.warn(`\n🛠️  ${error.message}. Signaling worker to try the next harness.`);
+    // Bound the loop: an agent CLI that exits at once (bad API key, missing
+    // login) would otherwise be deferred and retried forever. After the
+    // budget the run settles `failed` (environment), which raises a
+    // notification and keeps the ticket out of the sweep until it changes.
+    const activeRun = getActiveRunContext();
+    const attempt =
+      (activeRun?.taskKey
+        ? readAgentStartFailureStreak(resolveQueueDbPath(), activeRun.taskKey, activeRun.id)
+        : 0) + 1;
+    const maxAttempts = agentStartMaxAttempts();
+    if (attempt >= maxAttempts) {
+      await finishTaskRun("failed", agentStartReason(error.message), {
+        failure: {
+          outcomeClass: "environment",
+          stage: AGENT_START_STAGE,
+          cause: formatFailureCause(error.message),
+        },
+      });
+      console.error(
+        `\n❌ ${error.message}. The agent CLI failed to start ${attempt} time(s) in a row; ` +
+          "giving up on this task until it is retried. See `devintern worker status`.",
+      );
+      if (runContext.lockManager) {
+        runContext.lockManager.release();
+      }
+      await flushAnalyticsAndExit(1);
+    }
+    await finishTaskRun("deferred", agentStartReason(error.message));
+    console.warn(
+      `\n🛠️  ${error.message}. Start attempt ${attempt}/${maxAttempts}; ` +
+        "signaling worker to try the next harness or retry later.",
+    );
     if (runContext.lockManager) {
       runContext.lockManager.release();
     }

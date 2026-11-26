@@ -11,13 +11,20 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
+import { parseEnvContent } from "@devintern/task-trackers";
 import { findProjectRoot } from "@devintern/utils";
 
 import { parseGitLabHostAliases, parseGitRemoteUrl } from "../code-host";
 import { Utils } from "../utils";
 import { writeSecretFile } from "../utils/secret-file";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "./config";
-import { deriveRepoName, ensureWorkspaceScaffold, tomlString } from "./init";
+import { supportsPolling } from "../trackers/capabilities";
+import {
+  deriveRepoName,
+  ensureWorkspaceScaffold,
+  tomlString,
+  upsertWorkspaceDefaults,
+} from "./init";
 import type { WorkspaceLogFn } from "./init";
 import { findRepoForCheckout } from "./manual-run";
 import { workspaceConfigPath } from "./paths";
@@ -102,7 +109,13 @@ export async function registerManualCheckout(
     (remote ? `remote = ${tomlString(remote)}\n` : `path = ${tomlString(checkoutDir)}\n`) +
     `# Run by hand from your checkout only; the worker skips this repo.\n` +
     `manual_only = true\nenv_file = ${tomlString(envFile)}\n`;
-  const updated = text.endsWith("\n") ? text + block : `${text}\n${block}`;
+  let updated = text.endsWith("\n") ? text + block : `${text}\n${block}`;
+  // A workspace created just now carries the template's tracker; record the
+  // one this checkout uses, so a later `worker init` starts from it.
+  const tracker = parseEnvContent(envContent).TASK_TRACKER?.toLowerCase();
+  if (created && tracker && supportsPolling(tracker)) {
+    updated = upsertWorkspaceDefaults(updated, { tracker });
+  }
   // Validate before writing anything.
   parseWorkspaceConfig(updated, configPath);
 

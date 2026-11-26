@@ -17,6 +17,12 @@
  * change test-visible defaults (run identity, idle-worktree cap, auth mode) or
  * make test-spawned CLIs write into the live worker's hint files.
  *
+ * The run lineage channel (`DEVINTERN_RUN_ID`, `DEVINTERN_RUN_OUTPUTS`) is
+ * exported to every harness of an active run. Inherited, every test that
+ * exercises `devintern worker add` without an injected env appended fixture
+ * `injected_task` records to the live run's outputs file, which the worker then
+ * ingested as delegated work ("Run #N delegated 43 tasks" notifications).
+ *
  * Tests that need any of these values set them explicitly for the code they
  * exercise; the suite-level default must stay neutral.
  */
@@ -47,6 +53,9 @@ export const WORKER_INJECTED_ENV_VARS = [
   "DEVINTERN_RUN_OUTCOME_FILE",
   "DEVINTERN_RESULT_FD",
   "DEVINTERN_HARNESS_LOG_RUN_ID",
+  // Run lineage channel (run-outputs.ts runIdentityEnv, run-recorder.ts).
+  "DEVINTERN_RUN_ID",
+  "DEVINTERN_RUN_OUTPUTS",
 ] as const;
 
 /**

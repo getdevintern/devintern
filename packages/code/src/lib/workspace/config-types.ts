@@ -59,6 +59,17 @@ export interface WorkspaceSettings {
   conflictAgent?: AgentSelection;
   /** Auto-merge of the agent's own PRs (off by default). */
   autoMerge: AutoMergeSettings;
+  /**
+   * Commit identity for hosts whose git has none (`git_author_name` +
+   * `git_author_email`). Never overrides a configured git identity.
+   */
+  gitAuthor?: GitAuthorSetting;
+}
+
+/** `git_author_name` / `git_author_email` from `[workspace]` or a `[[repos]]` entry. */
+export interface GitAuthorSetting {
+  name: string;
+  email: string;
 }
 
 /**
@@ -89,8 +100,21 @@ export interface AutoMergeSettings {
    * (`auto_merge_review_label`, default `needs-human-review`; `""` disables).
    */
   reviewLabel: string;
+  /**
+   * Review a PR again after new commits (`auto_merge_recheck_on_push`,
+   * default false). When false, a PR the agent review decided is not
+   * reviewed again on later commits (updates, conflict resolutions), which
+   * saves agent tokens; a policy change still re-checks it.
+   */
+  recheckOnPush: boolean;
   /** Merge-safety review strictness (`auto_merge_policy`, default `strict`). */
   policy: MergeSafetyPolicy;
+  /**
+   * Require at least one passing CI check on a code PR's head commit
+   * (`auto_merge_require_checks`, default false). Failing or pending checks
+   * block either way. Omitted when the key is unset.
+   */
+  requireChecks?: boolean;
   /**
    * Operator rules appended to the merge-safety prompt
    * (`auto_merge_review_instructions`). Omitted when unset or empty.
@@ -180,6 +204,11 @@ export interface RepoConfig {
   /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
   prLabels?: string[];
   /**
+   * Commit identity when git has none: the repo's `git_author_name` /
+   * `git_author_email`, falling back to `[workspace]`.
+   */
+  gitAuthor?: GitAuthorSetting;
+  /**
    * Workspace-relative JSON file holding this repository's pipeline override.
    * Takes precedence over the repo's checked-in `settings.json` pipeline and
    * over `[defaults].pipeline_file`.
@@ -191,6 +220,8 @@ export interface RepoConfig {
   autoMergeDenyPaths?: string[];
   /** Per-repo `auto_merge_review_paths`; replaces the workspace list when set. */
   autoMergeReviewPaths?: string[];
+  /** Per-repo `auto_merge_require_checks`; replaces the workspace value when set. */
+  autoMergeRequireChecks?: boolean;
   /** Per-repo `auto_merge_policy`; replaces the workspace policy when set. */
   autoMergePolicy?: MergeSafetyPolicy;
   /**
@@ -294,6 +325,11 @@ export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
   dashboard: DashboardSettings;
   worker: WorkerSettings;
+  /**
+   * Out-of-dashboard notification delivery (`[notifications]`); absent or
+   * channel-less means nothing is delivered.
+   */
+  notifications?: import("../notifications/delivery/config").NotificationsSettings;
   defaults: WorkspaceDefaults;
   /** Team tracker sources; empty means the single `[defaults]` fleet query. */
   teams: TeamConfig[];

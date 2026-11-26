@@ -104,7 +104,23 @@ export interface RepoManagerLike {
   createTaskWorktree(repo: RepoConfig, taskKey: string): Promise<string>;
   removeTaskWorktree(repoName: string, worktreePath: string): Promise<void>;
   sweepStaleWorktrees(repoName: string, ttlDays: number): Promise<string[]>;
+  /** Bound the debug worktrees kept for one task (optional for test fakes). */
+  pruneTaskWorktrees?(
+    repoName: string,
+    taskKey: string,
+    options: { keep: number; inUse?: ReadonlySet<string> },
+  ): Promise<string[]>;
 }
+
+/**
+ * Debug worktrees kept per task after failed or deferred runs. A task that
+ * keeps failing the same way (an agent CLI that cannot start) would otherwise
+ * leave one repository copy per attempt.
+ */
+export const MAX_DEBUG_WORKTREES_PER_TASK = 2;
+
+/** Task worktrees a run in this process still owns; pruning never touches them. */
+const activeTaskWorktrees = new Set<string>();
 
 export interface WorkspaceTaskAcquirerDeps {
   config: WorkspaceConfig;
@@ -382,6 +398,32 @@ export function createFleetTaskExecutor(
   };
 }
 
+/** Best-effort: drop a task's older debug worktrees beyond {@link MAX_DEBUG_WORKTREES_PER_TASK}. */
+async function pruneDebugWorktrees(
+  repoManager: RepoManagerLike,
+  repoName: string,
+  taskKey: string,
+  scope: string,
+): Promise<void> {
+  if (!repoManager.pruneTaskWorktrees) return;
+  try {
+    const removed = await repoManager.pruneTaskWorktrees(repoName, taskKey, {
+      keep: MAX_DEBUG_WORKTREES_PER_TASK,
+      inUse: activeTaskWorktrees,
+    });
+    if (removed.length > 0) {
+      console.log(
+        `🧹 ${scope} removed ${removed.length} older debug worktree(s) of ${taskKey} ` +
+          `(keeping the newest ${MAX_DEBUG_WORKTREES_PER_TASK})`,
+      );
+    }
+  } catch (error) {
+    console.warn(
+      `⚠️  ${scope} could not prune old worktrees of ${taskKey}: ${(error as Error).message}`,
+    );
+  }
+}
+
 /**
  * {@link createFleetTaskExecutor} with an optional native-blocker gate
  * (`options.dependencyGate`): a held-back ticket resolves to `"waiting"`.
@@ -530,12 +572,18 @@ export function createGatedFleetTaskExecutor(
           }
           console.log(`🏗️  ${scope} ${taskKey} → ${repo.name} (${worktree})`);
 
-          const ok = await runTask(options.taskRef ?? taskKey, extraArgs, {
-            cwd: worktree,
-            env: childEnv,
-            signal,
-            ...(options.onChildSpawn ? { onChildSpawn: options.onChildSpawn } : {}),
-          });
+          activeTaskWorktrees.add(worktree);
+          let ok: TaskExecutionResult;
+          try {
+            ok = await runTask(options.taskRef ?? taskKey, extraArgs, {
+              cwd: worktree,
+              env: childEnv,
+              signal,
+              ...(options.onChildSpawn ? { onChildSpawn: options.onChildSpawn } : {}),
+            });
+          } finally {
+            activeTaskWorktrees.delete(worktree);
+          }
 
           // A retry-gate skip is a clean outcome: no run was started, so the
           // disposable worktree holds no work to debug.
@@ -551,6 +599,7 @@ export function createGatedFleetTaskExecutor(
             await repoManager.removeTaskWorktree(repo.name, worktree);
           } else {
             console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);
+            await pruneDebugWorktrees(repoManager, repo.name, taskKey, scope);
           }
           return ok;
         },

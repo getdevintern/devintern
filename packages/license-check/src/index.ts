@@ -51,12 +51,19 @@ export interface LicenseCheckResult {
   trialEndsAt?: string;
   /** True when the trial is eligible but has not been activated yet. */
   trialAvailable?: boolean;
+  /** When source is "grace": the end of the 72-hour offline window (ISO 8601). */
+  graceEndsAt?: string;
   /**
    * True when nothing is wrong except that nobody is signed in: no
    * `LICENSE_KEY`, no session, and the check allows a Worker Pilot. Signing
    * in is the next step, not a fix for a broken setup.
    */
   signInRequired?: boolean;
+  /**
+   * True when no license was checked at all: `DEVINTERN_SKIP_LICENSE_CHECK=1`
+   * on a non-release build. `source` stays `license-key` for older callers.
+   */
+  skipped?: boolean;
 }
 
 export interface LicenseCheckOptions {
@@ -84,6 +91,12 @@ export interface LicenseCheckOptions {
   loginCommand?: string;
   /** Base delay between entitlement retries in ms (defaults to 500). */
   retryBaseDelayMs?: number;
+  /**
+   * Environment to read `LICENSE_KEY` and `DEVINTERN_SKIP_LICENSE_CHECK` from
+   * (defaults to `process.env`), for callers that compose a workspace env
+   * without applying it to the process.
+   */
+  env?: Record<string, string | undefined>;
 }
 
 interface CachedEntitlement {
@@ -147,6 +160,11 @@ function readCachedEntitlement(
   }
 }
 
+function graceEnd(checkedAt: string): string | undefined {
+  const checked = Date.parse(checkedAt);
+  return Number.isFinite(checked) ? new Date(checked + GRACE_WINDOW_MS).toISOString() : undefined;
+}
+
 /** Builds the grace-mode success result from a cached entitlement. */
 function graceResult(cached: CachedEntitlement, cause: string): LicenseCheckResult {
   const checkedDate = cached.checkedAt.slice(0, 10);
@@ -154,6 +172,7 @@ function graceResult(cached: CachedEntitlement, cause: string): LicenseCheckResu
     valid: true,
     source: "grace",
     entitlementSource: cached.entitlementSource,
+    graceEndsAt: graceEnd(cached.checkedAt),
     message:
       `License server unreachable (${cause}). ` +
       `Using cached entitlement from ${checkedDate}; valid for up to 72 hours after the last successful check.`,
@@ -416,23 +435,25 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     requireAutomation = false,
     allowTrial = false,
     retryBaseDelayMs,
+    env = process.env,
   } = options;
 
   // Allow tests and CI to skip license checks
-  if (isReleaseBuild() && process.env.DEVINTERN_SKIP_LICENSE_CHECK === "1" && !warnedSkipIgnored) {
+  if (isReleaseBuild() && env.DEVINTERN_SKIP_LICENSE_CHECK === "1" && !warnedSkipIgnored) {
     warnedSkipIgnored = true;
     process.stderr.write("DEVINTERN_SKIP_LICENSE_CHECK is ignored in release builds.\n");
   }
-  if (shouldSkipLicenseCheck()) {
+  if (shouldSkipLicenseCheck(env)) {
     return {
       valid: true,
       source: "license-key",
       message: "License check skipped (DEVINTERN_SKIP_LICENSE_CHECK=1).",
+      skipped: true,
     };
   }
 
   // 1. Direct license key validation via Polar public customer portal API
-  const explicitKey = licenseKey || process.env.LICENSE_KEY;
+  const explicitKey = licenseKey || env.LICENSE_KEY;
   if (explicitKey) {
     return checkExplicitLicenseKey(explicitKey, productKey, supabaseConfig, requireAutomation);
   }

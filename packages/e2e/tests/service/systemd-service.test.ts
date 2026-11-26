@@ -59,13 +59,14 @@ exit [lindex $status 3]
  * No license bypass yet: the first install must see an unlicensed worker.
  */
 const SETUP = String.raw`set -eu
-git config --global user.name "DevIntern E2E"
-git config --global user.email e2e@example.invalid
-git config --global init.defaultBranch main
+# No global git config at all, like a fresh box: the seed commit names its
+# author inline, and the worker must commit without any configured identity.
+test ! -e ~/.gitconfig
 cp -r ~/fixture ~/seed-src
-git -C ~/seed-src init -q
+git -C ~/seed-src init -q -b main
 git -C ~/seed-src add .
-git -C ~/seed-src commit -qm "Seed service E2E fixture"
+git -C ~/seed-src -c user.name="Fixture Seed" -c user.email=seed@example.invalid \
+  commit -qm "Seed service E2E fixture"
 git clone -q --bare ~/seed-src ~/remote.git
 git clone -q ~/remote.git ~/app
 mkdir -p ~/tasks
@@ -127,10 +128,12 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
   async function service(
     args: string,
     prefix = "",
+    plain = false,
   ): Promise<{ exitCode: number; doc: ServiceDoc; stderr: string }> {
     const result = await container.user(
       `${prefix}devintern worker service ${args} --json </dev/null`,
       180_000,
+      plain,
     );
     let doc: ServiceDoc;
     try {
@@ -164,7 +167,7 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
     // Signing in is the only step left: exit 2, like `worker doctor`.
     expect(exitCode, JSON.stringify(doc, null, 2)).toBe(2);
     expect(doc.result).toBe("action_required");
-    expect(doc.nextSteps.at(-1)?.command).toBe("devintern worker service install");
+    expect(doc.nextSteps.at(-1)?.command).toBe("devintern worker service install --json");
     expect((await container.user(`test -e ${UNIT}`)).exitCode).not.toBe(0);
   }, 240_000);
 
@@ -175,7 +178,9 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
     expect(doc.start?.state).toBe("failed");
     expect(doc.start?.permanent).toBe(true);
     expect(doc.start?.reason).toContain("License check failed");
-    expect(doc.nextSteps.map((step) => step.command)).toContain("devintern worker service restart");
+    expect(doc.nextSteps.map((step) => step.command)).toContain(
+      "devintern worker service restart --json",
+    );
     // systemd gave up at once (RestartPreventExitStatus=78): no 30 s loop.
     expect(await container.unitProperty("ActiveState")).toBe("failed");
     expect(await container.unitProperty("ExecMainStatus")).toBe("78");
@@ -241,6 +246,19 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
         `git --git-dir ~/remote.git show feature/${TASK_KEY}:src/greeting.ts`,
       ),
     ).toBe('export const greeting = "Hello, world!";\n');
+    // The host has no git identity and no token: the task commit carries the
+    // DevIntern fallback, never the seed commit's author, and no git config
+    // was written to get there.
+    expect(
+      (
+        await container.checkedUser(
+          `git --git-dir ~/remote.git log -1 --format='%an <%ae>|%cn <%ce>' feature/${TASK_KEY}`,
+        )
+      ).trim(),
+    ).toBe(
+      "DevIntern <devintern@users.noreply.github.com>|DevIntern <devintern@users.noreply.github.com>",
+    );
+    expect((await container.user("test -e ~/.gitconfig")).exitCode).not.toBe(0);
     const journal = await container.journal();
     expect(journal).toContain("License check skipped (DEVINTERN_SKIP_LICENSE_CHECK=1)");
     // The daemon tees its own output into the dashboard capture files.
@@ -334,6 +352,21 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
     expect(doc.warnings[0]).toContain("could not enable lingering for tester");
     expect(doc.warnings[0]).toContain("stops when you log out");
     expect(doc.warnings[0]).toContain("sudo loginctl enable-linger tester");
+  }, 240_000);
+
+  test("install and status work from a shell without XDG_RUNTIME_DIR or a bus address", async () => {
+    const env = await container.user(
+      'echo "${XDG_RUNTIME_DIR:-unset}|${DBUS_SESSION_BUS_ADDRESS:-unset}"',
+      30_000,
+      true,
+    );
+    expect(env.stdout.trim()).toBe("unset|unset");
+    const status = await service("status", "", true);
+    expect(status.exitCode, JSON.stringify(status.doc, null, 2)).toBe(0);
+    expect(status.doc.service?.installed).toBe(true);
+    const { exitCode, doc } = await service("install", "", true);
+    expect(exitCode, JSON.stringify(doc, null, 2)).toBe(0);
+    expect(doc.result).toBe("running");
   }, 240_000);
 
   test("uninstall stops the worker cleanly and removes the unit", async () => {

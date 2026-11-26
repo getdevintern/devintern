@@ -19,7 +19,7 @@ cd ~/code/backend && devintern worker add-repo
 cd ~/code/frontend && devintern worker add-repo
 ```
 
-`worker add-repo` adds a `[[repos]]` entry from the checkout's `origin` remote, merges new keys from a legacy `.devintern-code/.env` (if the checkout still has one) into the shared `.env` (conflicting values go to that repo's `[repos.env]`), and seeds a routing rule for a Jira or Linear project key. Running it again is a no-op, and comments in `workspace.toml` are preserved. The repo's `.devintern-code/settings.json` needs no changes.
+`worker add-repo` adds a `[[repos]]` entry from the checkout's `origin` remote, merges new keys from a legacy `.devintern-code/.env` (if the checkout still has one) into the shared `.env` (conflicting values go to that repo's `[repos.env]`), and seeds a routing rule for a Jira or Linear project key. On a repository `devintern init` registered as manual-only, it removes `manual_only` so the worker uses it. Running it again is a no-op, and comments in `workspace.toml` are preserved. The repo's `.devintern-code/settings.json` needs no changes.
 
 ## How it works
 
@@ -79,6 +79,7 @@ Keys not shown here are documented on the page for their feature:
 | `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths` | [PR Follow-up](./pr-follow-up.md) |
 | `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
 | `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
+| `[workspace].git_author_name`, `git_author_email` (also per `[[repos]]`)                                 | [Configuration: Commit identity](./configuration.md#commit-identity)               |
 | `[defaults].dependency_mode`                                                                             | [Delegation: Dependent tasks](./delegation.md#dependent-tasks---after)             |
 | `[[teams]].dependency_mode`                                                                              | [Worker Daemon: Ticket dependencies](./worker.md#ticket-dependencies)              |
 | `pipeline_file`                                                                                          | [below](#pipelines-for-the-fleet-and-per-repository)                               |
@@ -188,7 +189,7 @@ Other trackers have no repo-to-project mapping, so set per-repo keys such as `JI
 
 The worker reloads `workspace.toml` a moment after you save it. Work already running finishes with the old config. Send `SIGHUP` to force a reload. A broken edit is logged and the last valid config keeps running.
 
-Most settings apply on reload, including repos, routing rules, queries, team `repo`, automations, estimations, pipelines, concurrency, and PR follow-up settings. These need a restart:
+Most settings apply on reload, including repos, routing rules, queries, team `repo`, automations, estimations, pipelines, concurrency, PR follow-up settings, and [`[notifications]`](notifications.md). These need a restart:
 
 - team `name`, `tracker`, `env_file`, and `[teams.env]`
 - `[[error_monitors]]`

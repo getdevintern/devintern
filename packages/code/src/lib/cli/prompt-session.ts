@@ -20,6 +20,13 @@ export interface PromptSession {
   prompt: PromptFn;
   /** Read one line without echoing it (falls back to {@link prompt} without a terminal). */
   promptSecret: PromptFn;
+  /**
+   * Run work that reads the terminal outside this session (a browser sign-in
+   * wait): Ctrl+C while it runs rejects with the same abort error as Ctrl+C
+   * at a prompt, instead of killing the process before the wizard can say
+   * what was saved. The work itself is not cancelled.
+   */
+  guard<T>(work: Promise<T>): Promise<T>;
   close(): void;
 }
 
@@ -46,6 +53,7 @@ export async function resolveWizardPrompts(injected: {
     return {
       prompt: injected.prompt,
       promptSecret: injected.promptSecret ?? injected.prompt,
+      guard: (work) => work,
       close: () => {},
     };
   }
@@ -79,6 +87,8 @@ export async function createPromptSession(io: PromptSessionIo = {}): Promise<Pro
   // `question()` on every runtime (Bun leaves it pending), so Ctrl+C settles
   // it here instead of relying on the close.
   let rejectOpen: ((error: Error) => void) | undefined;
+  // Guarded work in flight (see `guard`): Ctrl+C rejects it like a prompt.
+  const rejectGuarded = new Set<(error: Error) => void>();
   rl.on("close", () => {
     closed = true;
   });
@@ -87,8 +97,22 @@ export async function createPromptSession(io: PromptSessionIo = {}): Promise<Pro
     const reject = rejectOpen;
     rl.close();
     if (reject) reject(promptInterruptedError());
-    else (io.onIdleInterrupt ?? (() => process.kill(process.pid, "SIGINT")))();
+    else if (rejectGuarded.size > 0) {
+      for (const rejectWork of rejectGuarded) rejectWork(promptInterruptedError());
+    } else (io.onIdleInterrupt ?? (() => process.kill(process.pid, "SIGINT")))();
   });
+
+  const guard = <T>(work: Promise<T>): Promise<T> => {
+    if (interrupted) return Promise.reject(promptInterruptedError());
+    let rejectWork: ((error: Error) => void) | undefined;
+    const interruptedPromise = new Promise<never>((_, reject) => {
+      rejectWork = reject;
+      rejectGuarded.add(reject);
+    });
+    return Promise.race([work, interruptedPromise]).finally(() => {
+      if (rejectWork) rejectGuarded.delete(rejectWork);
+    });
+  };
 
   const prompt: PromptFn = (question) => {
     if (interrupted) return Promise.reject(promptInterruptedError());
@@ -118,6 +142,7 @@ export async function createPromptSession(io: PromptSessionIo = {}): Promise<Pro
   return {
     prompt,
     promptSecret,
+    guard,
     close: () => {
       if (!closed) rl.close();
     },
