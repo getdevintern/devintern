@@ -1,6 +1,6 @@
 # Auth, licensing, and observability e2e coverage
 
-Scope: Supabase `login`/`logout`/`whoami`, the automation license gate, Sentry error monitors, and anonymous telemetry and update checks.
+Scope: Supabase `login`/`logout`/`whoami`, the automation license gate, Sentry error monitors, anonymous telemetry and update checks, and worker notification delivery (Slack, generic webhook).
 
 Status values are defined in the [coverage index](../coverage-matrix.md#status-legend).
 
@@ -62,6 +62,14 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: Only a live project would prove the real comment endpoint accepts the body and returns these statuses. Observed (unconfirmed intent): a 5xx comment is sent once and never retried, unlike issue-list reads, which retry 5xx twice. After Sentry recovers, the dropped comment is never re-sent, because the issue stays claimed. The test asserts only the bound and "at most one comment", not that the comment is lost.
 - Last reviewed: 2026-11-20
 
+### Notification delivery: Slack and signed webhook channels from the worker
+
+- Surface: External dependency: notifications (Slack incoming webhooks, generic JSON webhook)
+- Status: `default`
+- Evidence: `tests/local/worker-notification-delivery.test.ts` (`bun run --filter @devintern/e2e test`). A real worker with `[notifications.slack]` and `[notifications.webhook]` (`url_env`, `secret_env`) reads both endpoint URLs and the signing secret only from the workspace `.env` and posts to a loopback receiver. A failed ad-hoc task (fake agent exits non-zero) raises one high-severity `retries_exhausted` notification. The webhook gets exactly one JSON `POST` with the documented payload (`source: "devintern"`, `version: 1`, `type: "notification"`, `event: "created"`, the notification's `kind`, `severity`, `repo`, `title`, `groupKey`, and `dashboardUrl` = `<dashboard_url>/#/runs/<id>`) and `X-DevIntern-Signature: sha256=<HMAC-SHA256 of the raw body>`. Slack gets one JSON `POST` with the title, repo, and an "Open in dashboard" link under `dashboard_url`. A later tick does not resend. Re-running the same task (`worker add --resume`) folds into the same group (count 2), and within the default 60-minute `rate_limit_minutes` nothing more is sent on either channel. A new group still reaches Slack while the webhook answers HTTP 500: the webhook is tried 3 times (one try plus two retries) and given up, the Slack send is not delayed by those retries, the worker logs `webhook delivery of notification #<id> failed: webhook answered HTTP 500`, and the run outcome is unchanged. Neither body nor the worker log contains the dummy Slack token path, the signing secret, their URL-encoded forms, or the receiver URL.
+- Missing: The desktop channel (`notify-send`/`osascript` on a real notification daemon), `digest_time` digests, `notify_resolved` resolve messages, `min_severity = "normal"` and `kinds`/`exclude_kinds` filters, the release of a held repeat once the rate-limit window ends, an inline webhook `url`, and `devintern worker doctor --test-notifications` (`event: "test"`; the next gap for this area). Only `retries_exhausted` is driven end to end; `escalated` and `internal_error` are unit-tested only. No real Slack workspace is contacted, so Slack's acceptance of the body and its HTTP semantics are not proven.
+- Last reviewed: 2026-11-27
+
 ## Backlog
 
 Priority numbers are the global ranking from the
@@ -92,3 +100,10 @@ Priority numbers are the global ranking from the
 - How: `WorkerFixture` with the embedded dashboard on a free loopback port and `[[error_monitors]]` pointing at `providers/fake-sentry.ts`. The fake now rejects comment writes with a chosen status (`rejectCommentsWith`, per-issue `commentRejections`, or `setCommentRejection` mid-test) and records each attempt's status. The token is a random fake string; diagnostics redact it, and leak checks assert booleans so a failure cannot print it.
 - Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/worker-sentry-comment-rejected.test.ts` from `packages/e2e`.
 - Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. About 10 s for both tests.
+
+### `tests/local/worker-notification-delivery.test.ts`
+
+- Proves: worker notification delivery from a failed run to Slack and a signed generic webhook (payload shape, HMAC signature, dashboard links), no resend on later ticks, the per-group rate limit holding a repeat, a failing webhook (HTTP 500, bounded retries) not blocking Slack or changing the run outcome, and no credential in request bodies or the worker log.
+- How: `WorkerFixture` with `[notifications]` tables in `workspaceTomlExtra`, endpoint URLs and a generated dummy signing secret in the workspace `.env`, and `helpers/notification-receiver.ts`, a loopback server that records method, path, headers, and raw body and can answer a chosen status per path. The fake agent fails prompts carrying `E2E_FAIL_PROMPT_MARKER`. Delivery ticks every 30 s and a channel only delivers notifications newer than its first tick, so the test enqueues the failing task after the first tick and waits for ticks through the queue DB (`notification_delivery_ticks`) instead of fixed sleeps. Secret comparisons assert booleans, and diagnostics redact the token and secret.
+- Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/worker-notification-delivery.test.ts` from `packages/e2e`.
+- Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. About 2.5 minutes, mostly waiting on the 30 s delivery interval.
