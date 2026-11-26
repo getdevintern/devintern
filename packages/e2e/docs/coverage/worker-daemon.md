@@ -94,6 +94,30 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: Additional team and repo combinations.
 - Last reviewed: 2026-11-17
 
+### Workspace pipeline_file: plugin steps run in order and a halt stops delivery
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-pipeline-file.test.ts` (`bun run --filter @devintern/e2e test`). A `[[repos]].pipeline_file` with `plugins: ["./steps/gate.ts"]` loads the TypeScript module from the workspace through the built CLI and runs it after `commit` with the step entry (minus `use`) as `create(config)`. `halt` ends the run `escalated` with the reason as `outcome_reason`, `failureStage`, and `failureCause`, marks the implementation stage failed, writes `implementation-summary-incomplete.md`, and skips `finalize`: no publish push and no PR attempt. With `DEVINTERN_PUSH_UNFINISHED_WORK=0` the bare remote has no task branch. `warn` prints the warning after `commit`, and delivery continues through `finalize` to the push.
+- Missing: Built-in `verify` (model-driven) and `repeat` results; `haltKind: "stop"`; `StepExecutionError` retry; PR creation on a live code host (the bare remote has none). The warning appears only in the task log, not on the run record or `worker runs show`. Observed: with default settings, the documented unfinished-work preservation (`docs/code/delegation-runs.md`) pushes a halted run's committed work to its task branch, so the "Nothing is pushed" in `docs/code/pipelines.md` holds only with `DEVINTERN_PUSH_UNFINISHED_WORK=0`. The test asserts both.
+- Last reviewed: 2026-11-27
+
+### Workspace pipeline_file precedence: [[repos]] over [defaults] over built-in
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-pipeline-file.test.ts`. In a two-repo workspace, repo A with its own `pipeline_file` runs only A's plugin step, and repo B runs only `[defaults].pipeline_file`'s step. Per-step markers carrying the pinned repo name show the lists were not merged. Both repositories commit a `.devintern-code/settings.json` `pipeline` whose own plugin never runs, and the worker prints "defines a pipeline, which is not read" for each. Each task logs its selected scope and file, and both branches are pushed.
+- Missing: Live reload of `[defaults].pipeline_file` between tasks; team-routed (tracker-polled) tasks; `~/` and absolute `pipeline_file` forms; package-name plugins.
+- Last reviewed: 2026-11-27
+
+### Invalid or missing workspace pipeline_file fails the run closed
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-pipeline-file.test.ts`. A `pipeline_file` that does not exist, one with a plugin step after `finalize`, and one whose plugin is named `verify` (reserved) each fail the run: the queue row is `failed`, the run is `failed` with an `outcome_reason` naming the repository and the file, and the task log carries the full error. The task logs no `🧩 Pipeline:` line (no built-in fallback), no commit, and no push; the bare remote keeps only the base branch. Observed: validation runs before the agent, so the fake agent was never started and no plugin step ran. The worker keeps running.
+- Missing: Invalid JSON and a non-array `steps`; an invalid `[defaults].pipeline_file`; a plugin module that fails to import.
+- Last reviewed: 2026-11-27
+
 ## Backlog
 
 Priority numbers are the global ranking from the
@@ -194,3 +218,10 @@ bun run --filter @devintern/e2e test
 - How: `scripts/service.ts` packs the built CLI with `bun pm pack`; `helpers/systemd-container.ts` builds `infrastructure/service/Dockerfile`, which installs the tarball with `bun add -g` for a non-root user, starts a privileged container (never `--network host`), and enables lingering as root. `worker init --non-interactive` writes the markdown workspace without the license bypass; the suite adds `DEVINTERN_SKIP_LICENSE_CHECK=1` to the workspace `.env` only for the success path. `expect` drives the interactive wizard for the in-place update. The workspace `.env` sets `TASK_TRACKER=markdown`, because the wizard reads the tracker from there and not from `[defaults].tracker`. The lingering warning uses a stub `loginctl` on `PATH` for that one install.
 - Run: `bun run --filter @devintern/e2e test:e2e:service`.
 - Prerequisites: the built CLI and a Docker daemon your user can access. No network credentials. The first run builds the image (about a minute); the suite then takes about 45 s, most of it the unit's `RestartSec=30`. The container is removed afterwards; the `devintern-e2e-systemd:local` image stays cached.
+
+### tests/local/worker-pipeline-file.test.ts
+
+- Proves: workspace `pipeline_file` behavior in a real `devintern worker` run of the built CLI. A plugin step runs between `commit` and `finalize` and receives its options. `halt` stops delivery and `warn` continues to the push. A `[[repos]]` file wins over `[defaults]` and the two are never merged, and a committed checkout `pipeline` is ignored with a warning. Missing or invalid files fail the run closed before the agent starts.
+- How: `WorkerFixture` (gaps 1 and 3) and `MultiRepoWorkerFixture` (precedence) with local bare remotes, ad-hoc tasks via `worker add`, and the deterministic fake agent in its normal implement mode. `helpers/pipeline-file.ts` writes `<workspace>/pipelines/*.json` and dependency-free plugin modules under `pipelines/steps/`. Each plugin writes a JSON marker (step, pinned repo, task key, `create(config)` options, `committed`) to a test-owned directory, and the task prompt selects `halt` or `warn`. Assertions read the queue and run rows, `worker runs show --json`, `git ls-remote --heads` on the bare remotes, the markers, and the worker log.
+- Run: `bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test` (or `bun test tests/local/worker-pipeline-file.test.ts` from `packages/e2e`).
+- Prerequisites: the built CLI only. No network or credentials. About 10 s for the three tests.
