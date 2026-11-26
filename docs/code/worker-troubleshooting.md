@@ -42,6 +42,10 @@ sudo loginctl enable-linger <user>
 
 Then the worker starts at boot and keeps running after logout.
 
+## "The systemd user manager is not running"
+
+`worker service install` talks to your systemd user manager. Shells without a login session (`docker exec`, `sudo -u <user>`, `su`) do not set `XDG_RUNTIME_DIR`; DevIntern finds the manager's socket under `/run/user/<uid>` on its own. When that directory does not exist, the manager is not running: run `sudo loginctl enable-linger <user>` and install again. If it still cannot connect, export the two variables the message names (`XDG_RUNTIME_DIR=/run/user/<uid>` and `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus`).
+
 ## Re-running a task
 
 When a run cannot finish, DevIntern comments on the ticket and moves it back to your to-do status. To avoid a retry loop, an unchanged ticket is not retried. Unlock a retry by changing the ticket:

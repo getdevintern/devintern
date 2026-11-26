@@ -37,6 +37,7 @@ import {
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 import { defaultProbe } from "@devintern/task-trackers";
 import { WORKER_PILOT_OFFER, signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
+import { resolveDashboardPort } from "./dashboard-port";
 import { entitlementCheck } from "./worker-entitlement";
 import type { WorkerEntitlementLike } from "./worker-entitlement";
 import { createTrackerClient, trackerRequiredEnv } from "../trackers/manager";
@@ -52,13 +53,11 @@ import type { WorkerStatusView } from "./dashboard-api";
 import type { ReadinessCheck } from "./readiness";
 import { notificationDoctorCheck } from "../notifications/delivery/doctor";
 import { gitCommitIdentityCheck } from "./git-identity-readiness";
+import { relayReadinessCheck } from "./relay-readiness";
 import type { GitIdentityCheckInput } from "./git-identity-readiness";
 import { workerLivenessCheck } from "./worker-liveness-readiness";
 
 type Env = Record<string, string | undefined>;
-
-/** Default dashboard port, kept in sync with `DEFAULT_DASHBOARD_PORT` in `dashboard-server.ts`. */
-const DEFAULT_DASHBOARD_PORT = 4400;
 
 /** Per-probe timeout for query dry-runs and repository checks. */
 const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
@@ -799,9 +798,7 @@ async function dashboardPortCheck(
   if (!config.workspace.dashboard) {
     return { ...base, status: "ok", detail: "dashboard disabled" };
   }
-  const port =
-    config.workspace.dashboardPort ??
-    (Number.parseInt(workspaceEnv.DASHBOARD_PORT || "", 10) || DEFAULT_DASHBOARD_PORT);
+  const port = resolveDashboardPort(config.workspace.dashboardPort, workspaceEnv);
   let busy = false;
   try {
     busy = await (deps.isPortInUse ?? defaultIsPortInUse)(port);
@@ -922,6 +919,9 @@ export async function collectWorkerDoctorChecks(
       });
     }
   }
+
+  // 6b. Relay pairing (local state only; runs under --offline too)
+  checks.push(relayReadinessCheck(workspaceDir, config));
 
   // 7. Worker liveness (local lock file only; runs under --offline too)
   let worker: WorkerStatusView = { status: "stopped" };

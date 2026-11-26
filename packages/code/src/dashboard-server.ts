@@ -53,10 +53,11 @@ import {
   parseDashboardAllowedOriginsEnv,
 } from "./lib/observability/dashboard-origins";
 import type { DashboardAllowedOrigin } from "./lib/observability/dashboard-origins";
+import { DEFAULT_DASHBOARD_PORT } from "./lib/observability/dashboard-port";
 import { TailscaleOriginDetector } from "./lib/observability/dashboard-tailscale";
 import type { TailscaleStatusProbe } from "./lib/observability/dashboard-tailscale";
 
-export const DEFAULT_DASHBOARD_PORT = 4400;
+export { DEFAULT_DASHBOARD_PORT };
 export { isLoopbackDashboardHost };
 
 /** Why {@link checkDashboardRequest} refused a request. */

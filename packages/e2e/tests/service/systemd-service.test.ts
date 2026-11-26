@@ -128,10 +128,12 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
   async function service(
     args: string,
     prefix = "",
+    plain = false,
   ): Promise<{ exitCode: number; doc: ServiceDoc; stderr: string }> {
     const result = await container.user(
       `${prefix}devintern worker service ${args} --json </dev/null`,
       180_000,
+      plain,
     );
     let doc: ServiceDoc;
     try {
@@ -348,6 +350,21 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
     expect(doc.warnings[0]).toContain("could not enable lingering for tester");
     expect(doc.warnings[0]).toContain("stops when you log out");
     expect(doc.warnings[0]).toContain("sudo loginctl enable-linger tester");
+  }, 240_000);
+
+  test("install and status work from a shell without XDG_RUNTIME_DIR or a bus address", async () => {
+    const env = await container.user(
+      'echo "${XDG_RUNTIME_DIR:-unset}|${DBUS_SESSION_BUS_ADDRESS:-unset}"',
+      30_000,
+      true,
+    );
+    expect(env.stdout.trim()).toBe("unset|unset");
+    const status = await service("status", "", true);
+    expect(status.exitCode, JSON.stringify(status.doc, null, 2)).toBe(0);
+    expect(status.doc.service?.installed).toBe(true);
+    const { exitCode, doc } = await service("install", "", true);
+    expect(exitCode, JSON.stringify(doc, null, 2)).toBe(0);
+    expect(doc.result).toBe("running");
   }, 240_000);
 
   test("uninstall stops the worker cleanly and removes the unit", async () => {
