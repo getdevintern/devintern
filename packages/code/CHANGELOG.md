@@ -10,6 +10,10 @@
 
 - **`auto_merge_require_checks`** (default `false`, workspace-wide or per repo, repo wins) and `devintern auto-merge --require-checks`: code PRs merge only when at least one CI check passed on the head commit, so a commit with no checks waits; `skipped` and `neutral` checks do not count. A PR waiting on CI keeps being checked on the same commit and merges once CI passes; the reason shows in the status comment, on the dashboard's Auto-merge entry, and in `--dry-run` output, which also names failing or pending checks
 
+### Technical
+
+- Tests no longer append fixture tasks to the surrounding DevIntern run's outputs when run inside an agent run (phantom "delegated N tasks" notifications)
+
 ## [2.29.0] - 2026-11-25
 
 Workspace release, continued: DevIntern no longer reads or writes anything in a checkout's `.devintern-code/`, checkouts without a hosted remote register by path, and all run state lives in `~/.devintern`. Auto-merge gains merge-safety policy presets, custom rules, and review paths; `devintern automations` installs bundled automation packs; newly added GitHub repos verify without reinstalling the App. Duplicate ticket runs during scheduled retries, rerere-replayed merges rejected by commit hooks, worker doctor messages, and the dashboard's harness and stats views are fixed.
