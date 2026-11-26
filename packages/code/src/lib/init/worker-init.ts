@@ -40,6 +40,7 @@ import {
 } from "../code-host/github/app-setup";
 import { isPromptAbort } from "../cli/prompt-abort";
 import { resolveWizardPrompts } from "../cli/prompt-session";
+import { WORKER_PILOT_OFFER, signInCommand } from "../account/worker-pilot";
 import { renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
 import { runTrackerSetup } from "./wizard";
@@ -830,13 +831,7 @@ async function runLicenseStep(
       ctx.log("✅ Automation license OK.");
     } else {
       ctx.log(`⚠️  ${failure}`);
-      if (
-        await askYesNo(
-          ctx,
-          "Sign in now to start a free Worker Pilot (no card required)? [Y/n]: ",
-          true,
-        )
-      ) {
+      if (await askYesNo(ctx, `Sign in now to start your ${WORKER_PILOT_OFFER}? [Y/n]: `, true)) {
         try {
           const signIn = ctx.deps.signIn ?? defaultSignIn;
           const user = await signIn(ctx.projectRoot, workspaceDir);
@@ -850,12 +845,14 @@ async function runLicenseStep(
         }
       }
       if (failure === null) {
-        ctx.log("✅ Free Worker Pilot available. It starts when the worker is ready.");
-      } else {
-        ctx.log("   The worker will refuse to start until this is fixed:");
-        ctx.log("   run `devintern worker login` for a free Worker Pilot, or get an automation");
         ctx.log(
-          "   license at https://devintern.com/pricing and set LICENSE_KEY in the workspace .env.",
+          `✅ Free Worker Pilot available: your ${WORKER_PILOT_OFFER} starts when the worker first starts.`,
+        );
+      } else {
+        ctx.log("   The worker will not start until this is done:");
+        ctx.log(`   run \`${signInCommand()}\` to begin your ${WORKER_PILOT_OFFER},`);
+        ctx.log(
+          "   or get an automation license at https://devintern.com/pricing and set LICENSE_KEY in the workspace .env.",
         );
       }
     }
@@ -1232,18 +1229,30 @@ async function runServiceStep(ctx: InitContext, workspaceDir: string): Promise<S
 export function readinessBlockers(
   checks: ReadinessCheck[] | undefined,
   licenseFailure: string | null | undefined,
-): string[] {
+): ReadinessBlocker[] {
   if (checks) {
     return checks
-      .filter((check) => check.status === "fail")
-      .map((check) => `${check.label}: ${check.hint ?? check.detail ?? "see the check above"}`);
+      .filter((check) => check.status === "fail" || check.status === "action")
+      .map((check) => ({
+        text: `${check.label}: ${check.hint ?? check.detail ?? "see the check above"}`,
+        action: check.status === "action",
+      }));
   }
   if (licenseFailure) {
     return [
-      "Automation entitlement: run `devintern worker login` to start the free Worker Pilot, or set LICENSE_KEY in the workspace .env",
+      {
+        text: `Automation entitlement: run \`${signInCommand()}\` to begin your ${WORKER_PILOT_OFFER}, or set LICENSE_KEY in the workspace .env`,
+        action: false,
+      },
     ];
   }
   return [];
+}
+
+/** Something that keeps the worker from starting; `action` is a step, not a failure. */
+export interface ReadinessBlocker {
+  text: string;
+  action: boolean;
 }
 
 /** Run the `worker doctor` checks and print them; undefined when they cannot run. */
@@ -1278,13 +1287,19 @@ function logWorkerNextSteps(
     serviceRunning: boolean;
     githubAppOutcome: GitHubAppOutcome;
     relayConnected: boolean;
-    blockers: string[];
+    blockers: ReadinessBlocker[];
   },
 ): void {
   const { serviceRunning, githubAppOutcome, relayConnected, blockers } = outcome;
   if (blockers.length > 0) {
-    ctx.log("\n⚠️  Worker setup saved, but the worker is not ready yet. Next steps:");
-    blockers.forEach((blocker, index) => ctx.log(`   ${index + 1}. ${blocker}`));
+    // Same wording as `worker doctor` and `worker init --non-interactive`:
+    // a missing sign-in is one step left, not a broken setup.
+    ctx.log(
+      blockers.every((blocker) => blocker.action)
+        ? `\n👉 Worker setup saved. One step left: sign in to begin your ${WORKER_PILOT_OFFER}.`
+        : "\n⚠️  Worker setup saved, but the worker is not ready yet. Next steps:",
+    );
+    blockers.forEach((blocker, index) => ctx.log(`   ${index + 1}. ${blocker.text}`));
     const platform = ctx.deps.platform ?? process.platform;
     ctx.log(
       `   ${blockers.length + 1}. Check again with \`devintern worker doctor\`, then ` +

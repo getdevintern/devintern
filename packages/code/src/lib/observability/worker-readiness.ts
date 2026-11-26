@@ -36,6 +36,9 @@ import {
 } from "../workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 import { defaultProbe } from "@devintern/task-trackers";
+import { WORKER_PILOT_OFFER, signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
+import { entitlementCheck } from "./worker-entitlement";
+import type { WorkerEntitlementLike } from "./worker-entitlement";
 import { createTrackerClient, trackerRequiredEnv } from "../trackers/manager";
 import { redactUrlCredentials } from "./dashboard-workspace";
 import { collectHarnessPreflight } from "../agent/sandbox";
@@ -51,13 +54,8 @@ const DEFAULT_DASHBOARD_PORT = 4400;
 /** Per-probe timeout for query dry-runs and repository checks. */
 const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 
-/** Minimal license result the entitlement check needs (subset of `LicenseCheckResult`). */
-export interface WorkerEntitlementLike {
-  valid: boolean;
-  source: string;
-  message: string;
-  trialAvailable?: boolean;
-}
+export type { WorkerEntitlementLike } from "./worker-entitlement";
+export { entitlementCheck } from "./worker-entitlement";
 
 /** Outcome of one repository access probe. */
 export type RepoAccessResult = { ok: true; detail?: string } | { ok: false; reason: string };
@@ -158,10 +156,16 @@ function workerLivenessCheck(worker: WorkerStatusView): ReadinessCheck | undefin
  */
 export function workerDoctorClosingLine(
   checks: ReadinessCheck[],
-  report: { hasFailures: boolean; hasWarnings: boolean },
+  report: { hasFailures: boolean; hasWarnings: boolean; hasActions?: boolean },
 ): string {
   if (report.hasFailures) {
     return "❌ Not ready — the worker would sit idle or fail. Fix the checks above.";
+  }
+  if (report.hasActions) {
+    const steps = checks
+      .filter((check) => check.status === "action")
+      .map((check) => check.hint ?? check.detail ?? check.label);
+    return `👉 Setup is fine; one step left before the worker can start. ${steps.join(" ")}`;
   }
   const worker = checks.find((check) => check.id === "worker");
   if (worker?.status === "ok") {
@@ -377,6 +381,8 @@ async function defaultCheckEntitlement(workspaceDir: string): Promise<WorkerEnti
     supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
     requireAutomation: true,
     allowTrial: true,
+    // Doctor runs in a terminal or for an agent setting up, not as the daemon.
+    setup: true,
     loginCommand: "devintern worker login",
   });
 }
@@ -903,28 +909,15 @@ export async function collectWorkerDoctorChecks(
       hint: "Rerun `devintern worker doctor` without --offline to verify the license",
     });
   } else {
+    const loginCommand = workerLoginCommandFor(
+      options.workspacePath ?? workspaceConfigPath(workspaceDir),
+    );
     const entitlementHint =
-      "Run `devintern worker login` to start the free Worker Pilot, or set LICENSE_KEY in the workspace .env (https://devintern.com/pricing)";
+      `Run \`${signInCommand(loginCommand)}\` to start your ${WORKER_PILOT_OFFER}, ` +
+      "or set LICENSE_KEY in the workspace .env (https://devintern.com/pricing)";
     try {
       const license = await (deps.checkEntitlement ?? defaultCheckEntitlement)(workspaceDir);
-      checks.push(
-        license.valid
-          ? {
-              id: "entitlement",
-              label: "Automation entitlement",
-              status: "ok",
-              detail: license.trialAvailable
-                ? "trial: Worker Pilot available; starts when the worker runs"
-                : `${license.source}${license.source === "trial" || license.source === "grace" ? `: ${license.message}` : ""}`,
-            }
-          : {
-              id: "entitlement",
-              label: "Automation entitlement",
-              status: "fail",
-              detail: `${license.source}: ${license.message}`,
-              hint: entitlementHint,
-            },
-      );
+      checks.push(entitlementCheck(license, loginCommand, entitlementHint));
     } catch (error) {
       checks.push({
         id: "entitlement",

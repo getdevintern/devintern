@@ -51,6 +51,12 @@ export interface LicenseCheckResult {
   trialEndsAt?: string;
   /** True when the trial is eligible but has not been activated yet. */
   trialAvailable?: boolean;
+  /**
+   * True when nothing is wrong except that nobody is signed in: no
+   * `LICENSE_KEY`, no session, and the check allows a Worker Pilot. Signing
+   * in is the next step, not a fix for a broken setup.
+   */
+  signInRequired?: boolean;
 }
 
 export interface LicenseCheckOptions {
@@ -516,7 +522,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     if (!user) {
       messages.push(
         allowTrial
-          ? `Alternatively, run \`${loginCommand}\` to start a free Worker Pilot; no card is required.`
+          ? `Alternatively, run \`${loginCommand}\` to start your 14-day free Worker Pilot (no card required).`
           : "Alternatively, sign in if your account already holds one.",
       );
     }
@@ -537,6 +543,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     valid: false,
     source: "none",
     message: messages.join(" "),
+    ...(!user && requireAutomation && allowTrial ? { signInRequired: true } : {}),
   };
 }
 
@@ -561,6 +568,8 @@ export async function activateWorkerTrial(options: {
   productKey: string;
   supabaseConfig: SupabaseAuthConfig;
   retryBaseDelayMs?: number;
+  /** Sign-in command named in the message (defaults to `devintern login`). */
+  loginCommand?: string;
 }): Promise<LicenseCheckResult> {
   let user: AuthenticatedUser | null = null;
   try {
@@ -572,7 +581,8 @@ export async function activateWorkerTrial(options: {
     return {
       valid: false,
       source: "none",
-      message: "Run `devintern login` to start the free Worker Pilot.",
+      message: `Run \`${options.loginCommand ?? "devintern login"}\` to start your 14-day free Worker Pilot (no card required).`,
+      signInRequired: true,
     };
   }
 

@@ -20,6 +20,7 @@ import {
   collectWorkerDoctorChecks,
   createDefaultRepoAccessCheck,
   defaultCheckSandbox,
+  entitlementCheck,
   gitFailureCause,
   gitLsRemote,
   gitProbeEnv,
@@ -451,6 +452,78 @@ remote = "git@github.com:acme/backend.git"
       }),
     );
     expect(byId(checks, "entitlement")[0]?.status).toBe("ok");
+    expect(byId(checks, "entitlement")[0]?.detail).toContain("starts when the worker first starts");
+  });
+
+  test("nobody signed in is an action, not a failure, and the closing line says one step is left", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        checkEntitlement: async () => ({
+          valid: false,
+          source: "none",
+          message: "No automation license or Worker Pilot was found.",
+          signInRequired: true,
+        }),
+      }),
+    );
+    const [entitlement] = byId(checks, "entitlement");
+    expect(entitlement).toMatchObject({
+      status: "action",
+      detail: "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+    });
+    // A non-default workspace: the command names it, with a method.
+    expect(entitlement?.hint).toContain(
+      `devintern worker login --workspace ${workspacePath} github`,
+    );
+    expect(entitlement?.hint).toContain("--no-wait");
+    const report = renderReadinessReport(checks);
+    expect(report).toMatchObject({ hasFailures: false, hasActions: true });
+    expect(report.lines).toContain(
+      "👉 Automation entitlement — Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+    );
+    expect(workerDoctorClosingLine(checks, report)).toStartWith(
+      "👉 Setup is fine; one step left before the worker can start. Run `devintern worker login",
+    );
+  });
+
+  test("a failure next to the sign-in action still fails", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        checkEntitlement: async () => ({
+          valid: false,
+          source: "none",
+          message: "x",
+          signInRequired: true,
+        }),
+        checkHarness: async () => ({ id: "harness", label: "Agent harness", status: "fail" }),
+      }),
+    );
+    const report = renderReadinessReport(checks);
+    expect(report).toMatchObject({ hasFailures: true, hasActions: true });
+    expect(workerDoctorClosingLine(checks, report)).toContain("Not ready");
+  });
+
+  test("an active Worker Pilot shows its end date", () => {
+    const now = Date.parse("2026-11-26T12:00:00Z");
+    const check = entitlementCheck(
+      {
+        valid: true,
+        source: "trial",
+        message: "active",
+        trialEndsAt: "2026-12-10T12:00:00Z",
+      },
+      "devintern worker login",
+      "hint",
+      now,
+    );
+    expect(check).toMatchObject({
+      status: "ok",
+      detail: "Worker Pilot active, ends 2026-12-10 (14 days left)",
+    });
   });
 
   test.each(["srt", "smolvm"])(
