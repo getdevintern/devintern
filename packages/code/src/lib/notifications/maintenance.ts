@@ -12,6 +12,8 @@ import { Database } from "bun:sqlite";
 
 import { parseEnvInteger } from "../config/env-integer";
 import { configureSqliteConnection } from "../state/sqlite";
+import { workerNotificationDelivery } from "./delivery/dispatcher";
+import type { DispatcherOptions } from "./delivery/dispatcher";
 import { pruneNotifications } from "./store";
 
 /** Interval between periodic notification prunes (1 hour). */
@@ -69,4 +71,17 @@ export function startNotificationSweeper(
   }, intervalMs);
   timer.unref?.();
   return timer;
+}
+
+/**
+ * Worker startup: prune now, keep sweeping, and return the delivery loop for
+ * the caller to start once it holds the worker lock.
+ */
+export function startNotificationMaintenance(
+  dbPath: string,
+  config: DispatcherOptions["config"],
+): { start(): void; stop(): void } {
+  pruneResolvedNotifications(dbPath);
+  startNotificationSweeper(dbPath);
+  return workerNotificationDelivery(dbPath, config);
 }

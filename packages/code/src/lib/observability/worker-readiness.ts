@@ -50,6 +50,7 @@ import { collectHarnessPreflight } from "../agent/sandbox";
 import { resolveWorkerStatus } from "./dashboard-api";
 import type { WorkerStatusView } from "./dashboard-api";
 import type { ReadinessCheck } from "./readiness";
+import { notificationDoctorCheck } from "../notifications/delivery/doctor";
 
 type Env = Record<string, string | undefined>;
 
@@ -70,6 +71,8 @@ export interface WorkerDoctorOptions {
   workspacePath?: string;
   /** Skip every network-touching probe (`--offline`). */
   offline?: boolean;
+  /** Send a test message through each configured notification channel (`--test-notifications`). */
+  testNotifications?: boolean;
 }
 
 export interface WorkerDoctorDeps {
@@ -100,6 +103,8 @@ export interface WorkerDoctorDeps {
    * `GET /api/worker`); `undefined` when nothing answers like a dashboard.
    */
   dashboardServerPid?: (port: number) => Promise<number | undefined>;
+  /** Side effects of notification channels (env is replaced by the workspace env). */
+  notificationChannelDeps?: Parameters<typeof notificationDoctorCheck>[3];
 }
 
 /** Timeout for asking a busy dashboard port who owns it. */
@@ -983,6 +988,13 @@ export async function collectWorkerDoctorChecks(
 
   // 8. Dashboard port (warning only: the worker continues without it)
   if (config) checks.push(await dashboardPortCheck(config, workspaceEnv, worker, deps));
+
+  // 9. Notification delivery channels (warning only; never throws)
+  if (config) {
+    checks.push(
+      await notificationDoctorCheck(config, workspaceEnv, options, deps.notificationChannelDeps),
+    );
+  }
 
   return checks;
 }

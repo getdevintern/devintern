@@ -294,6 +294,11 @@ export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
   dashboard: DashboardSettings;
   worker: WorkerSettings;
+  /**
+   * Out-of-dashboard notification delivery (`[notifications]`); absent or
+   * channel-less means nothing is delivered.
+   */
+  notifications?: import("../notifications/delivery/config").NotificationsSettings;
   defaults: WorkspaceDefaults;
   /** Team tracker sources; empty means the single `[defaults]` fleet query. */
   teams: TeamConfig[];

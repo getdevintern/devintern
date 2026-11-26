@@ -61,6 +61,8 @@ Repeats of the same event share one row with a count such as **×88**, and the r
 - **Resolve** closes a row you have dealt with. Rows also resolve on their own when the problem goes away, for example when a later run of the same task succeeds. Turn on **Show resolved** to see them again.
 - **Mute** hides this row and every future notification from the same cause. Use it for a known, noisy problem you do not want to hear about. Muted groups are listed at the bottom of the inbox with **Unmute**.
 
+To get these on your desktop, in Slack, or at a webhook without keeping the dashboard open, see [Notifications](notifications.md).
+
 ## Why a run did not succeed
 
 A run that failed, escalated, or was abandoned has an outcome class. The runs list shows it as a badge with the cause underneath, and **Class** filters by it. Open the run for a banner with the class, the step that failed, its error, and where the unfinished work went.

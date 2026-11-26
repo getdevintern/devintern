@@ -188,7 +188,7 @@ Other trackers have no repo-to-project mapping, so set per-repo keys such as `JI
 
 The worker reloads `workspace.toml` a moment after you save it. Work already running finishes with the old config. Send `SIGHUP` to force a reload. A broken edit is logged and the last valid config keeps running.
 
-Most settings apply on reload, including repos, routing rules, queries, team `repo`, automations, estimations, pipelines, concurrency, and PR follow-up settings. These need a restart:
+Most settings apply on reload, including repos, routing rules, queries, team `repo`, automations, estimations, pipelines, concurrency, PR follow-up settings, and [`[notifications]`](notifications.md). These need a restart:
 
 - team `name`, `tracker`, `env_file`, and `[teams.env]`
 - `[[error_monitors]]`

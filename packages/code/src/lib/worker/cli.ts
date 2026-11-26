@@ -164,12 +164,15 @@ async function runWorkerRunNowSubcommand(args: string[]): Promise<never> {
  */
 async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   if (hasHelpArg(args)) {
-    console.log("Usage: devintern worker doctor [--workspace <path>] [--offline]");
+    console.log(
+      "Usage: devintern worker doctor [--workspace <path>] [--offline] [--test-notifications]",
+    );
     console.log("");
     console.log("Check whether this worker workspace can acquire and run work right now:");
     console.log("workspace.toml, per-team tracker credentials, ready-tasks query dry-runs,");
     console.log("repository access, automation entitlement, harness and sandbox, and the");
-    console.log("dashboard port. Changes nothing and does not start the worker.");
+    console.log("dashboard port, and notification channels. Changes nothing and does not");
+    console.log("start the worker (--test-notifications sends one test message per channel).");
     console.log("Exits 1 when a check fails, 2 when the only thing left is a step for you");
     console.log("(signing in to start the Worker Pilot), and 0 when ready.");
     console.log("");
@@ -177,11 +180,13 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
     console.log("                      workspace.toml, or DEVINTERN_WORKSPACE_DIR)");
     console.log("  --offline           Skip query, repository, and license checks (no network)");
+    console.log("  --test-notifications  Send a test message through each [notifications] channel");
     console.log("  -h, --help          Display this help message");
     process.exit(0);
   }
   let workspacePath: string | undefined;
   let offline = false;
+  let testNotifications = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--workspace") {
@@ -194,6 +199,8 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
       i++;
     } else if (arg === "--offline") {
       offline = true;
+    } else if (arg === "--test-notifications") {
+      testNotifications = true;
     } else {
       console.error(`❌ Unknown option for worker doctor: ${arg}`);
       console.error("   Run `devintern worker doctor --help` for usage.");
@@ -213,7 +220,10 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   } catch {
     // Unreadable workspace .env: the config check reports the workspace state.
   }
-  const checks = await collectWorkerDoctorChecks({ workspacePath, offline }, { processEnv });
+  const checks = await collectWorkerDoctorChecks(
+    { workspacePath, offline, testNotifications },
+    { processEnv },
+  );
   const report = renderReadinessReport(checks);
   console.log(`🩺 devintern worker readiness${offline ? " (offline)" : ""}:\n`);
   console.log(report.lines.join("\n"));
