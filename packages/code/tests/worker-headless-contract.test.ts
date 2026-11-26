@@ -268,7 +268,10 @@ describe("worker init --non-interactive (headless contract)", () => {
   test("--repo-from-cwd records the remote's default branch and warns about another checkout branch", async () => {
     const remote = join(root, "remote.git");
     execSync(`git init -q --bare -b trunk ${remote}`);
-    git(repoDir, `commit -q --allow-empty -m init`);
+    git(
+      repoDir,
+      "-c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m init",
+    );
     git(repoDir, `remote set-url origin ${remote}`);
     git(repoDir, "push -q origin main:trunk");
     git(repoDir, "fetch -q origin");
