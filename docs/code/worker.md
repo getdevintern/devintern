@@ -113,7 +113,7 @@ An idle healthy worker and an idle misconfigured one look the same. Run the doct
 devintern worker doctor [--workspace <path>] [--offline] [--json]
 ```
 
-It checks that `workspace.toml` parses, that there is something to acquire, tracker credentials per team, a dry run of each `task_query` (with match counts), access to each repository, your automation license, the agent harness and sandbox, and whether the dashboard port is free. Every failing row includes a fix hint. It exits 0 when ready and 1 when a check fails. When the only thing left is signing in, the license row shows 👉 `Not started: sign in to begin your 14-day free Worker Pilot, no card required` and it exits 2. An active Pilot shows its end date. `--offline` skips network checks. `--json` prints one document (`schema` `devintern.worker-doctor`, `version` 1) with `result` (`success`, `action_required`, or `failure`, exit codes 0, 2, and 1 as above), `checks` in the same shape as `worker init --json`, and `nextSteps`. The doctor never edits config or starts the worker. It is safe to run while the worker is up: it reports the running worker, and its dashboard on the port is not flagged as a conflict.
+It checks that `workspace.toml` parses, that there is something to acquire, tracker credentials per team, a dry run of each `task_query` (with match counts), access to each repository, the git commit identity (a warning when only the generic `DevIntern` identity is left; see [Commit identity](./configuration.md#commit-identity)), your automation license, the agent harness and sandbox, and whether the dashboard port is free. Every failing row includes a fix hint. It exits 0 when ready and 1 when a check fails. When the only thing left is signing in, the license row shows 👉 `Not started: sign in to begin your 14-day free Worker Pilot, no card required` and it exits 2. An active Pilot shows its end date. `--offline` skips network checks. `--json` prints one document (`schema` `devintern.worker-doctor`, `version` 1) with `result` (`success`, `action_required`, or `failure`, exit codes 0, 2, and 1 as above), `checks` in the same shape as `worker init --json`, and `nextSteps`. The doctor never edits config or starts the worker. It is safe to run while the worker is up: it reports the running worker, and its dashboard on the port is not flagged as a conflict.
 
 ## Polling mode
 
@@ -250,7 +250,7 @@ WorkingDirectory=/home/you/.devintern
 WantedBy=multi-user.target
 ```
 
-On Windows, run `devintern worker` in a terminal. For `PATH` pinning and git push credentials under a service, see [Keeping unattended runs healthy](./automated-task-processing.md#keeping-unattended-runs-healthy).
+On Windows, run `devintern worker` in a terminal. For `PATH` pinning, git push credentials, and the commit identity on an unattended host, see [Keeping unattended runs healthy](./automated-task-processing.md#keeping-unattended-runs-healthy).
 
 ## Keeping the worker up to date
 
