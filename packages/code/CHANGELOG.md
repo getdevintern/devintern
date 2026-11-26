@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`worker doctor` reports GitHub credentials that can't read CI status**: with `[workspace].auto_merge` or `ci_failure_fix` on, a new **CI status access** row per GitHub repo fails when the token or GitHub App lacks `Commit statuses: Read` (or `Actions: Read` for CI fixes) and names the env file the token comes from. Before, auto-merge just never merged. Missing `Checks` is only a note for tokens (fine-grained tokens can't get it) and a warning for an App; network errors warn. The worker runs the same probe at startup and prints one warning line per failing repo. See `docs/code/configuration.md#github-authentication`
+
 ## [2.29.0] - 2026-11-25
 
 Workspace release, continued: DevIntern no longer reads or writes anything in a checkout's `.devintern-code/`, checkouts without a hosted remote register by path, and all run state lives in `~/.devintern`. Auto-merge gains merge-safety policy presets, custom rules, and review paths; `devintern automations` installs bundled automation packs; newly added GitHub repos verify without reinstalling the App. Duplicate ticket runs during scheduled retries, rerere-replayed merges rejected by commit hooks, worker doctor messages, and the dashboard's harness and stats views are fixed.

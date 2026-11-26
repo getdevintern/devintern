@@ -56,6 +56,8 @@ import { gitCommitIdentityCheck } from "./git-identity-readiness";
 import { relayReadinessCheck } from "./relay-readiness";
 import type { GitIdentityCheckInput } from "./git-identity-readiness";
 import { workerLivenessCheck } from "./worker-liveness-readiness";
+import { ciPermissionChecks } from "./ci-permission-readiness";
+import type { CiPermissionDoctorDeps } from "./ci-permission-readiness";
 
 type Env = Record<string, string | undefined>;
 
@@ -78,7 +80,7 @@ export interface WorkerDoctorOptions {
   testNotifications?: boolean;
 }
 
-export interface WorkerDoctorDeps {
+export interface WorkerDoctorDeps extends CiPermissionDoctorDeps {
   /** Environment of the doctor process. Defaults to `process.env`. */
   processEnv?: Env;
   /** Workspace home when `--workspace` is not given. */
@@ -782,6 +784,11 @@ async function collectConfigScopedChecks(
       });
     }
   }
+
+  // 4a. CI status access (auto-merge / CI fixes only)
+  checks.push(
+    ...(await ciPermissionChecks({ config, workspaceDir, processEnv, offline, timeoutMs, deps })),
+  );
 }
 
 /**
