@@ -344,7 +344,13 @@ describe("relay worker identity", () => {
           lastSeenAt: new Date(LAST_SEEN).toISOString(),
         },
       ],
-      nextSteps: [{ id: "takeover", command: "devintern worker connect github --takeover --json" }],
+      nextSteps: [
+        {
+          id: "takeover",
+          message: expect.stringContaining("Another worker owns these registrations"),
+          command: "devintern worker connect github --takeover --json",
+        },
+      ],
       workerId: WORKER_ID,
     });
   });
