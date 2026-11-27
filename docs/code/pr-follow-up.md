@@ -4,7 +4,7 @@ sidebarLabel: "PR Follow-up"
 description: "Use when the worker should keep its pull requests moving: addressing review feedback, resolving merge conflicts, fixing CI, auto-merging safe PRs, and answering @mentions."
 section: "Automation"
 order: 2.2
-dateModified: 2026-11-25
+dateModified: 2026-11-27
 ---
 
 # PR Follow-up: Reviews, Conflicts, CI, and Auto-merge
@@ -17,6 +17,7 @@ After the [worker](./worker.md) opens a pull request, it keeps watching it. This
 | [Resolve merge conflicts](#merge-conflicts-on-the-agents-prs) | on      | `[workspace].conflict_resolution`       |
 | [Sync teammates' PRs](#syncing-teammates-open-prs)            | off     | `[[repos]].sync_team_prs`               |
 | [Auto-merge safe PRs](#auto-merging-safe-prs)                 | off     | `[workspace].auto_merge`                |
+| [Auto-merge teammates' PRs](#auto-merging-teammates-prs)      | off     | `[[repos]].auto_merge_team_prs`         |
 | [Fix failing CI](#ci-failures-on-the-agents-prs)              | off     | `[workspace].ci_failure_fix`            |
 | [Respond to `@mentions`](#mention-the-bot-on-any-pr)          | on      | needs the relay or a customer-owned App |
 
@@ -102,7 +103,7 @@ Because this hands teammates' code to the agent, each opted-in repo must set an 
 
 ## Auto-merging safe PRs
 
-Set `auto_merge = true` to have the worker merge its own PRs once they are green and safe, so small docs fixes do not wait in a review queue. It is off by default and GitHub-only.
+Set `auto_merge = true` to have the worker merge its own PRs once they are green and safe, so small docs fixes do not wait in a review queue; [teammates' PRs](#auto-merging-teammates-prs) can opt in too. It is off by default and GitHub-only.
 
 ```toml
 [workspace]
@@ -202,6 +203,19 @@ Tested changes elsewhere may merge. Documentation and test-only changes are safe
 Changing the policy, the rules, the instructions, or the review paths re-checks PRs that were left open. A PR an earlier version left open for a diff over 150,000 characters is re-checked when new commits are pushed to it (that hold ran no agent review). All of these keys apply on reload, without a restart.
 
 The worker explains each decision in one status comment on the PR, edited in place (an agent hold names the policy it ran under, such as `standard` or `custom: merge-rules.md`), and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. A failed check does not count as the PR's one agent review. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately, except commits and PRs that already have a decision under the current policy.
+
+### Auto-merging teammates' PRs
+
+Auto-merge can also cover teammates' open PRs in a repository. With `[workspace].auto_merge = true`, opt in per repo:
+
+```toml
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+auto_merge_team_prs = true
+```
+
+Eligible PRs are the same as for [syncing teammates' PRs](#syncing-teammates-open-prs): open, not drafts, from a branch in the same repository, and by an owner, member, collaborator, or maintainer. They pass the same gates, policy, status comment, and label as the agent's own PRs, so only PRs your policy calls safe merge; require approving reviews in branch protection if teammates' PRs must still get a human review. Only the first 100 open PRs per repo are considered. `auto_merge_team_prs` is GitHub-only and applies on reload.
 
 The GitHub credential needs the auto-merge permissions listed under [GitHub authentication](./configuration.md#github-authentication), including read access to `Commit statuses` (and `Checks` for a GitHub App). To test the gates on one PR without merging:
 

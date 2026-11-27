@@ -36,9 +36,18 @@
  * quota's reset time, kept in the run list as **Deferred**, and the PR is
  * not touched again until then, so no check is relaunched into the limit.
  * The PR is reviewed on the first pass after the quota returns.
+ *
+ * Team PRs (opt-in, `auto_merge_team_prs = true` per workspace repo): for
+ * each opted-in repo the watcher also lists open PRs (ETag-conditional) and
+ * evaluates open, non-draft, same-repo PRs whose author is on the repo's
+ * team (`author_association` OWNER/MEMBER/COLLABORATOR/MAINTAIN, the same
+ * gate team-PR base sync uses), re-checked on the fresh per-PR payload. They
+ * go through exactly the same gates and policy as the agent's own PRs.
  */
 
 import { startFirstTickInBackground } from "./background-tick";
+import { isTeamAuthor, OPEN_PR_LIST_PAGE_SIZE } from "./team-pr-sweep";
+import type { PolledPrListItem } from "./team-pr-sweep";
 import type { Acquirer } from "../../worker";
 import { ciWaitKey } from "../review/auto-merge";
 import type { AutoMergeResult } from "../review/auto-merge";
@@ -106,6 +115,17 @@ export interface AutoMergeWatcherOptions {
    * already knows. A PR targeting one is never merged.
    */
   isStackedBase?: (repo: string, baseRef: string) => boolean;
+  /**
+   * GitHub slugs opted into auto-merging teammates' PRs
+   * (`auto_merge_team_prs = true`). Read every tick so reloads apply.
+   * Requires {@link AutoMergeWatcherOptions.listOpenPullRequests}.
+   */
+  teamPrRepos?: () => string[];
+  /** List a repo's open PRs (team-PR discovery). */
+  listOpenPullRequests?(
+    repo: string,
+    etag?: string,
+  ): Promise<ConditionalResult<PolledPrListItem[]>>;
   /** Seconds a head SHA must stay unchanged before evaluation (default 300). */
   quietSeconds?: number;
   /** Failed evaluations per head SHA before giving up (default 3). */
@@ -318,6 +338,17 @@ function recordNonCiHold(
   state.nonCiHolds = held ? (state.nonCiHolds ?? 0) + 1 : 0;
 }
 
+/**
+ * Not a draft, not a fork, and (for a teammate's PR) still team-authored on
+ * the fresh payload: the open-PR list entry can be stale.
+ */
+function eligiblePr(repo: string, pr: AutoMergePolledPr, team: boolean): boolean {
+  if (pr.draft) return false;
+  if (team && !isTeamAuthor(pr.author_association)) return false;
+  const headRepo = pr.head?.repo?.full_name;
+  return !headRepo || headRepo.toLowerCase() === repo.toLowerCase();
+}
+
 /** Durable key of one auto-merge decision. */
 export function autoMergeDecisionKey(
   repo: string,
@@ -351,6 +382,20 @@ export interface AutoMergeWatcherStatus {
   running: boolean;
 }
 
+/** One PR the watcher considers this pass. */
+interface WatchedPr {
+  repo: string;
+  prNumber: number;
+  /** A teammate's PR (`auto_merge_team_prs`), not one the agent opened. */
+  team: boolean;
+}
+
+/** Last open-PR list of a team-PR repo (304 reuse). */
+interface TeamPrList {
+  etag?: string;
+  items: PolledPrListItem[];
+}
+
 /** Result of a dashboard "Run now". */
 export type AutoMergeRunNowOutcome = { ok: true } | { ok: false; reason: string };
 
@@ -371,6 +416,14 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
   private forceNextPass = false;
   /** Stacked-base skips already logged, per `repo#pr@head:base`. */
   private readonly stackSkipsLogged = new Set<string>();
+  /** Open-PR lists per team-PR repo (lowercased slug). */
+  private readonly teamPrLists = new Map<string, TeamPrList>();
+  /** Team-PR repos whose list sits at the page-size cap (warned once). */
+  private readonly teamPrCapWarned = new Set<string>();
+  /** Team-PR repos whose open-PR list returned 404 (warned once until it reads again). */
+  private readonly teamPrGoneWarned = new Set<string>();
+  /** Last logged team-PR scope, so enable/disable changes log once. */
+  private teamPrScope = "";
 
   constructor(options: AutoMergeWatcherOptions) {
     this.options = options;
@@ -453,7 +506,11 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     const force = this.forceNextPass;
     this.forceNextPass = false;
     try {
-      const watched = this.options.workerState.listOpenAgentPrs();
+      const watched: WatchedPr[] = this.options.workerState
+        .listOpenAgentPrs()
+        .map((pr) => ({ repo: pr.repo, prNumber: pr.prNumber, team: false }));
+      const ownKeys = new Set(watched.map((pr) => `${pr.repo.toLowerCase()}#${pr.prNumber}`));
+      watched.push(...(await this.discoverTeamPrs(ownKeys)));
       const keys = new Set(watched.map((pr) => `${pr.repo.toLowerCase()}#${pr.prNumber}`));
       for (const key of this.tracking.keys()) {
         if (!keys.has(key)) this.tracking.delete(key);
@@ -462,7 +519,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         // A live disable takes effect between PRs, not only between ticks.
         if (!this.options.enabled()) break;
         try {
-          await this.pollPr(pr.repo, pr.prNumber, force);
+          await this.pollPr(pr.repo, pr.prNumber, force, pr.team);
         } catch (error) {
           if (isGitHubAuthError(error)) {
             this.warnAuthFailure(pr.repo, error as Error);
@@ -482,6 +539,104 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     }
   }
 
+  /** Team-PR repos active this pass; logs scope changes and prunes stale lists. */
+  private teamPrReposThisPass(): string[] {
+    const bySlug = new Map<string, string>();
+    if (this.options.listOpenPullRequests && this.options.teamPrRepos) {
+      for (const repo of this.options.teamPrRepos()) {
+        if (!bySlug.has(repo.toLowerCase())) bySlug.set(repo.toLowerCase(), repo);
+      }
+    }
+    const active = new Set(bySlug.keys());
+    const label = [...active].sort().join(", ");
+    if (label !== this.teamPrScope) {
+      console.log(
+        label
+          ? `🌐 [${this.name}] auto-merge of team PRs enabled on: ${label}`
+          : `🌐 [${this.name}] auto-merge of team PRs disabled`,
+      );
+      this.teamPrScope = label;
+    }
+    for (const repo of this.teamPrLists.keys())
+      if (!active.has(repo)) this.teamPrLists.delete(repo);
+    for (const warned of [this.teamPrCapWarned, this.teamPrGoneWarned]) {
+      for (const repo of warned) if (!active.has(repo)) warned.delete(repo);
+    }
+    return [...bySlug.values()];
+  }
+
+  /**
+   * Teammates' open PRs in opted-in repos (`auto_merge_team_prs`): same-repo,
+   * non-draft, team-authored, and not already one of the agent's own PRs.
+   * A repo whose list cannot be read contributes nothing this pass.
+   */
+  private async discoverTeamPrs(ownKeys: ReadonlySet<string>): Promise<WatchedPr[]> {
+    const list = this.options.listOpenPullRequests;
+    const repos = this.teamPrReposThisPass();
+    if (!list || repos.length === 0) return [];
+    const found: WatchedPr[] = [];
+    for (const repo of repos) {
+      const repoKey = repo.toLowerCase();
+      const cached = this.teamPrLists.get(repoKey);
+      let items: PolledPrListItem[];
+      try {
+        const result = await list(repo, cached?.etag);
+        if (result.gone) {
+          this.teamPrLists.delete(repoKey);
+          if (this.teamPrGoneWarned.has(repoKey)) continue;
+          this.teamPrGoneWarned.add(repoKey);
+          console.warn(
+            `⚠️  [${this.name}] GitHub returned 404 listing open PRs on ${repo}; skipping ` +
+              "team PRs there until access returns",
+          );
+          continue;
+        }
+        this.teamPrGoneWarned.delete(repoKey);
+        if (result.notModified) {
+          if (!cached) continue;
+          items = cached.items;
+        } else {
+          if (!result.data) continue;
+          items = result.data;
+          this.teamPrLists.set(repoKey, { ...(result.etag ? { etag: result.etag } : {}), items });
+          this.checkTeamPrPageCap(repo, items.length);
+        }
+      } catch (error) {
+        if (isGitHubAuthError(error)) {
+          this.warnAuthFailure(repo, error as Error);
+        } else {
+          console.warn(
+            `⚠️  [${this.name}] listing open PRs on ${repo} failed: ${(error as Error).message}`,
+          );
+        }
+        continue;
+      }
+      for (const item of items) {
+        if (ownKeys.has(`${repoKey}#${item.number}`)) continue;
+        const headRepo = item.head?.repo?.full_name;
+        if (item.draft === true || (headRepo && headRepo.toLowerCase() !== repoKey)) continue;
+        if (!isTeamAuthor(item.author_association)) continue;
+        found.push({ repo, prNumber: item.number, team: true });
+      }
+    }
+    return found;
+  }
+
+  /** Warn once while a team-PR repo's open-PR list sits at the page-size cap. */
+  private checkTeamPrPageCap(repo: string, length: number): void {
+    const repoKey = repo.toLowerCase();
+    if (length < OPEN_PR_LIST_PAGE_SIZE) {
+      this.teamPrCapWarned.delete(repoKey);
+      return;
+    }
+    if (this.teamPrCapWarned.has(repoKey)) return;
+    this.teamPrCapWarned.add(repoKey);
+    console.warn(
+      `⚠️  [${this.name}] ${repo}'s open-PR list hit the ${OPEN_PR_LIST_PAGE_SIZE}-PR page ` +
+        "cap; open PRs past the first page are not considered for team-PR auto-merge",
+    );
+  }
+
   private warnAuthFailure(repo: string, error: Error): void {
     const key = repo.toLowerCase();
     const now = this.now();
@@ -494,7 +649,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     );
   }
 
-  private async pollPr(repo: string, prNumber: number, force = false): Promise<void> {
+  private async pollPr(repo: string, prNumber: number, force = false, team = false): Promise<void> {
     const key = `${repo.toLowerCase()}#${prNumber}`;
     const now = this.now();
     const previous = this.tracking.get(key);
@@ -526,10 +681,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       return;
     }
 
-    if (pr.draft) return;
-    if (pr.head.repo?.full_name && pr.head.repo.full_name.toLowerCase() !== repo.toLowerCase()) {
-      return;
-    }
+    if (!eligiblePr(repo, pr, team)) return;
     if (this.skipStacked(repo, prNumber, pr)) return;
     const mergeableState = pr.mergeable_state ?? "";
     if (!evaluableState(state, mergeableState, force, now)) return;
@@ -538,7 +690,13 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     const decisionKeys = this.undecidedKeys(repo, prNumber, headSha, policyFingerprint);
     if (!decisionKeys) return;
 
-    await this.evaluate(repo, prNumber, state, decisionKeys, mergeableState, policyFingerprint);
+    await this.evaluate(
+      { repo, prNumber, team },
+      state,
+      decisionKeys,
+      mergeableState,
+      policyFingerprint,
+    );
   }
 
   /**
@@ -595,13 +753,13 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
   }
 
   private async evaluate(
-    repo: string,
-    prNumber: number,
+    target: WatchedPr,
     state: PrTracking,
     decisionKeys: [head: string, pr: string],
     mergeableState: string,
     policyFingerprint: string | undefined,
   ): Promise<void> {
+    const { repo, prNumber, team } = target;
     const runId = this.beginRun(repo, prNumber);
     // The run row exists before the check is admitted: until the supervisor
     // grants the repo's slot it is waiting, not evaluating.
@@ -645,6 +803,10 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     if (result.outcome !== "waiting") state.staticCiWaitState = undefined;
     switch (result.outcome) {
       case "merged":
+        if (team) {
+          markDecided();
+          break;
+        }
         // Record the merge now instead of waiting for the next state poll,
         // so the dashboard's merged list reflects it immediately.
         this.options.workerState.markAgentPrClosed(repo, prNumber, "merged", {

@@ -122,6 +122,99 @@ describe("AutoMergeWatcherAcquirer", () => {
     expect(calls).toHaveLength(0);
   });
 
+  describe("team PRs (auto_merge_team_prs)", () => {
+    const teamItem = (number: number, extra: Record<string, unknown> = {}) => ({
+      number,
+      author_association: "MEMBER",
+      head: { repo: { full_name: REPO } },
+      ...extra,
+    });
+    const teamWatcher = (
+      items: Array<ReturnType<typeof teamItem>>,
+      opts: { repos?: () => string[]; prs?: Record<number, AutoMergePolledPr> } = {},
+    ) => {
+      const listCalls: Array<string | undefined> = [];
+      const w = new AutoMergeWatcherAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        enabled: () => enabled,
+        now: () => now,
+        quietSeconds: 0,
+        fetchPr: async (_repo, n) => ({ data: opts.prs?.[n] ?? pr, notModified: false }),
+        mergePr: async (_repo, prNumber, sha) => {
+          calls.push({ prNumber, sha });
+          return results.shift() ?? { outcome: "merged", message: "ok", reviewed: false };
+        },
+        teamPrRepos: opts.repos ?? (() => [REPO]),
+        listOpenPullRequests: async (_repo, etag) => {
+          listCalls.push(etag);
+          return etag
+            ? { data: null, notModified: true }
+            : { data: items, notModified: false, etag: '"v1"' };
+        },
+      });
+      return { w, listCalls };
+    };
+
+    test("evaluates teammates' same-repo, non-draft PRs alongside the agent's", async () => {
+      const team = { ...pr, author_association: "COLLABORATOR" };
+      const { w } = teamWatcher(
+        [
+          teamItem(7), // the agent's own PR: not duplicated
+          teamItem(8),
+          teamItem(9, { draft: true }),
+          teamItem(10, { author_association: "CONTRIBUTOR" }),
+          teamItem(11, { head: { repo: { full_name: "someone/fork" } } }),
+        ],
+        { prs: { 8: team } },
+      );
+      await w.tick();
+      expect(calls.map((call) => call.prNumber)).toEqual([7, 8]);
+      // A merged teammate PR is decided, not recorded as an agent PR merge.
+      expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 8, HEAD))).toBe(true);
+    });
+
+    test("re-checks the team gate on the fresh PR payload", async () => {
+      const { w } = teamWatcher([teamItem(8)], {
+        prs: { 8: { ...pr, author_association: "NONE" } },
+      });
+      await w.tick();
+      expect(calls.map((call) => call.prNumber)).toEqual([7]);
+    });
+
+    test("reuses the cached list on 304 and stops once the repo opts out", async () => {
+      let repos = [REPO];
+      const { w, listCalls } = teamWatcher([teamItem(8)], {
+        repos: () => repos,
+        prs: { 8: { ...pr, author_association: "OWNER" } },
+      });
+      results = [
+        { outcome: "waiting", message: "not yet", reviewed: false },
+        { outcome: "waiting", message: "not yet", reviewed: false },
+      ];
+      await w.tick();
+      now += 60 * 60_000;
+      await w.tick();
+      expect(listCalls).toEqual([undefined, '"v1"']);
+      expect(calls.filter((call) => call.prNumber === 8)).toHaveLength(2);
+
+      repos = [];
+      now += 60 * 60_000;
+      calls = [];
+      await w.tick();
+      expect(listCalls).toHaveLength(2);
+      expect(calls.filter((call) => call.prNumber === 8)).toHaveLength(0);
+    });
+
+    test("without opted-in repos, only the agent's PRs are considered", async () => {
+      const { w, listCalls } = teamWatcher([teamItem(8)], { repos: () => [] });
+      await w.tick();
+      expect(listCalls).toHaveLength(0);
+      expect(calls.map((call) => call.prNumber)).toEqual([7]);
+    });
+  });
+
   describe("stacked-base guard", () => {
     test("never merges a PR whose base is another agent PR's branch", async () => {
       workerState.recordAgentPr({ repo: REPO, prNumber: 6, branch: "feature/local-a" });

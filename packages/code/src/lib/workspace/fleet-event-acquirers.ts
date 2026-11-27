@@ -12,7 +12,7 @@ import type { TeamConfig, WorkspaceConfig } from "./config";
 import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { createGatedFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
 import type { TrackerDependencyGate } from "./tracker-dependency-gate";
-import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
+import { assertTeamPrSyncSandbox, teamAutoMergeSlugs, teamPrSyncSlugs } from "./team-pr-sync";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
 import type { TaskSupervisor } from "../worker/supervisor";
@@ -245,6 +245,7 @@ async function buildAutoMergeWatcher(params: {
   const { parseHarnessList } = await import("@devintern/agent-harness");
   const { isGitHubNotFound } = await import("../code-host/github/github-errors");
   const { fleetAutoMergePolicyFingerprint } = await import("./fleet-events");
+  const { OPEN_PR_LIST_PAGE_SIZE } = await import("../acquirers/team-pr-sweep");
   const settings = config.workspace.autoMerge;
   if (
     settings.enabled &&
@@ -282,6 +283,22 @@ async function buildAutoMergeWatcher(params: {
     policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug, workspaceDir),
     recheckOnPush: () => config.workspace.autoMerge.recheckOnPush,
     isStackedBase: params.isStackedBase,
+    // Factory form: reloads toggling `auto_merge_team_prs` apply next tick.
+    teamPrRepos: () => teamAutoMergeSlugs(config),
+    listOpenPullRequests: async (repo, etag) => {
+      const [owner = "", name = ""] = repo.split("/");
+      try {
+        return await gh(repo).conditionalGet(
+          `/repos/${repo}/pulls?state=open&per_page=${OPEN_PR_LIST_PAGE_SIZE}`,
+          owner,
+          name,
+          etag,
+        );
+      } catch (error) {
+        if (isGitHubNotFound(error)) return { data: null, notModified: false, gone: true };
+        throw error;
+      }
+    },
     quietSeconds: parseEnvInteger(
       "WORKER_AUTO_MERGE_QUIET_SECONDS",
       DEFAULT_AUTO_MERGE_QUIET_SECONDS,

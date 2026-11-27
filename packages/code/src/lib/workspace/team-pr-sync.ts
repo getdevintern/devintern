@@ -21,8 +21,24 @@ import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
  * from the live config on every call so reloads apply.
  */
 export function teamPrSyncSlugs(config: WorkspaceConfig): string[] {
+  return optedInSlugs(config, (repo) => repo.syncTeamPrs === true);
+}
+
+/**
+ * GitHub slugs of repos opted into auto-merging teammates' PRs
+ * (`auto_merge_team_prs`). Read from the live config on every call so
+ * reloads apply.
+ */
+export function teamAutoMergeSlugs(config: WorkspaceConfig): string[] {
+  return optedInSlugs(config, (repo) => repo.autoMergeTeamPrs === true);
+}
+
+function optedInSlugs(
+  config: WorkspaceConfig,
+  optedIn: (repo: WorkspaceConfig["repos"][number]) => boolean,
+): string[] {
   const slugs = config.repos
-    .filter((repo) => repo.syncTeamPrs === true)
+    .filter(optedIn)
     .map((repo) => repo.env.GITHUB_REPO ?? gitHubSlugFromRemote(repo.remote))
     .filter((slug): slug is string => Boolean(slug));
   return [...new Set(slugs)];
