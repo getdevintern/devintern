@@ -11,10 +11,11 @@
  * whose body names the method and path, and the request is recorded so a test
  * can fail loudly even if the product ignores the error response.
  *
- * The server binds `127.0.0.1:0`, accepts any Basic-auth credentials without
- * logging or echoing them, and never makes outbound requests.
+ * The server binds `127.0.0.1:0`, accepts any Basic-auth credentials unless
+ * `pat` is set, never logs or echoes them, and never makes outbound requests.
  */
 
+import { basicPatAuthorization, rejectWrongPat } from "./fake-auth";
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
 import {
   RELATION_NAMES,
@@ -76,6 +77,8 @@ export interface FakeAzureDevOpsOptions {
    * on the real calendar day for a change to be visible.
    */
   realClock?: boolean;
+  /** Caller-chosen PAT; any other `Authorization` than `Basic base64(":PAT")` gets 401. */
+  pat?: string;
 }
 
 /** One WIQL request the fake received, with the ids it returned. */
@@ -361,6 +364,7 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
   private nextCommentId = 10_000;
   private now = Date.parse("2026-01-01T00:00:00.000Z");
   private readonly realClock: boolean;
+  private readonly pat: string | undefined;
 
   constructor(options: FakeAzureDevOpsOptions = {}) {
     this.organization = options.organization ?? "fakeorg";
@@ -368,11 +372,12 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     this.statuses = { ...FAKE_AZURE_DEVOPS_STATUSES, ...options.statuses };
     this.openState = this.statuses.todo;
     this.realClock = options.realClock ?? false;
+    this.pat = options.pat;
 
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch: (request) => this.handle(request),
+      fetch: (request) => rejectWrongPat(request, this.pat) ?? this.handle(request),
     });
     this.baseUrl = `http://127.0.0.1:${this.server.port}/${this.organization}`;
   }
@@ -387,7 +392,7 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     return {
       TASK_TRACKER: this.type,
       AZURE_DEVOPS_ORG: this.organization,
-      AZURE_DEVOPS_PAT: FAKE_PAT,
+      AZURE_DEVOPS_PAT: this.pat ?? FAKE_PAT,
       AZURE_DEVOPS_PROJECT: this.project,
       AZURE_DEVOPS_BASE_URL: this.baseUrl,
       DEVINTERN_E2E_FAKE_AZURE_DEVOPS: "1",
@@ -601,7 +606,7 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       {
         method: "POST",
         headers: {
-          Authorization: `Basic ${Buffer.from(`:${FAKE_PAT}`).toString("base64")}`,
+          Authorization: basicPatAuthorization(this.pat ?? FAKE_PAT),
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ query }),
