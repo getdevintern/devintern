@@ -13,6 +13,7 @@ import type {
 } from "../observability/analytics";
 import type { ReadinessCheck } from "../observability/readiness";
 import type { WorkerEntitlementLike } from "../observability/worker-readiness";
+import type { NextStep } from "../observability/readiness-json";
 import type { connectRelayTarget } from "../relay/connect";
 import type {
   RunCommandFn,
@@ -22,6 +23,7 @@ import type {
 } from "../worker/service";
 import type { StartCheck } from "../worker/service-control";
 import type { GitHubCliToken } from "./github-cli-token";
+import type { DevinternLabelOpsFactory } from "./worker-init-label";
 import type { AppliedWrite, Plan, PlanDraft } from "./worker-init-noninteractive-plan";
 import type {
   Env,
@@ -59,6 +61,11 @@ export interface WorkerInitDeps {
   cwd?: string;
   /** Evaluate the ready-tasks query; returns the number of matching tasks. */
   dryRunQuery?: (query: string) => Promise<number>;
+  /**
+   * Looks up and creates the `devintern` label the default query selects.
+   * Without it the wizard never offers to create the label.
+   */
+  devinternLabelOps?: DevinternLabelOpsFactory;
   /** Automation license check; returns a human-readable failure, or null when entitled. */
   checkAutomationLicense?: (workspaceDir: string) => Promise<string | null>;
   /** Override tracker-config step. Return tracker id, or null to abort. */
@@ -105,6 +112,14 @@ export interface WorkerInitDeps {
     prompt: PromptFn;
     log: LogFn;
   }) => Promise<void>;
+  /**
+   * Host checks run before the first question (agent CLI, git, service
+   * manager). Without it the wizard skips them and relies on the readiness
+   * checks at the end.
+   */
+  checkHost?: () => Promise<HostChecks>;
+  /** Ask the worker settings one by one, plus the Sentry step (CLI `--customize`). */
+  customize?: boolean;
   /** Platform override for service-file tests. */
   platform?: NodeJS.Platform;
   /** Worker executable written into service definitions. */
@@ -137,6 +152,25 @@ export interface WorkerInitDeps {
   }) => Promise<ServiceInstallResult>;
   /** Override the honest start check after installing (tests). */
   verifyServiceStart?: (ctx: { workspaceDir: string; since: number }) => Promise<StartCheck>;
+}
+
+/** What the wizard's host checks found (`worker-init-host.ts`). */
+export interface HostChecks {
+  /** The `worker doctor` harness check (agent CLI installed and spawnable). */
+  harness: ReadinessCheck;
+  /** Path of the `git` executable, or null when it is not on PATH. */
+  git: string | null;
+  /** Whether a background service can be installed; info only. Absent when not checked. */
+  serviceManager?: ServiceManagerAvailability;
+  /** How to install the agent CLI, when the harness check failed. */
+  installAgent?: NextStep;
+}
+
+/** The host step's result, read by later steps so they do not repeat it. */
+export interface HostReport {
+  checks: HostChecks;
+  /** The harness failure was already shown; the readiness block refers back to it. */
+  harnessReported: boolean;
 }
 
 /** Something that keeps the worker from starting; `action` is a step, not a failure. */
@@ -188,6 +222,8 @@ export interface PromptRun {
   guard: PromptSession["guard"];
   /** The user declined (or skipped) sign-in earlier in this run; do not ask again. */
   signInDeclined?: boolean;
+  /** Set by the host step when it ran. */
+  host?: HostReport;
   /** Set by the tracker step. */
   trackerType: string;
   trackerName: string;

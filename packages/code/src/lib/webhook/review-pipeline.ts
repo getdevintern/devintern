@@ -8,12 +8,16 @@ import type { RunFailure } from "../state/run-outcome";
 import type { RunOutcomeDetail } from "../state/run-recorder";
 import { WorkerState } from "../state/worker-state";
 import { formatReviewPrompt } from "../review/formatter";
+import { closedPrState, replyToClosedPrMention } from "../review/closed-pr-mention";
+import type { ClosedPrState } from "../review/closed-pr-mention";
+import { isBotAuthored } from "../review/mention-trigger";
 import { Utils } from "../utils";
 import { hasUncommittedWork } from "../utils/git-stage";
 import { WorktreeBusyError } from "../worker/usage-limit-protocol";
 import {
   processReviewComment,
   processReviewEvent,
+  reviewMentionsBot,
   shouldProcessReview,
 } from "../code-host/github/webhook";
 import type {
@@ -281,6 +285,8 @@ export async function processIssueCommentAsync(
       title: pr.title,
       body: pr.body,
       state: pr.state,
+      merged: pr.merged,
+      merged_at: pr.merged_at,
       html_url: pr.html_url,
       user: event.issue.user,
       head: { ref: pr.head.ref, sha: pr.head.sha, repo: event.repository },
@@ -381,12 +387,70 @@ function hasLeftoverWork(worktreePath: string): boolean {
 }
 
 /**
- * Process a `changes_requested` review: worktree, agent, commit, push, reactions.
+ * A review or comment on a PR that is no longer open: when it @mentions the
+ * bot and its author has push access (the same gates as a run), reply once on
+ * the PR instead of running. The webhook delivery id dedupes redeliveries.
+ * Anything else is skipped silently, as before. Only the review body (or the
+ * comment body of an `issue_comment`) is checked for the mention.
+ *
+ * @param event - Review (or comment adapted into a review) on the closed PR
+ * @param state - Whether the PR was merged or closed
+ */
+async function handleClosedPrMention(
+  event: PullRequestReviewEvent,
+  state: ClosedPrState,
+): Promise<void> {
+  const githubClient = new GitHubReviewsClient({ preferAppAuth: true });
+  const [owner, repo] = event.repository.full_name.split("/");
+  const prNumber = event.pull_request.number;
+  const botName = (await githubClient.getBotUsername(owner, repo)) ?? undefined;
+  if (
+    isBotAuthored(event.review, botName ? [botName] : []) ||
+    !reviewMentionsBot(event, [], botName)
+  ) {
+    console.log(`⏭️  Skipping review on ${owner}/${repo}#${prNumber}: PR is ${state} (not open)`);
+    return;
+  }
+  const actor = event.review.user.login;
+  if (!(await githubClient.userHasPushAccessOrThrow(owner, repo, actor))) {
+    console.log(
+      `⛔ Skipping mention on ${state} PR ${owner}/${repo}#${prNumber}: @${actor} does not have push access`,
+    );
+    return;
+  }
+  await replyToClosedPrMention(
+    { repo: `${owner}/${repo}`, prNumber, state, actor },
+    (body) => githubClient.postPullRequestComment(owner, repo, prNumber, body),
+    "[webhook]",
+  );
+}
+
+/**
+ * Process a review: on a closed or merged PR, at most a reply to an @mention
+ * (no run); otherwise the full review run.
  *
  * @param event - Pull request review webhook payload
  * @param config - Server configuration
  */
 async function processReviewAsync(
+  event: PullRequestReviewEvent,
+  config: WebhookServerConfig,
+): Promise<void> {
+  const closed = closedPrState(event.pull_request);
+  if (closed) {
+    await handleClosedPrMention(event, closed);
+    return;
+  }
+  await processOpenPrReviewAsync(event, config);
+}
+
+/**
+ * Process a `changes_requested` review: worktree, agent, commit, push, reactions.
+ *
+ * @param event - Pull request review webhook payload
+ * @param config - Server configuration
+ */
+async function processOpenPrReviewAsync(
   event: PullRequestReviewEvent,
   config: WebhookServerConfig,
 ): Promise<void> {

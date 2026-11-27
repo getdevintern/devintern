@@ -23,7 +23,7 @@ describe("runTrackerSetup step defaults", () => {
       async (question) => {
         asked.push(question);
         if (question.startsWith("Enter a number")) return "github";
-        if (question.startsWith("Target repository")) return repoAnswer;
+        if (question.startsWith("Repository")) return repoAnswer;
         return "";
       },
       () => {},
@@ -42,9 +42,9 @@ describe("runTrackerSetup step defaults", () => {
     return { result, asked, written };
   }
 
-  test("the Target repository prompt defaults to origin's owner/repo", async () => {
+  test("the Repository prompt shows origin's owner/repo as the default", async () => {
     const { result, asked, written } = await run({ GITHUB_REPO: "acme/app" });
-    expect(asked.find((q) => q.startsWith("Target repository"))).toContain("acme/app");
+    expect(asked.find((q) => q.startsWith("Repository"))).toBe("Repository [acme/app]: ");
     expect(result?.values.GITHUB_REPO).toBe("acme/app");
     expect(written).toContain("GITHUB_REPO=acme/app");
   });

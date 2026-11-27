@@ -263,7 +263,7 @@ describe("interactive setup", () => {
     if (question.startsWith("Enter a number")) return "github";
     if (question.startsWith("Use your GitHub CLI token")) return "";
     if (question.startsWith("GitHub personal access token")) return "ghp_pasted";
-    if (question.startsWith("Target repository")) return "acme/app";
+    if (question.startsWith("Repository")) return "acme/app";
     if (question.startsWith("What next?")) return "s";
     return "";
   }

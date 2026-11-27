@@ -15,13 +15,8 @@
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
-import {
-  condenseMessage,
-  defaultProbe,
-  parseEnvContent,
-  promptSteps,
-} from "@devintern/task-trackers";
-import { findProjectRoot, upsertEnvVars } from "@devintern/utils";
+import { condenseMessage, defaultProbe, parseEnvContent } from "@devintern/task-trackers";
+import { findProjectRoot } from "@devintern/utils";
 
 import {
   WORKER_PILOT_OFFER,
@@ -37,12 +32,16 @@ import { toReportCheck } from "../observability/readiness-json";
 import { collectWorkerDoctorChecks } from "../observability/worker-readiness";
 import type { WorkerDoctorDeps } from "../observability/worker-readiness";
 import {
+  DEVINTERN_LABEL,
   TRACKER_CAPABILITIES,
+  defaultQueryZeroMatchHint,
+  defaultTaskQuery,
+  isDefaultTaskQuery,
+  supportsLabelCreation,
   supportsPolling,
   trackersSupportingPolling,
 } from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
-import { Utils } from "../utils";
 import { writeSecretFile } from "../utils/secret-file";
 import { loadWorkspaceConfig } from "../workspace/config";
 import {
@@ -50,7 +49,6 @@ import {
   writeWorkerOperatingPolicy,
   writeWorkspaceDefaults,
 } from "../workspace/init";
-import { gitHubSlugFromRemote } from "../workspace/env";
 import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import {
   ensureWorkspaceCodeState,
@@ -65,10 +63,15 @@ import {
   relayStep,
   serviceStep,
 } from "./worker-init-activation";
-import { describeGitHubCliToken, readGitHubCliToken } from "./github-cli-token";
+import { readGitHubCliToken } from "./github-cli-token";
 import type { GitHubCliToken } from "./github-cli-token";
-import { GITHUB_PR_TOKEN_STEP, TRACKER_SETUP } from "./scaffold";
+import { recordRepoDefaultBranch } from "./worker-init-branch";
 import { errorMessage } from "./worker-init-fs";
+import { githubTokenStep, originGitHubSlug } from "./worker-init-github-token";
+import { hostStep, withoutRepeatedHostFailures } from "./worker-init-host";
+import { defaultDevinternLabelOps } from "./worker-init-label";
+import { describeQueryFailure } from "./worker-init-query-failure";
+import { queryLabelsCheck, reviewQueryLabels } from "./worker-init-query-labels";
 import {
   applyPlan,
   planChangesNothing,
@@ -94,7 +97,10 @@ import type { LogFn, PromptFn } from "./worker-init-policy";
 import { DEFAULT_PROBE_TIMEOUT_MS, secretValues, withTimeout } from "./worker-init-run";
 import type { FlagsRun, PromptRun, ReadinessBlocker, SetupRun } from "./worker-init-run";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
-import { offerGitHubCliToken, logGitHubPrTokenIntro, runTrackerSetup } from "./wizard";
+import { runTrackerSetup } from "./wizard";
+
+/** The wizard that asks each worker setting one by one. */
+const CUSTOMIZE_COMMAND = "devintern worker init --customize";
 
 /** One setup step. Returns false to stop setup (the step has said why). */
 export interface WorkerInitStep {
@@ -104,6 +110,7 @@ export interface WorkerInitStep {
 
 /** Every `worker init` step, in order, for both input sources. */
 export const WORKER_INIT_STEPS: readonly WorkerInitStep[] = [
+  { id: "host", run: hostStep },
   { id: "tracker", run: trackerStep },
   { id: "workspace", run: workspaceStep },
   { id: "github-token", run: githubTokenStep },
@@ -168,6 +175,7 @@ export function initRerunCommand(
     parts.push(`--task-query ${shellQuote(taskQuery)}`);
   }
   if (args.repoFromCwd) parts.push("--repo-from-cwd");
+  if (args.createLabel) parts.push("--create-label");
   const envFile = overrides.envFile ?? ctx.envFilePath;
   if (envFile) parts.push(`--env-file ${envFile.startsWith("<") ? envFile : shellQuote(envFile)}`);
   if (args.signIn) {
@@ -287,6 +295,10 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
   run.workspaceDir = workspace.workspaceDir;
   run.repoName = workspace.repoName;
 
+  if (workspace.repoName) {
+    await recordRepoDefaultBranch(run, workspace.workspaceDir, workspace.repoName);
+  }
+
   ensureWorkspaceCodeState(run.workspaceDir);
   try {
     if (copyProjectSessionToWorkspace(run.projectRoot, run.workspaceDir)) {
@@ -297,102 +309,6 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
     run.log("   Run `devintern worker login` to sign in for the workspace.");
   }
   return true;
-}
-
-/**
- * Pull-request token. When the tracker is not GitHub, the worker still opens
- * pull requests on GitHub, so ask for the optional token as before. When the
- * workspace `.env` has no token, offer the signed-in `gh` session; a token
- * only exported in the shell is saved to the workspace `.env` so the service
- * (which does not inherit the shell) can use it. The GitHub tracker gets the
- * same shell-token persistence even though its token normally comes from the
- * tracker step: an existing workspace whose `.env` already names the tracker
- * skips that step, so a removed or expired token is recovered here, and a
- * `GITHUB_TOKEN` that only the shell exports is saved too. Flags mode resolved
- * all of this while planning the query.
- */
-async function githubTokenStep(run: SetupRun): Promise<boolean> {
-  if (run.input === "flags") return true;
-  const envPath = workspaceEnvPath(run.workspaceDir);
-  const existing = existsSync(envPath) ? parseEnvContent(readFileSync(envPath, "utf8")) : {};
-  if (existing.GITHUB_TOKEN) return true;
-  if (process.env.GITHUB_TOKEN) {
-    // The installed service carries only PATH and DEVINTERN_WORKSPACE_DIR, so a
-    // shell export would be lost when the worker starts; persist it instead.
-    saveGitHubToken(envPath, process.env.GITHUB_TOKEN, run.log);
-    return true;
-  }
-  // The GitHub tracker's token normally comes from the tracker step, but that
-  // step returns early for an existing workspace whose `.env` has TASK_TRACKER.
-  const githubTracker = run.trackerType === "github";
-  if (!githubTracker) logGitHubPrTokenIntro(run.log);
-  const repoSlug = await githubSlugForWorkspace(run);
-
-  let token: GitHubCliToken | null;
-  try {
-    token = (run.deps.githubCliToken ?? readGitHubCliToken)();
-  } catch {
-    token = null;
-  }
-  const offer = await offerGitHubCliToken({
-    token,
-    prompt: run.prompt,
-    log: run.log,
-    probe: run.deps.githubTokenProbe ?? defaultProbe,
-    repoSlug,
-  });
-  if (offer.status === "accepted") {
-    run.log(`🔑 Using your GitHub CLI token (${describeGitHubCliToken(offer.session)}).`);
-    saveGitHubToken(envPath, offer.token, run.log);
-    return true;
-  }
-  // No usable `gh` session (absent, signed out, declined, or rejected): ask for
-  // a token as before. The rejection warning is already logged when the probe
-  // refused it; for the optional PR token an empty answer still skips it, while
-  // the GitHub tracker's own token is required.
-  const tokenStep = githubTracker
-    ? (TRACKER_SETUP.github?.find((step) => step.key === "GITHUB_TOKEN") ?? GITHUB_PR_TOKEN_STEP)
-    : GITHUB_PR_TOKEN_STEP;
-  const values: Record<string, string> = {};
-  await promptSteps([tokenStep], run.prompt, run.log, values, run.promptSecret);
-  if (values.GITHUB_TOKEN) saveGitHubToken(envPath, values.GITHUB_TOKEN, run.log);
-  return true;
-}
-
-/** `owner/repo` of this workspace's GitHub remote, for the PR-token probe. */
-async function githubSlugForWorkspace(run: PromptRun): Promise<string | undefined> {
-  const origin = await originGitHubSlug(run.cwd);
-  if (origin) return origin;
-  try {
-    const config = loadWorkspaceConfig(workspaceConfigPath(run.workspaceDir));
-    for (const repo of config.repos) {
-      const slug = gitHubSlugFromRemote(repo.remote);
-      if (slug) return slug;
-    }
-  } catch {
-    // An unreadable workspace is reported by the workspace step.
-  }
-  return undefined;
-}
-
-/**
- * Save `GITHUB_TOKEN` to the workspace `.env` with owner-only permissions.
- *
- * Every earlier assignment is removed first (including a commented template
- * placeholder): `upsertEnvVars` replaces only the first match, and
- * `parseEnvFile` reads the last, so leaving a duplicate would make a later
- * `--env-file` rotation rewrite one line while the old token still won.
- */
-function saveGitHubToken(envPath: string, token: string, log: LogFn): void {
-  const existingText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
-  const withoutToken = existingText
-    .split("\n")
-    .filter((line) => !/^\s*#?\s*(?:export\s+)?GITHUB_TOKEN=/.test(line))
-    .join("\n");
-  mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
-  writeSecretFile(envPath, upsertEnvVars(withoutToken, { GITHUB_TOKEN: token }));
-  process.env.GITHUB_TOKEN = token;
-  log(`💾 Saved GITHUB_TOKEN to ${envPath}`);
 }
 
 /**
@@ -437,36 +353,55 @@ async function queryStep(run: SetupRun): Promise<boolean> {
 /** Prompt for the ready-tasks query until one is entered (and, with a dry run, works). */
 async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined): Promise<string> {
   run.log("\n3️⃣  Which tasks should the worker pick up?");
-  run.log("   The query uses the same language as 'devintern --query' for your tracker.");
+  // A re-run keeps the saved query as the Enter default; a new workspace
+  // offers the tracker's devintern-label query.
+  const fallback = currentQuery || defaultTaskQuery(run.trackerType);
   if (currentQuery) {
+    run.log("   The query uses the same language as 'devintern --query' for your tracker.");
     run.log("   Press Enter to keep the current query.");
-  } else if (run.queryExample) {
-    run.log(`   Example: ${run.queryExample}`);
+  } else if (fallback) {
+    run.log(
+      `   Press Enter to pick up open tickets labeled ${DEVINTERN_LABEL}, or type your own query`,
+    );
+    run.log("   (the same language as 'devintern --query' for your tracker).");
+  } else {
+    run.log("   The query uses the same language as 'devintern --query' for your tracker.");
+    if (run.queryExample) run.log(`   Example: ${run.queryExample}`);
   }
 
   let query = "";
   for (;;) {
     query =
       (
-        await run.prompt(
-          currentQuery ? `Ready-tasks query [${currentQuery}]: ` : "Ready-tasks query: ",
-        )
+        await run.prompt(fallback ? `Ready-tasks query [${fallback}]: ` : "Ready-tasks query: ")
       ).trim() ||
-      currentQuery ||
+      fallback ||
       "";
     if (!query) {
       run.log("❌ A query is required — it defines what 'ready for the agent' means.");
       continue;
     }
+    // Offer the devintern label only once the query works; the default query's
+    // label is handled there, so the rest are checked afterwards.
+    const handled = isDefaultTaskQuery(run.trackerType, query) ? [DEVINTERN_LABEL] : [];
     if (!run.deps.dryRunQuery) {
+      await offerDevinternLabel(run, query);
+      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") continue;
       break;
     }
     try {
       const count = await run.deps.dryRunQuery(query);
       run.log(`✅ Query works: ${count} task(s) match right now.`);
       if (count === 0) {
-        run.log("   (0 matches is fine if nothing is ready yet — the worker will poll.)");
+        const labelHint = defaultQueryZeroMatchHint(run.trackerType, query);
+        run.log(
+          labelHint
+            ? `   ${labelHint}.`
+            : "   (0 matches is fine if nothing is ready yet — the worker will poll.)",
+        );
       }
+      await offerDevinternLabel(run, query);
+      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") continue;
       break;
     } catch (error) {
       const failure = describeQueryFailure((error as Error).message, process.env.GITHUB_REPO);
@@ -490,11 +425,43 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
 }
 
 /**
+ * With the default query, a tracker that can create labels and lacks the
+ * devintern label: ask before creating it (never silently). A failed lookup
+ * or creation only warns; the query still works once a ticket is labeled.
+ */
+async function offerDevinternLabel(run: PromptRun, query: string): Promise<void> {
+  const { trackerType, trackerName } = run;
+  if (!isDefaultTaskQuery(trackerType, query) || !supportsLabelCreation(trackerType)) return;
+  const ops = run.deps.devinternLabelOps?.(trackerType, process.env);
+  if (!ops) return;
+  try {
+    if (await ops.exists()) return;
+  } catch (error) {
+    run.log(`⚠️  Could not check for the ${DEVINTERN_LABEL} label: ${errorMessage(error)}`);
+    return;
+  }
+  run.log(`   ${trackerName} has no ${DEVINTERN_LABEL} label yet.`);
+  if (
+    !(await askYesNo(run, `Create the ${DEVINTERN_LABEL} label in ${trackerName}? [Y/n]: `, true))
+  ) {
+    run.log(`   Not created. Create it in ${trackerName} before labeling tickets.`);
+    return;
+  }
+  try {
+    await ops.create();
+    run.log(`🏷️  Created the ${DEVINTERN_LABEL} label in ${trackerName}.`);
+  } catch (error) {
+    run.log(`⚠️  Could not create the ${DEVINTERN_LABEL} label: ${errorMessage(error)}`);
+    run.log(`   Create it in ${trackerName} (the token may lack permission to manage labels).`);
+  }
+}
+
+/**
  * Worker settings. Both sources write the recommended settings explicitly
- * instead of relying on defaults: the wizard when its one question is
- * accepted on a workspace without custom settings ("n" walks through CI
- * repair, conflicts, active hours, and Sentry), flags mode for a new
- * workspace. An existing workspace keeps its custom settings either way.
+ * instead of relying on defaults for a workspace without custom settings
+ * (flags mode: a new workspace), and keep custom settings as they are, without
+ * a question. The wizard's `--customize` asks each setting (CI repair,
+ * conflicts, active hours) and offers Sentry instead.
  */
 async function settingsStep(run: SetupRun): Promise<boolean> {
   if (run.input === "flags") {
@@ -503,21 +470,20 @@ async function settingsStep(run: SetupRun): Promise<boolean> {
   }
   const { workspaceDir } = run;
   run.log("\n4️⃣  Worker settings");
-  const current = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
-  const custom = describeCustomWorkerSettings(current);
-  const question = custom
-    ? `Keep the current worker settings (${custom})? [Y/n]: `
-    : `Use the recommended worker settings (${RECOMMENDED_WORKER_SETTINGS_SUMMARY})? [Y/n]: `;
-  if (await askYesNo(run, question, true)) {
-    if (!custom) {
-      writeWorkerOperatingPolicy(workspaceDir, { ...RECOMMENDED_WORKER_POLICY, activeWindows: [] });
-      run.log("💾 Wrote the recommended worker settings to workspace.toml.");
-    } else {
-      run.log("   Kept the current worker settings.");
-    }
-    run.log(
-      "   Change them later in workspace.toml, or re-run `devintern worker init` and answer n.",
+  if (!run.deps.customize) {
+    const custom = describeCustomWorkerSettings(
+      loadWorkspaceConfig(workspaceConfigPath(workspaceDir)),
     );
+    if (custom) {
+      run.log(
+        `   Kept the current worker settings (${custom}); change them in workspace.toml or with \`${CUSTOMIZE_COMMAND}\`.`,
+      );
+    } else {
+      writeWorkerOperatingPolicy(workspaceDir, { ...RECOMMENDED_WORKER_POLICY, activeWindows: [] });
+      run.log(
+        `💾 Wrote the recommended worker settings to workspace.toml (${RECOMMENDED_WORKER_SETTINGS_SUMMARY}); change them there or with \`${CUSTOMIZE_COMMAND}\`.`,
+      );
+    }
     return true;
   }
 
@@ -623,7 +589,7 @@ function noteRepo(run: FlagsRun): void {
   if (repo.added && branch && defaultBranch && branch !== defaultBranch) {
     report.warnings.push(
       `The checkout is on ${branch}, but tasks start from and pull requests target ` +
-        `${defaultBranch} (recorded as default_branch). To open pull requests against ` +
+        `${defaultBranch} (recorded as default_branch). To base tasks and pull requests on ` +
         `${branch} instead, add "--pr-target-branch ${branch}" to [defaults].worker_task_args ` +
         "in workspace.toml.",
     );
@@ -647,15 +613,31 @@ async function readinessStep(run: SetupRun): Promise<boolean> {
     run.log("\n📋 Readiness (the same checks as `devintern worker doctor`):");
     try {
       checks = await run.deps.collectReadiness(run.workspaceDir);
-      for (const line of renderReadinessReport(checks).lines) run.log(`   ${line}`);
+      const shown = withoutRepeatedHostFailures(checks, run.host);
+      for (const line of renderReadinessReport(shown).lines) run.log(`   ${line}`);
     } catch (error) {
       run.log(`   ⚠️  Could not run the checks: ${(error as Error).message}`);
       run.log("   Run `devintern worker doctor` to check readiness.");
       checks = undefined;
     }
   }
-  run.outcome.blockers = readinessBlockers(checks, run.outcome.licenseFailure);
+  run.outcome.blockers = readinessBlockers(checks, run.outcome.licenseFailure).map((blocker) =>
+    installAgentBlocker(blocker, checks, run),
+  );
   return true;
+}
+
+/** The agent-CLI blocker names the install command the host step found. */
+function installAgentBlocker(
+  blocker: ReadinessBlocker,
+  checks: ReadinessCheck[] | undefined,
+  run: PromptRun,
+): ReadinessBlocker {
+  const install = run.host?.checks.installAgent;
+  const harness = checks?.find((check) => check.id === "harness" && check.status === "fail");
+  if (!install || !harness || !blocker.text.startsWith(`${harness.label}:`)) return blocker;
+  const how = install.url ? `see ${install.url}` : `run ${install.command}`;
+  return { ...blocker, text: `${harness.label}: install the agent CLI (${how})` };
 }
 
 function trackerDisplayName(tracker: string): string {
@@ -719,6 +701,9 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
   );
 
   const checks: InitCheck[] = [auth];
+  const label = authFailed ? undefined : await labelCheck(run, timeoutMs);
+  if (label) checks.push(label);
+  let labelsChecked = false;
   for (const check of readiness) {
     const mapped = toReportCheck(check);
     if (check.id === "query" && authFailed) {
@@ -733,6 +718,21 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
     // The entitlement row has the same verdict as `worker doctor`: `action`
     // when nobody is signed in yet, `fail` for anything else.
     checks.push(mapped);
+    // A dry run that ran (0 matches warns); once, for the workspace query.
+    if (
+      check.id === "query" &&
+      (check.status === "ok" || check.status === "warn") &&
+      !labelsChecked
+    ) {
+      labelsChecked = true;
+      // The label row above already covers the devintern label.
+      const labels = await queryLabelsCheck(plan, {
+        labelOps: run.deps.devinternLabelOps ?? defaultDevinternLabelOps,
+        timeoutMs,
+        skip: label ? [DEVINTERN_LABEL] : [],
+      });
+      if (labels) checks.push(labels);
+    }
   }
   // A CLI token whose probe failed is never written. For the GitHub tracker
   // that token is required, so the run fails with `fix-credentials`; for a
@@ -754,6 +754,61 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
   return checks;
 }
 
+/**
+ * Flags mode: the `devintern` label the default query selects. Checked when
+ * the default query is in use or `--create-label` was given, and created
+ * only with `--create-label`. A missing or uncreatable label warns: the
+ * query still works, it just matches nothing until a ticket is labeled.
+ *
+ * @returns The report row, or undefined when there is nothing to check
+ */
+async function labelCheck(run: FlagsRun, timeoutMs: number): Promise<InitCheck | undefined> {
+  const plan = run.plan!;
+  const { createLabel } = run.args;
+  if (!createLabel && !plan.taskQueryDefaulted) return undefined;
+  const base = { name: "label", label: `${DEVINTERN_LABEL} label` } as const;
+  const name = trackerDisplayName(plan.tracker);
+  if (!supportsLabelCreation(plan.tracker)) {
+    // Jira and Azure DevOps create a label (tag) the first time it is used.
+    return createLabel
+      ? {
+          ...base,
+          status: "skipped",
+          message: `${name}: setup cannot create labels here; adding ${DEVINTERN_LABEL} to a ticket creates it`,
+        }
+      : undefined;
+  }
+  const ops = (run.deps.devinternLabelOps ?? defaultDevinternLabelOps)(
+    plan.tracker,
+    plan.credentialEnv,
+  );
+  if (!ops) return undefined;
+  try {
+    if (await withTimeout(ops.exists(), timeoutMs, `${name} label lookup`)) {
+      return { ...base, status: "pass", message: `${name} has the ${DEVINTERN_LABEL} label` };
+    }
+    if (!createLabel) {
+      return {
+        ...base,
+        status: "warn",
+        message: `${name} has no ${DEVINTERN_LABEL} label yet, so the default query matches nothing`,
+        hint: `Re-run with --create-label to create it, or create the ${DEVINTERN_LABEL} label in ${name}`,
+      };
+    }
+    await withTimeout(ops.create(), timeoutMs, `${name} label creation`);
+    run.report.labelCreated = true;
+    run.log(`🏷️  Created the ${DEVINTERN_LABEL} label in ${name}`);
+    return { ...base, status: "pass", message: `Created the ${DEVINTERN_LABEL} label in ${name}` };
+  } catch (error) {
+    return {
+      ...base,
+      status: "warn",
+      message: `${name}: could not ${createLabel ? "create" : "look up"} the ${DEVINTERN_LABEL} label: ${condenseMessage(errorMessage(error))}`,
+      hint: `Create the ${DEVINTERN_LABEL} label in ${name} (the token may lack permission to manage labels)`,
+    };
+  }
+}
+
 function applyEnvFile(envPath: string): Record<string, string> {
   if (!existsSync(envPath)) {
     return {};
@@ -766,13 +821,6 @@ function applyEnvFile(envPath: string): Record<string, string> {
     }
   }
   return env;
-}
-
-/** `owner/repo` of the checkout's GitHub `origin`, or null (no origin, not GitHub). */
-async function originGitHubSlug(cwd: string): Promise<string | null> {
-  const result = await Utils.executeGitCommand(["remote", "get-url", "origin"], { cwd });
-  const remote = result.success ? result.output.trim() : "";
-  return remote ? gitHubSlugFromRemote(remote) : null;
 }
 
 export async function defaultEnsureTracker(
@@ -901,61 +949,6 @@ function mergeIntoSharedEnv(envPath: string, envContent: string, log: LogFn): vo
   }
 }
 
-/**
- * Turn a ready-tasks dry-run error into one readable line. A GitHub search
- * the token cannot run (the repository is missing or not granted to it) is a
- * credentials problem, flagged `access` so the wizard does not blame the query.
- *
- * @param message - The error message from the tracker client
- * @param githubRepo - Configured `GITHUB_REPO`, named in the access message
- */
-export function describeQueryFailure(
-  message: string,
-  githubRepo?: string,
-): { text: string; access: boolean } {
-  const status = /GitHub API error \((\d{3})\)/.exec(message)?.[1];
-  const repo = githubRepo || "the repository";
-  if (
-    status === "422" &&
-    /cannot be searched|do not exist or you do not have permission/i.test(message)
-  ) {
-    return {
-      text:
-        `GitHub can't search ${repo}: the repository doesn't exist or the token can't see it. ` +
-        "Check GITHUB_REPO and the token's repository access.",
-      access: true,
-    };
-  }
-  if (status === "401") {
-    return {
-      text: "GitHub rejected the token (401): it is mistyped, expired, or revoked.",
-      access: true,
-    };
-  }
-  // GitHub (and others) append the raw JSON body; keep only its messages.
-  const jsonStart = message.indexOf("{");
-  if (jsonStart >= 0) {
-    const messages = [...message.slice(jsonStart).matchAll(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/g)]
-      .map((match) => match[1])
-      .filter((text): text is string => Boolean(text));
-    if (messages.length > 0) {
-      const prefix = message.slice(0, jsonStart).replace(/[\s:]+$/, "");
-      return {
-        text: condenseMessage(`${prefix}: ${[...new Set(messages)].join("; ")}`),
-        access: false,
-      };
-    }
-  }
-  return { text: condenseMessage(message), access: false };
-}
-
-/**
- * What still keeps the worker from running, one line each: the failing
- * readiness checks when they ran, otherwise the license step's result.
- *
- * @param checks - `worker doctor` checks, or undefined when they did not run
- * @param licenseFailure - License step outcome (null when entitled)
- */
 export function readinessBlockers(
   checks: ReadinessCheck[] | undefined,
   licenseFailure: string | null | undefined,

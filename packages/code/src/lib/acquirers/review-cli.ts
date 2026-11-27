@@ -4,8 +4,13 @@
  * so each agent run gets its own process, timeout, and result channel.
  */
 import { spawn } from "child_process";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+
 import { captureError } from "@devintern/utils";
 
+import { pinnedHarnessChildEnv } from "../agent/selection";
 import { parseEnvInteger } from "../config/env-integer";
 import { childOutputMode, forwardChildOutput } from "../observability/child-output";
 import { formatMentionArg } from "../review/mention-trigger";
@@ -16,6 +21,15 @@ import {
   harnessChainBlockedUntil,
   runWithFailover,
 } from "../worker/failover";
+import {
+  AUTOMATION_ACCESS_EXIT_CODE,
+  HARNESS_UNAVAILABLE_EXIT_CODE,
+  readUsageLimitHint,
+  usageLimitRetryAt,
+  USAGE_LIMIT_EXIT_CODE,
+  USAGE_LIMIT_FILE_ENV,
+  WORKTREE_BUSY_EXIT_CODE,
+} from "../worker/usage-limit-protocol";
 
 export interface AutomaticResolveResult {
   outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
@@ -239,16 +253,15 @@ async function runResolveWithFailover(
     harnessPin?: string;
   },
 ): Promise<AutomaticResolveResult> {
+  if (opts.harnessPin) {
+    return runPinnedResolve(repo, prNumber, extraArgs, opts, opts.harnessPin);
+  }
   let last: AutomaticResolveResult | null = null;
-  const status = await runWithFailover(
-    async (env) => {
-      const spawned = await spawnResolveOnce(repo, prNumber, extraArgs, { ...opts, env });
-      last = spawned.result;
-      return spawned.code;
-    },
-    opts.env ?? process.env,
-    { harnessPin: opts.harnessPin },
-  );
+  const status = await runWithFailover(async (env) => {
+    const spawned = await spawnResolveOnce(repo, prNumber, extraArgs, { ...opts, env });
+    last = spawned.result;
+    return spawned.code;
+  }, opts.env ?? process.env);
   if (status === "deferred") {
     const retryAt = harnessChainBlockedUntil();
     return {
@@ -264,6 +277,76 @@ async function runResolveWithFailover(
       message: status === "ok" ? "resolver completed" : "resolver exited with a non-zero code",
     }
   );
+}
+
+/**
+ * Run the resolver on a job-pinned harness, outside failover, while still
+ * honoring the reset window the child reports.
+ *
+ * A pin deliberately opts out of the failover chain, so the worker cannot
+ * move the job to another harness. It must not relaunch the pinned harness
+ * every few minutes either: unlike a chain run, no failover window records
+ * the limit, so the child's hint file is the only source for its real reset
+ * time.
+ *
+ * @param repo - `owner/repo` slug
+ * @param prNumber - Pull request number
+ * @param extraArgs - Additional `resolve-conflicts` CLI arguments
+ * @param opts - Working directory, environment, timeout, and signal
+ * @param harnessPin - Harness the job pinned
+ */
+async function runPinnedResolve(
+  repo: string,
+  prNumber: number,
+  extraArgs: string[],
+  opts: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    timeoutMs?: number;
+    entrypoint?: string;
+    outputStdio?: "inherit" | "ignore";
+    webUrl?: string;
+    signal?: AbortSignal;
+  },
+  harnessPin: string,
+): Promise<AutomaticResolveResult> {
+  const hintDir = mkdtempSync(join(tmpdir(), "devintern-resolve-limit-"));
+  const hintPath = join(hintDir, "hint.json");
+  try {
+    const env = {
+      ...pinnedHarnessChildEnv(opts.env ?? process.env, harnessPin),
+      [USAGE_LIMIT_FILE_ENV]: hintPath,
+    };
+    const spawned = await spawnResolveOnce(repo, prNumber, extraArgs, { ...opts, env });
+    if (spawned.code === USAGE_LIMIT_EXIT_CODE) {
+      return {
+        outcome: "deferred",
+        message: `agent usage limit on pinned harness ${harnessPin}; waiting for it to reset`,
+        capacity: true,
+        retryAt: usageLimitRetryAt(readUsageLimitHint(hintPath), Date.now()),
+      };
+    }
+    if (
+      spawned.code === AUTOMATION_ACCESS_EXIT_CODE ||
+      spawned.code === HARNESS_UNAVAILABLE_EXIT_CODE ||
+      spawned.code === WORKTREE_BUSY_EXIT_CODE
+    ) {
+      return {
+        outcome: "deferred",
+        message: "agent unavailable; retrying later",
+        capacity: true,
+      };
+    }
+    return (
+      spawned.result ?? {
+        outcome: spawned.code === 0 ? "skipped" : "failed",
+        message:
+          spawned.code === 0 ? "resolver completed" : `resolver exited with code ${spawned.code}`,
+      }
+    );
+  } finally {
+    rmSync(hintDir, { recursive: true, force: true });
+  }
 }
 
 function spawnResolveOnce(

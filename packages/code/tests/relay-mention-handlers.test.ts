@@ -8,6 +8,8 @@ import { createRelayMentionHandlers } from "../src/lib/relay/mention-handlers";
 import type { RelayMentionGitHub, RelayMentionItem } from "../src/lib/relay/mention-handlers";
 import type { MentionKind } from "../src/lib/review/mention-trigger";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { createFleetMentionHandler } from "../src/lib/workspace/fleet-events";
+import type { FleetEventDeps } from "../src/lib/workspace/fleet-events";
 
 type Review = RelayMentionItem & { submitted_at?: string | null };
 
@@ -71,6 +73,43 @@ describe("relay mention handlers", () => {
     expect(queue.hasProcessed("github:mentions", "comment:501")).toBe(true);
     expect(await handlePrComment("acme/e2e", 47, 501)).toBe("skipped");
     expect(handled).toHaveLength(1);
+  });
+
+  test("a mention on a merged PR replies once across redeliveries and starts no run", async () => {
+    const posted: Array<{ pr: number; body: string }> = [];
+    const runs: number[] = [];
+    const fleetHandler = createFleetMentionHandler(
+      {
+        userHasPushAccess: async () => true,
+        closedPrMentions: {
+          getPrState: async () => ({ state: "closed", merged: true }),
+          postPrComment: async (_slug: string, pr: number, body: string) => {
+            posted.push({ pr, body });
+          },
+        },
+      } as unknown as FleetEventDeps,
+      async (_slug, pr) => {
+        runs.push(pr);
+        return true;
+      },
+    );
+    const { handlePrComment } = createRelayMentionHandlers({
+      github: () => github,
+      queue,
+      handleMention: fleetHandler,
+    });
+    comments[701] = { id: 701, body: "@devintern-ai one more fix", user: { login: "danii1" } };
+    comments[702] = { id: 702, body: "thanks, merged", user: { login: "danii1" } };
+
+    expect(await handlePrComment("acme/e2e", 599, 701)).toBe("skipped");
+    expect(await handlePrComment("acme/e2e", 599, 701)).toBe("skipped");
+    expect(await handlePrComment("acme/e2e", 599, 702)).toBe("skipped");
+    expect(runs).toEqual([]);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ pr: 599 });
+    expect(posted[0].body).toContain("already merged");
+    // The sweep shares this id, so it will not reply a second time.
+    expect(queue.hasProcessed("github:mentions", "comment:701")).toBe(true);
   });
 
   test("comments without a mention, deleted, or bot-authored are skipped", async () => {

@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, retrying work, or delegating an ad-hoc task from the local dashboard."
 section: "Automation"
 order: 4
-dateModified: 2026-11-26
+dateModified: 2026-11-27
 ---
 
 # Worker Dashboard
@@ -165,7 +165,7 @@ With `--json`, a command prints exactly the body of the matching dashboard API r
 devintern worker stats --window 7d --json | jq '.stats.successRate'
 ```
 
-The commands use the workspace from `--workspace`, then `DEVINTERN_WORKSPACE_DIR`, then `~/.devintern`. They never modify the database. If it is missing or unreadable, the command prints why and exits with code `1`.
+The commands use the workspace from `--workspace`, then `DEVINTERN_WORKSPACE_DIR`, then `~/.devintern`. They never modify the database. If it is missing, `worker queue` without `--json` explains that the worker has not started yet and exits `0`; `worker status` still answers without one. Every other case — another command, an unreadable database (wrong permissions or a sandbox denial), or any `--json` invocation including `worker queue --json` — prints why and exits with code `1`. `--json` is the reliable way for scripts to tell a missing database from an empty queue.
 
 ## Local by design
 

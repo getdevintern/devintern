@@ -61,7 +61,8 @@ The binary is resolved from `AGENT_CLI_PATH`, then `<HARNESS>_CLI_PATH`, then th
 | `codex`                        | `codex`        |                                                                                                                                                                                                                                                                |
 | `cursor`                       | `cursor-agent` | Enable the CLI in Cursor's settings.                                                                                                                                                                                                                           |
 | `grok`                         | `grok`         | Grok Build, from [x.ai/cli](https://x.ai/cli). Log in, or set `XAI_API_KEY`.                                                                                                                                                                                   |
-| `deepseek`                     | `reasonix`     | `npm i -g reasonix`, then set `DEEPSEEK_API_KEY` or run `reasonix setup`.                                                                                                                                                                                      |
+| `deepseek` (alias `dsh`)       | `dsh`          | Experimental: official [DeepSeek Harness](#deepseek-harness-experimental). `npm i -g @deepseek-ai/dsh`, then set `DEEPSEEK_API_KEY`.                                                                                                                           |
+| `reasonix`                     | `reasonix`     | Community DeepSeek-Reasonix CLI. `npm i -g reasonix`, then set `DEEPSEEK_API_KEY` or run `reasonix setup`. Formerly `AGENT_HARNESS=deepseek`.                                                                                                                  |
 | `antigravity` (alias `agy`)    | `agy`          | [Install](https://antigravity.google/docs/cli/install); `ANTIGRAVITY_TOKEN` for CI. `gemini` still works but is deprecated.                                                                                                                                    |
 | `muse` (alias `muse-code`)     | `muse`         | Muse Code 1.4.9+, via Meta's installer (`curl -fsSL https://dev.meta.ai/install.sh \| sh`). Default model `muse-spark-1.2`. Set `META_API_KEY` for unattended runs (required on macOS under `nono`). See [Muse auth](https://dev.meta.ai/docs/muse-code/auth). |
 | `cline`, `goose`, `kimi`       | same as id     |                                                                                                                                                                                                                                                                |
@@ -70,6 +71,16 @@ The binary is resolved from `AGENT_CLI_PATH`, then `<HARNESS>_CLI_PATH`, then th
 | `pi`                           | `pi`           | Effort applies only when a model is set.                                                                                                                                                                                                                       |
 
 A few harnesses have no model flag and ignore `AGENT_MODEL`. Harnesses without a reasoning-effort option ignore `AGENT_EFFORT` with a one-line warning.
+
+### DeepSeek Harness (experimental)
+
+`AGENT_HARNESS=deepseek` runs DeepSeek's official [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) in its `headless` mode. It is a developer preview and upstream expects breaking changes; devpm was verified against `@deepseek-ai/dsh` 0.2.1-rc.2 and warns once when a different version is installed. A `dsh` that reports no version (such as Debian/Ubuntu's unrelated distributed shell) is refused; point `DEEPSEEK_CLI_PATH` at the right binary.
+
+- **Upgrading from Reasonix:** `deepseek` used to select Reasonix. Switch existing setups to `AGENT_HARNESS=reasonix`; devpm prints this hint when a `deepseek` run finds `reasonix` instead of `dsh`.
+- **Credentials:** headless mode ignores the dsh GUI sign-in. Set `DEEPSEEK_API_KEY` (in `.devintern-pm/.env` or `$DSH_HOME/.env`), or restore credentials as described in the [headless docs](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/headless#credentials).
+- **Model and effort:** set in the profile (`agent-default-model` in `$DSH_HOME/profiles/headless/cordis.patch.yml`). `AGENT_MODEL`/`--model` and `AGENT_EFFORT`/`--effort` are ignored with a warning. Turn caps and plan/read-only flags have no equivalent.
+- **Permissions:** devpm sets `DSH_PERMISSION_MODE=danger-full-access` unless you set it yourself, because headless mode cannot answer approval prompts. Set `DSH_PERMISSION_MODE=workspace-write` to keep dsh's own sandbox (operations that need approval then fail). DevIntern's `nono` sandbox, when enabled, still applies.
+- **Custom `DSH_HOME`:** the `nono` sandbox grants `~/.dsh`, a `.dsh*` directory directly under `$HOME`, or a directory inside the workspace. Other locations need `DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME=1` in the launch environment (not the project `.env`).
 
 ### Failover on usage limits
 

@@ -11,7 +11,7 @@ dateModified: 2026-11-26
 
 DevIntern Code keeps its settings in `~/.devintern`, outside your repositories. `devintern init` registers the current repository in `~/.devintern/workspace.toml` (as a `manual_only` repo, which the [worker](./worker.md) skips) and writes its settings to `~/.devintern/env/<repo>.env`. To let the worker run tasks there too, run `devintern worker init` or `devintern worker add-repo` in the checkout: either one turns the manual-only entry into a worker repository. Each repository has its own file, so several projects can use different trackers and credentials. A repository without a GitHub, GitLab, or Bitbucket `origin` (for example a fresh `git init`) is registered by its directory instead.
 
-In a terminal, the wizard asks which tracker you use, links to the provider's token page, checks the credentials, and writes the file. With `--yes` (or `--no-interactive`), or when stdin is not a terminal, it writes a commented template for you to fill in instead. Run `devintern init` again in the repository to update the file.
+In a terminal, `devintern init` first asks how you want to run tickets: automatically with a worker (recommended, the same wizard as `devintern worker init`) or by hand from this terminal. For manual runs the wizard asks which tracker you use, links to the provider's token page, checks the credentials, and writes the file. With `--yes` (or `--no-interactive`), or when stdin is not a terminal, it writes a commented template for you to fill in instead. Run `devintern init` again in the repository to update the file; a repository already set up for manual runs goes straight to that update.
 
 ### Moving from `.devintern-code/`
 
@@ -37,16 +37,16 @@ In a repository registered in `~/.devintern/workspace.toml`, settings come from 
 
 Set `TASK_TRACKER` to pick the tracker. The default is `jira`.
 
-| `TASK_TRACKER` | Credentials and setup                                         |
-| -------------- | ------------------------------------------------------------- |
-| `jira`         | [Jira Integration](./jira-integration.md)                     |
-| `linear`       | [Linear Integration](./linear-integration.md)                 |
-| `trello`       | [Trello Integration](./trello-integration.md)                 |
-| `asana`        | [Asana Integration](./asana-integration.md)                   |
-| `azure-devops` | [Azure DevOps Integration](./azure-devops-integration.md)     |
-| `github`       | [GitHub Issues Integration](./github-issues-integration.md)   |
-| `gitlab`       | [GitLab Integration](./gitlab-integration.md)                 |
-| `markdown`     | [Markdown File Tasks](./markdown-tasks.md) (no credentials)   |
+| `TASK_TRACKER` | Credentials and setup                                       |
+| -------------- | ----------------------------------------------------------- |
+| `jira`         | [Jira Integration](./jira-integration.md)                   |
+| `linear`       | [Linear Integration](./linear-integration.md)               |
+| `trello`       | [Trello Integration](./trello-integration.md)               |
+| `asana`        | [Asana Integration](./asana-integration.md)                 |
+| `azure-devops` | [Azure DevOps Integration](./azure-devops-integration.md)   |
+| `github`       | [GitHub Issues Integration](./github-issues-integration.md) |
+| `gitlab`       | [GitLab Integration](./gitlab-integration.md)               |
+| `markdown`     | [Markdown File Tasks](./markdown-tasks.md) (no credentials) |
 
 ```bash
 # Example: Jira
@@ -65,13 +65,13 @@ If `GITHUB_TOKEN` is unset and the [GitHub CLI](https://cli.github.com) is signe
 
 The saved token is a copy for DevIntern alone. It does not change when `gh` re-authenticates or when you sign in to a different GitHub account. To update it, replace `GITHUB_TOKEN` in the workspace `.env` (`~/.devintern/.env`) or the repo's env file under `~/.devintern/env/`, or re-run setup with a fresh token in an env file passed with `--env-file`.
 
-| What you want                                                 | Need                                                  |
-| ------------------------------------------------------------- | ----------------------------------------------------- |
-| Implement tickets and open PRs from the CLI                   | `GITHUB_TOKEN`                                        |
-| GitHub Issues as the task tracker (`TASK_TRACKER=github`)     | `GITHUB_TOKEN` (an App cannot substitute)             |
-| Worker review polling and replies                             | `GITHUB_TOKEN`                                        |
-| `@devintern-ai` on any PR                                     | `GITHUB_TOKEN` + relay + DevIntern AI App installation |
-| Air-gapped mentions, `devintern webhook serve`, or custom `slug[bot]` attribution | Customer-owned GitHub App (below)   |
+| What you want                                                                     | Need                                                   |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Implement tickets and open PRs from the CLI                                       | `GITHUB_TOKEN`                                         |
+| GitHub Issues as the task tracker (`TASK_TRACKER=github`)                         | `GITHUB_TOKEN` (an App cannot substitute)              |
+| Worker review polling and replies                                                 | `GITHUB_TOKEN`                                         |
+| `@devintern-ai` on any PR                                                         | `GITHUB_TOKEN` + relay + DevIntern AI App installation |
+| Air-gapped mentions, `devintern webhook serve`, or custom `slug[bot]` attribution | Customer-owned GitHub App (below)                      |
 
 **Token permissions.** Use either kind of personal access token:
 
@@ -145,12 +145,12 @@ The agent can write to the working directory, the task output directory, the tem
 
 A globally installed `devintern` checks npm for a newer version at most once a day.
 
-| Mode                                     | Behavior                                                         |
-| ---------------------------------------- | ---------------------------------------------------------------- |
-| Interactive terminal                     | Asks `Update? (Y/n)`, installs, and re-runs your command         |
-| Non-interactive (CI, workers, scripts)   | Doesn't install. Prints a one-line notice                        |
-| Opt out                                  | `DEVINTERN_NO_UPDATE=1` or `--no-update`                         |
-| Always auto-install (even non-interactive) | `DEVINTERN_AUTO_UPDATE=1`                                      |
+| Mode                                       | Behavior                                                 |
+| ------------------------------------------ | -------------------------------------------------------- |
+| Interactive terminal                       | Asks `Update? (Y/n)`, installs, and re-runs your command |
+| Non-interactive (CI, workers, scripts)     | Doesn't install. Prints a one-line notice                |
+| Opt out                                    | `DEVINTERN_NO_UPDATE=1` or `--no-update`                 |
+| Always auto-install (even non-interactive) | `DEVINTERN_AUTO_UPDATE=1`                                |
 
 Only global npm or bun installs are updated. To upgrade now, run `bun install -g @getdevintern/code@latest` (or `npm install -g ...`). To force a fresh check, delete `~/.devintern/update-check.json`.
 
@@ -161,7 +161,7 @@ Run `devintern doctor` first: it checks the runtime, agent CLI, tracker credenti
 - **"Missing required environment variables"**: make sure `~/.devintern/env/<repo>.env` exists (run `devintern init` in the repository) and the variable names are spelled exactly right (they are case-sensitive).
 - **"Not in a git repository"**: run `git init`, or pass `--no-git`.
 - **`<Harness> CLI not found`**: install the agent CLI and put it on your `PATH`, or set `AGENT_CLI_PATH` / `--agent-path`.
-- **"Unknown agent harness"**: check how `AGENT_HARNESS` is spelled (kebab-case, for example `claude-code`). The error message lists every valid name.
+- **"Unknown agent harness"**: check how `AGENT_HARNESS` is spelled (kebab-case, for example `claude-code`, `deepseek`, `reasonix`). The error message lists every valid name.
 - **Push fails with `403`**: your token needs `Contents: Read and write` (see [GitHub authentication](#github-authentication)).
 
 If something looks like a DevIntern bug rather than a configuration problem, file it with `devintern report` ([Reporting bugs](./reporting-bugs.md)).

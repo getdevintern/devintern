@@ -12,9 +12,14 @@ import { PROBE_TIMEOUT_MS, defaultProbe, withTimeout } from "@devintern/task-tra
 import { upsertEnvVars } from "@devintern/utils";
 
 import { redactUrlCredentials } from "../observability/dashboard-workspace";
-import { trackersSupportingPolling } from "../trackers/capabilities";
+import {
+  DEVINTERN_LABEL,
+  defaultTaskQuery,
+  trackersSupportingPolling,
+} from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
 import { Utils } from "../utils";
+import { detectCheckoutBranches } from "../workspace/checkout-branches";
 import { gitHubSlugFromRemote, parseWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import { buildRepoCredentialEnv, parseEnvFile, parseEnvFileContent } from "../workspace/env";
@@ -105,25 +110,14 @@ async function detectCwdRepo(cwd: string): Promise<
       error: `--repo-from-cwd: ${root} has no origin remote. Add one with \`git remote add origin <url>\`.`,
     };
   }
-  const head = await Utils.executeGitCommand(["symbolic-ref", "--quiet", "--short", "HEAD"], {
-    cwd: root,
-  });
-  const branch = head.success ? head.output.trim() || undefined : undefined;
-  // The remote's default branch as the clone recorded it (`origin/HEAD`); no network.
-  const originHead = await Utils.executeGitCommand(
-    ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
-    { cwd: root },
-  );
-  const remoteDefault = originHead.success
-    ? originHead.output.trim().replace(/^origin\//, "") || undefined
-    : undefined;
+  const { branch, defaultBranch } = await detectCheckoutBranches(root);
   return {
     ok: true,
     root,
     remote,
     slug: gitHubSlugFromRemote(remote),
     branch,
-    defaultBranch: remoteDefault ?? branch,
+    defaultBranch,
   };
 }
 
@@ -134,6 +128,8 @@ export interface Plan {
   /** Flags named on the command line (only these are updated in an existing workspace). */
   setTracker: boolean;
   setTaskQuery: boolean;
+  /** No `--task-query` and none saved: `taskQuery` is the tracker's default. */
+  taskQueryDefaulted: boolean;
   /**
    * `slug` is the GitHub `owner/name`, or null for a non-GitHub remote.
    * `conflicts`/`projectKey` come from the checkout's `.devintern-code/.env`,
@@ -512,6 +508,35 @@ async function githubCliTokenForPlan(
 }
 
 /**
+ * A registered checkout's `env_file` layers over the workspace `.env` for
+ * task runs; read it here too, or a saved token it overrides would still be
+ * named as this run's `tokenSource`.
+ */
+async function registeredRepoEnv(
+  draft: PlanDraft,
+  ctx: { cwd: string; workspaceDir: string },
+): Promise<Record<string, string>> {
+  if (!draft.existing?.repos.length) return {};
+  const registered = await findWorkspaceRepoForCheckout({
+    cwd: ctx.cwd,
+    workspaceDir: ctx.workspaceDir,
+  });
+  return registered ? buildRepoCredentialEnv(registered.repo, ctx.workspaceDir) : {};
+}
+
+/** The plan fields that report a GitHub CLI token the probe refused or could not verify. */
+function githubTokenFailureFields(
+  failure: { rejected: boolean; message: string } | undefined,
+): Partial<Plan> {
+  if (!failure) return {};
+  return {
+    githubTokenProbeFailed: true,
+    ...(failure.rejected ? { githubTokenAuthRejected: true } : {}),
+    githubTokenFailure: failure.message,
+  };
+}
+
+/**
  * Query step: the query and the credentials it runs with complete the plan
  * (every missing flag and variable is reported at once). Touches nothing on disk.
  */
@@ -524,18 +549,16 @@ export async function planQuery(
   const { flagTracker, configSnapshot, existing, repo, envFilePath } = draft;
   let { envFileValues } = draft;
   const tracker = flagTracker ?? existing?.defaults.tracker;
-  const taskQuery = args.taskQuery?.trim() || existing?.defaults.taskQuery;
+  const flagQuery = args.taskQuery?.trim();
+  const savedQuery = existing?.defaults.taskQuery;
+  // A new workspace (or one an interrupted run left without a query) falls
+  // back to the tracker's default: open tickets labeled devintern.
+  const fallbackQuery =
+    tracker && !flagQuery && !savedQuery ? defaultTaskQuery(tracker) : undefined;
+  const taskQuery = flagQuery || savedQuery || fallbackQuery;
   // Same parser the worker and `worker doctor` use, so all three agree.
   const workspaceEnv = parseEnvFile(workspaceEnvPath(ctx.workspaceDir));
-  // A registered checkout's `env_file` layers over the workspace `.env` for
-  // task runs; read it here too, or a saved token it overrides would still be
-  // named as this run's `tokenSource`.
-  const registeredRepo = draft.existing?.repos.length
-    ? await findWorkspaceRepoForCheckout({ cwd: ctx.cwd, workspaceDir: ctx.workspaceDir })
-    : null;
-  const repoEnv = registeredRepo
-    ? buildRepoCredentialEnv(registeredRepo.repo, ctx.workspaceDir)
-    : {};
+  const repoEnv = await registeredRepoEnv(draft, ctx);
   const credentialEnv: Env = { ...workspaceEnv, ...repoEnv, ...ctx.processEnv, ...envFileValues };
   if (tracker === "github" && !credentialEnv.GITHUB_REPO && repo?.slug) {
     credentialEnv.GITHUB_REPO = repo.slug;
@@ -561,6 +584,11 @@ export async function planQuery(
 
   const missing = missingInputs(tracker, taskQuery, credentialEnv);
   if (missing.length > 0) return missingInputFailure(tracker, missing);
+  if (fallbackQuery) {
+    notes.push(
+      `ℹ️  No --task-query: picking up open tickets labeled ${DEVINTERN_LABEL} (${fallbackQuery})`,
+    );
+  }
 
   const wrongLanguage = wrongQueryLanguage(tracker!, taskQuery!);
   if (wrongLanguage) {
@@ -586,18 +614,13 @@ export async function planQuery(
       tracker: tracker!,
       taskQuery: taskQuery!,
       setTracker: Boolean(flagTracker) || configSnapshot === null,
-      setTaskQuery: Boolean(args.taskQuery?.trim()) || configSnapshot === null,
+      setTaskQuery: Boolean(flagQuery || fallbackQuery) || configSnapshot === null,
+      taskQueryDefaulted: Boolean(fallbackQuery),
       repo,
       credentialEnv,
       envUpdates,
       ...(tokenSource ? { tokenSource } : {}),
-      ...(githubCli.failure
-        ? {
-            githubTokenProbeFailed: true,
-            ...(githubCli.failure.rejected ? { githubTokenAuthRejected: true } : {}),
-            githubTokenFailure: githubCli.failure.message,
-          }
-        : {}),
+      ...githubTokenFailureFields(githubCli.failure),
       notes,
       configSnapshot,
       writeRecommendedPolicy: false,

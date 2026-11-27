@@ -194,10 +194,11 @@ describe("runNonInteractiveWorkerInit", () => {
       name: "app",
       remote: "git@github.com:acme/app.git",
       added: true,
-      defaultBranch: "main",
       branch: "main",
     });
-    expect(config.repos[0]?.defaultBranch).toBe("main");
+    // No origin/HEAD: the checkout branch is not assumed to be the remote
+    // default, so the worker resolves it from the clone at run time.
+    expect(config.repos[0]?.defaultBranch).toBeUndefined();
     expect(report.filesWritten).toEqual([
       join(workspaceDir, ".env"),
       join(workspaceDir, "workspace.toml"),
@@ -310,9 +311,15 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(report.error).toStartWith("missing: --tracker, --task-query.");
     expect(existsSync(workspaceDir)).toBe(false);
 
+    // Jira has a default query (open tickets labeled devintern): only credentials are missing.
     const jira = await run({ tracker: "jira" }, { processEnv: { JIRA_BASE_URL: "https://x" } });
-    expect(jira.error).toStartWith("missing: --task-query, JIRA_EMAIL, JIRA_API_TOKEN.");
+    expect(jira.error).toStartWith("missing: JIRA_EMAIL, JIRA_API_TOKEN.");
     expect(existsSync(workspaceDir)).toBe(false);
+
+    // Asana's query language has no label filter, so --task-query stays required.
+    const asana = await run({ tracker: "asana" }, { processEnv: {} });
+    expect(asana.code).toBe("missing_input");
+    expect(asana.missing).toEqual(["--task-query", "ASANA_API_TOKEN"]);
   });
 
   test("a missing MARKDOWN_TASKS_DIR is named as the task folder with an absolute-path example", async () => {
@@ -797,8 +804,7 @@ describe("runNonInteractiveWorkerInit", () => {
       name: "app",
       remote: "https://gitlab.com/acme/app.git",
       added: true,
-      // `git init -b main` with no origin/HEAD: the checked-out branch is recorded.
-      defaultBranch: "main",
+      // `git init -b main` with no origin/HEAD: no unverified default_branch is recorded.
       branch: "main",
     });
     const config = loadWorkspaceConfig(join(workspaceDir, "workspace.toml"));

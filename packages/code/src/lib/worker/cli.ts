@@ -7,7 +7,7 @@ import {
   loadEnvironment,
   loadSupabaseConfig,
 } from "../cli/bootstrap";
-import { isPromptAbort, promptAbortReason } from "../cli/prompt-abort";
+import { isPromptAbort } from "../cli/prompt-abort";
 import { flushAnalytics, trackWorkerConnect } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
 import { TaskTrackerManager } from "../trackers/manager";
@@ -215,23 +215,21 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     }
   }
 
-  const { collectWorkerDoctorChecks, workerDoctorClosingLine } =
-    await import("../observability/worker-readiness");
-  const { renderReadinessReport } = await import("../observability/readiness");
   const workspaceDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
-  // Mirror the daemon: shared workspace values (AGENT_HARNESS, AGENT_CLI_PATH,
-  // LICENSE_KEY, ...) apply to this process. Only process.env changes.
-  const processEnv = { ...process.env };
-  try {
-    applyWorkspaceProcessEnv(workspaceDir);
-  } catch {
-    // Unreadable workspace .env: the config check reports the workspace state.
-  }
-  const checks = await collectWorkerDoctorChecks(
-    { workspacePath, offline, testNotifications },
-    { processEnv },
-  );
   if (json) {
+    const { collectWorkerDoctorChecks } = await import("../observability/worker-readiness");
+    // Mirror the daemon: shared workspace values (AGENT_HARNESS, AGENT_CLI_PATH,
+    // LICENSE_KEY, ...) apply to this process. Only process.env changes.
+    const processEnv = { ...process.env };
+    try {
+      applyWorkspaceProcessEnv(workspaceDir);
+    } catch {
+      // Unreadable workspace .env: the config check reports the workspace state.
+    }
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath, offline, testNotifications },
+      { processEnv },
+    );
     const { buildWorkerDoctorReport, readinessExitCode } =
       await import("../observability/readiness-json");
     const document = buildWorkerDoctorReport(checks, {
@@ -242,33 +240,39 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     console.log(JSON.stringify(document, null, 2));
     process.exit(readinessExitCode(document.result));
   }
-  const report = renderReadinessReport(checks);
-  console.log(`🩺 devintern worker readiness${offline ? " (offline)" : ""}:\n`);
-  console.log(report.lines.join("\n"));
-  console.log(`\n${workerDoctorClosingLine(checks, report)}`);
-  const { setupStateFor } = await import("../observability/readiness-json");
-  const { setup, summary } = setupStateFor(checks);
-  // The done signal for scripts and agents reading the text output.
-  console.log(`Setup: ${setup} — ${summary}`);
+  const { runWorkerDoctorText } = await import("../observability/worker-doctor-text");
+  const result = await runWorkerDoctorText(workspaceDir, {
+    workspacePath,
+    offline,
+    testNotifications,
+  });
   // 2: nothing is broken, but a step is left (sign in to start the Worker Pilot).
-  process.exit(report.hasFailures ? 1 : report.hasActions ? 2 : 0);
+  process.exit(result.exitCode);
 }
 
 const WORKER_INIT_USAGE = [
-  "Usage: devintern worker init [--no-service]",
-  "       devintern worker init --non-interactive --tracker <id> --task-query <query>",
+  "Usage: devintern worker init [--customize] [--no-service]",
+  "       devintern worker init --non-interactive --tracker <id> [--task-query <query>]",
   "                             [--repo-from-cwd] [--env-file <path>] [--yes]",
-  "                             [--sign-in <method>] [--remove-env-file] [--json]",
+  "                             [--sign-in <method>] [--remove-env-file] [--create-label] [--json]",
   "",
   "Interactively configure unattended automation and a native user service.",
   "",
+  "Checks this host (agent CLI, git, service manager) first, then writes the",
+  "recommended worker settings to a new workspace without asking.",
+  "",
   "Options:",
+  "  --customize         Ask each worker setting (CI repair, conflicts, active hours)",
+  "                      and offer Sentry auto-fixes instead of the recommended settings",
   "  --no-service        Skip the install-and-launch offer for the systemd/launchd service",
   "",
   "Non-interactive mode (coding agents, scripts, SSH without a TTY):",
   "  --non-interactive   Set up from flags; never prompts, pairs, or installs (signs in only with --sign-in)",
   "  --tracker <id>      Tracker the worker polls (jira, linear, github, ...)",
-  "  --task-query <q>    Ready-tasks query, written to [defaults].task_query",
+  "  --task-query <q>    Ready-tasks query, written to [defaults].task_query; a new",
+  "                      workspace defaults to open tickets labeled devintern (every",
+  "                      tracker except asana and markdown)",
+  "  --create-label      Create the devintern label if the tracker lacks it (github, gitlab)",
   "  --repo-from-cwd     Register the current Git repository (uses its origin remote)",
   "  --env-file <path>   Read credentials from this file (mode 0600) and save them",
   "                      to the workspace .env; otherwise they come from the environment",
@@ -381,6 +385,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       "--yes",
       "--sign-in",
       "--remove-env-file",
+      "--create-label",
     ].includes(arg.split("=")[0]),
   );
   if (nonInteractiveOnly) {
@@ -388,8 +393,24 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     console.error("   Run `devintern worker init --help` for options.");
     process.exit(1);
   }
+  const exitCode = await runInteractiveWorkerInit(args);
+  await flushAnalytics();
+  process.exit(exitCode);
+}
+
+/**
+ * The interactive `worker init` wizard with its production dependencies,
+ * without the process exit (`devintern init` runs it too when the user
+ * chooses a worker).
+ *
+ * @param args - `worker init` arguments (`--customize`, `--no-service`)
+ * @returns 0 ready, 2 only sign-in is left, 1 a check failed or setup stopped
+ */
+export async function runInteractiveWorkerInit(args: string[]): Promise<number> {
   loadEnvironment();
-  const { checkWorkerEntitlement, runWorkerInit } = await import("../init/worker-init");
+  const { checkWorkerEntitlement, reportWorkerInitAbort, runWorkerInit } =
+    await import("../init/worker-init");
+  const { defaultDevinternLabelOps } = await import("../init/worker-init-label");
   const { isInteractive } = await import("../init/wizard");
   if (!isInteractive(args, process.stdin)) {
     console.log("❌ 'devintern worker init' needs a terminal for its prompts.");
@@ -398,13 +419,20 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       '   devintern worker init --non-interactive --tracker jira --task-query "<query>" --repo-from-cwd',
     );
     console.log("   Run `devintern worker init --help` for every option.");
-    process.exit(1);
+    return 1;
   }
   const trackerManager = new TaskTrackerManager();
   let exitCode = 1;
   try {
+    const noService = args.some((arg) => arg === "--no-service");
     const result = await runWorkerInit({
-      noService: args.some((arg) => arg === "--no-service"),
+      noService,
+      customize: args.includes("--customize"),
+      checkHost: async () => {
+        const { defaultCheckHost } = await import("../init/worker-init-host");
+        return defaultCheckHost({ noService });
+      },
+      devinternLabelOps: defaultDevinternLabelOps,
       dryRunQuery: async (query) => {
         const result = await trackerManager.getClient().searchTasks(query);
         return result.tasks.length;
@@ -433,12 +461,10 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     exitCode = !result.ok ? 1 : result.ready ? 0 : result.signInOnly ? 2 : 1;
   } catch (error) {
     if (!isPromptAbort(error)) throw error;
-    console.log(
-      `\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern worker init\`.`,
-    );
+    // The wizard already said setup paused and where the answers were saved.
+    exitCode = reportWorkerInitAbort(error, console.log);
   }
-  await flushAnalytics();
-  process.exit(exitCode);
+  return exitCode;
 }
 
 /** Parse daemon flags, load the workspace, gate on license, and run the worker. */

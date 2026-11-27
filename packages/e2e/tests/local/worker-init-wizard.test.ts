@@ -39,7 +39,7 @@ const QUERY_PROMPT = /Ready-tasks query: $/;
 
 const TOKEN_PROMPT = /GitHub token for creating pull requests[^\n]*: $/;
 const SIGN_IN_PROMPT = /Sign in now to start the Worker Pilot\? \[Y\/n\]: $/;
-const RECOMMENDED_PROMPT = /Use the recommended worker settings \([^\n]*\)\? \[Y\/n\]: $/;
+const CONTINUE_PROMPT = /Continue setup without the agent CLI\?[^\n]*\[Y\/n\]: $/;
 
 interface AnswerOptions {
   /** Typed at the tasks-directory prompt (default: the fixture's absolute path). */
@@ -49,8 +49,8 @@ interface AnswerOptions {
   /** False when the license check is skipped, so there is no sign-in prompt. */
   licensing?: boolean;
   /**
-   * Answer "n" to the recommended-settings question and walk the CI,
-   * conflict, active-hours, and Sentry questions (default: accept them).
+   * Run with `--customize` and walk the CI, conflict, active-hours, and
+   * Sentry questions (default: the recommended settings, no question).
    */
   expandedSettings?: boolean;
 }
@@ -67,13 +67,12 @@ function markdownAnswers(fixture: WorkerInitFixture, options: AnswerOptions = {}
     [QUERY_PROMPT, "status=todo\r"],
     ...(options.expandedSettings
       ? ([
-          [RECOMMENDED_PROMPT, "n\r"],
           [/Automatically repair failing CI[^\n]*\[y\/N\]: $/, "n\r"],
           [/Conflict handling[^\n]*\[auto\]: $/, "\r"],
           [/Limit new-task pickup to active hours\? \[y\/N\]: $/, "n\r"],
           [/Watch a Sentry project[^\n]*\[y\/N\]: $/, "n\r"],
         ] as Answer[])
-      : ([[RECOMMENDED_PROMPT, "\r"]] as Answer[])),
+      : []),
     ...(options.licensing === false ? [] : ([[SIGN_IN_PROMPT, "n\r"]] as Answer[])),
     [/React in seconds through the DevIntern relay[^\n]*\[Y\/n\]: $/, "n\r"],
   ];
@@ -97,11 +96,11 @@ async function runWizard(
   fixture: WorkerInitFixture,
   proxy: RecordingProxy,
   answers: Answer[],
-  options: { licensing?: boolean } = {},
+  options: { licensing?: boolean; args?: string[] } = {},
 ): Promise<WizardRun> {
   let raw = "";
   const decoder = new TextDecoder();
-  const child = Bun.spawn([process.execPath, cliPath, "worker", "init"], {
+  const child = Bun.spawn([process.execPath, cliPath, "worker", "init", ...(options.args ?? [])], {
     cwd: fixture.repoDir,
     env: {
       ...fixture.env,
@@ -209,7 +208,10 @@ ptyTest(
   async () => {
     await withWizardFixture(async (fixture, proxy) => {
       const answers = markdownAnswers(fixture, { licensing: false, expandedSettings: true });
-      const run = await runWizard(fixture, proxy, answers, { licensing: false });
+      const run = await runWizard(fixture, proxy, answers, {
+        licensing: false,
+        args: ["--customize"],
+      });
       expect(run.exitCode, run.output).toBe(0);
       expect(run.answered).toHaveLength(answers.length);
       for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
@@ -242,6 +244,40 @@ ptyTest(
 );
 
 ptyTest(
+  "worker init wizard: without an agent CLI the first thing reported is the missing agent",
+  async () => {
+    const fixture = new WorkerInitFixture({ agent: false });
+    const proxy = await startRecordingProxy();
+    try {
+      await fixture.seedRepository();
+      const answers: Answer[] = [
+        [CONTINUE_PROMPT, "\r"],
+        ...markdownAnswers(fixture, { licensing: false }),
+      ];
+      const run = await runWizard(fixture, proxy, answers, { licensing: false });
+      expect(run.answered).toHaveLength(answers.length);
+      for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
+      // Before the first question, the first problem named is the agent CLI.
+      const beforeTracker = run.output.slice(0, run.output.search(TRACKER_PROMPT));
+      const firstProblem = beforeTracker.split("\n").find((line) => line.includes("❌"));
+      expect(firstProblem).toContain("❌ Agent CLI:");
+      expect(beforeTracker).toMatch(/Install it with: \S+|Instructions: \S+/);
+      // The readiness block refers back to it instead of repeating it.
+      expect(run.output).toContain(
+        "Agent harness — still missing (see the host check at the start)",
+      );
+      expect(run.output).toContain("Agent harness: install the agent CLI");
+      expect(run.exitCode, run.output).toBe(1);
+      expect(proxy.requests()).toEqual([]);
+    } finally {
+      await proxy.close();
+      fixture.release();
+    }
+  },
+  180_000,
+);
+
+ptyTest(
   "worker init wizard: declining the sign-in saves the setup and says signing in is the one step left",
   async () => {
     await withWizardFixture(async (fixture, proxy) => {
@@ -253,8 +289,10 @@ ptyTest(
       const run = await runWizard(fixture, proxy, answers);
       expect(run.answered).toHaveLength(answers.length);
       for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
-      // One answer took the recommended settings: no per-setting questions.
-      expect(run.output).toContain("💾 Wrote the recommended worker settings to workspace.toml.");
+      // The recommended settings are written without a question.
+      expect(run.output).toContain("💾 Wrote the recommended worker settings to workspace.toml (");
+      expect(run.output).toContain("`devintern worker init --customize`");
+      expect(run.output).not.toContain("Use the recommended worker settings?");
       expect(run.output).not.toContain("Automatically repair failing CI");
       expect(run.output).not.toContain("Watch a Sentry project");
       // Declining the Pilot sign-in is not followed by a second sign-in question.

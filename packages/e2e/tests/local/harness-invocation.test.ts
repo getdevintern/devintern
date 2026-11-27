@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { HarnessUnavailableError } from "@devintern/agent-harness";
 import {
   HARNESS_PROBE_PROMPT,
   detectInvocationRejection,
@@ -62,7 +63,18 @@ for (const entry of harnesses) {
   test.concurrent.skipIf(!entry.installed)(
     `${entry.harness.displayName} (${entry.harness.name}) accepts the generated invocation`,
     async () => {
-      const probe = await probeHarnessInvocation(entry);
+      let probe: Awaited<ReturnType<typeof probeHarnessInvocation>>;
+      try {
+        probe = await probeHarnessInvocation(entry);
+      } catch (error) {
+        // The CLI refuses this executable before spawning it (e.g. a `dsh`
+        // that is not DeepSeek's harness), so there is no flag surface to probe.
+        if (error instanceof HarnessUnavailableError) {
+          console.warn(`Skipping ${entry.harness.name}: ${error.message}`);
+          return;
+        }
+        throw error;
+      }
       const rejection = detectInvocationRejection(probe);
       if (rejection) {
         throw new Error(

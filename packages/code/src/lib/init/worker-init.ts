@@ -18,7 +18,12 @@ import { randomBytes } from "crypto";
 import { findProjectRoot } from "@devintern/utils";
 
 import { WORKER_PILOT_OFFER } from "../account/worker-pilot";
-import { isPromptAbort } from "../cli/prompt-abort";
+import {
+  isPromptAbort,
+  isPromptAbortReported,
+  markPromptAbortReported,
+  promptAbortReason,
+} from "../cli/prompt-abort";
 import { resolveWizardPrompts } from "../cli/prompt-session";
 import { GITHUB_APP_INSTALL_URL } from "../code-host/github/app-setup";
 import { trackWorkerInitCompleted, trackWorkerInitStarted } from "../observability/analytics";
@@ -44,7 +49,8 @@ export {
   describeCustomWorkerSettings,
 } from "./worker-init-policy";
 export type { WorkerInitDeps, WorkerInitResult } from "./worker-init-run";
-export { WORKER_INIT_STEPS, defaultEnsureTracker, describeQueryFailure } from "./worker-init-steps";
+export { WORKER_INIT_STEPS, defaultEnsureTracker } from "./worker-init-steps";
+export { describeQueryFailure } from "./worker-init-query-failure";
 
 /**
  * Insert or update KEY=value lines in an env file's content. Existing keys
@@ -195,9 +201,28 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
         `\n⏸️  Setup paused. Your answers so far are saved in ${workspaceConfigPath(run.workspaceDir)}; ` +
           "run `devintern worker init` to continue (it offers them as defaults).",
       );
+      markPromptAbortReported(error);
     }
     throw error;
   } finally {
     session.close();
   }
+}
+
+/**
+ * Closing report for an aborted `devintern worker init`. The wizard marks the
+ * aborts it already explained with a "Setup paused" line, so only an abort
+ * raised before the wizard could report it gets the generic "setup stopped"
+ * line. Kept here, next to the wizard output, so both halves are testable
+ * together.
+ *
+ * @param error - The abort that ended setup
+ * @param log - Output sink (the CLI's `console.log`)
+ * @returns Process exit code (always `1`)
+ */
+export function reportWorkerInitAbort(error: unknown, log: (message: string) => void): number {
+  if (!isPromptAbortReported(error)) {
+    log(`\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern worker init\`.`);
+  }
+  return 1;
 }

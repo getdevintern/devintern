@@ -45,6 +45,7 @@ import type {
   NonInteractiveInitDeps,
   NonInteractiveInitReport,
 } from "./worker-init-noninteractive-types";
+import { QUERY_LABELS_CHECK } from "./worker-init-query-labels";
 import { emptyOutcome, secretValues } from "./worker-init-run";
 import type { FlagsRun } from "./worker-init-run";
 import { initRerunCommand, runWorkerInitSteps } from "./worker-init-steps";
@@ -140,9 +141,20 @@ export function parseNonInteractiveInitArgs(argv: string[]): ParseResult {
       case "--remove-env-file":
         args.removeEnvFile = true;
         break;
+      case "--create-label":
+        args.createLabel = true;
+        break;
       case "--no-service":
         // Non-interactive init never installs the service; accepted for symmetry.
         break;
+      case "--customize":
+        return {
+          ok: false,
+          json,
+          error:
+            "--customize asks each worker setting and needs a terminal; it cannot be combined " +
+            `with --non-interactive. Edit workspace.toml instead. ${USAGE_HINT}`,
+        };
       default:
         return {
           ok: false,
@@ -434,6 +446,20 @@ function nextStepsFor(options: {
         "requests to the workspace .env, or pass one with --env-file",
       command: initRerunCommand(args, ctx, { envFile: options.envFilePath ?? "<path>" }),
     });
+  }
+  // Warn-only, so not a blocker above: a label the query names is missing.
+  const missingLabel = options.checks.find(
+    (check) => check.name === QUERY_LABELS_CHECK && check.status === "warn",
+  );
+  if (missingLabel) {
+    const command = initRerunCommand(args, ctx, { taskQuery: "<query>" });
+    if (!steps.some((step) => step.id === "fix-query" && step.command === command)) {
+      steps.push({
+        id: "fix-query",
+        message: `${missingLabel.message}. Re-run setup with the corrected query, or create the label and keep this one`,
+        command,
+      });
+    }
   }
   if (!options.hasRepo) {
     steps.push({

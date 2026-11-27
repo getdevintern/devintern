@@ -227,7 +227,8 @@ describe("worker init --non-interactive (headless contract)", () => {
   test("missing input has code missing_input and the missing list", async () => {
     const report = await run({ tracker: "github" }, { processEnv: {} });
     expect(report.code).toBe("missing_input");
-    expect(report.missing).toEqual(["--task-query", "GITHUB_TOKEN"]);
+    // GitHub defaults the query to `is:open label:devintern`.
+    expect(report.missing).toEqual(["GITHUB_TOKEN"]);
   });
 
   test("the --env-file is left in place with a note, or removed with --remove-env-file", async () => {

@@ -27,7 +27,7 @@ Ask once, up front, and record the answers:
 
 1. The worker host (this machine, or which server) and the repository (`owner/repo`).
 2. The coding agent CLI: Claude Code (default), Codex, OpenCode, Cursor, or another [harness](https://devintern.com/docs/code/agent-harness).
-3. The tracker and the ready-tasks query in its language, kept narrow. For GitHub Issues, suggest `is:open label:devintern`; init rejects JQL such as `labels = x` with `code` `invalid_query`.
+3. The tracker, and whether open tickets labeled `devintern` is the right ready-tasks query (the default when `--task-query` is omitted; `asana` and `markdown` need one). A custom query is in the tracker's language, kept narrow; init rejects JQL such as `labels = x` for GitHub with `code` `invalid_query`. On GitHub or GitLab, ask whether to create a missing `devintern` label (`--create-label`); never pass it without a yes.
 4. The branch PRs should target. The default is the repository's default branch.
 5. How they sign in on devintern.com: `github`, `google`, `x`, or their email address. Skip when they have a paid `LICENSE_KEY` and want no relay.
 6. Whether to install the background service now. It starts picking up matching tickets right away.
@@ -69,7 +69,7 @@ Ask once, up front, and record the answers:
 Inside the checkout:
 
 ```bash
-devintern worker init --non-interactive --tracker <id> --task-query '<query>' \
+devintern worker init --non-interactive --tracker <id> [--task-query '<query>'] [--create-label] \
   --repo-from-cwd --env-file ~/devintern.env --remove-env-file --sign-in <method> --json
 ```
 
@@ -80,7 +80,7 @@ Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 | `result` | `success` (exit 0, ready), `unchanged` (exit 0, the workspace already had exactly this setup), `action_required` (exit 2, saved and nothing broken; only sign-in is left), `failure` (exit 1). `action_required` is not a broken setup |
 | `code` | Set on every failure, for example `missing_input`, `env_file_unreadable`, `invalid_query`, `workspace_exists`, `credentials_rejected`, `query_rejected`, `repo_access_denied`, `agent_missing` |
 | `error` | Input problem; with `missing_input`, `missing[]` names every missing flag and variable |
-| `checks[]` | `name`, `label`, `status` (`pass`, `warn`, `action`, `fail`, `skipped`), `message`, `hint`. A `query` warn with 0 matches is fine when nothing is labelled yet |
+| `checks[]` | `name`, `label`, `status` (`pass`, `warn`, `action`, `fail`, `skipped`), `message`, `hint`. A `query` warn with 0 matches is fine when nothing is labelled yet. A `label` warn means the `devintern` label is missing (fix: `--create-label` with the user's yes). A `query-labels` warn means a label `--task-query` names does not exist, often a typo: ask the user to correct the query or create the label |
 | `signIn` | `url`, `method`, `expiresAt`, `complete`, `reused`; present when `--sign-in` started a sign-in (step 4) |
 | `repo` | `name`, `remote`, `added`, `defaultBranch`, `branch` |
 | `warnings[]` | Not failures; relay each one to the user |
@@ -173,7 +173,7 @@ Report separately, citing the doctor `setup` and `summary`: **configured** (host
 
 ## Beyond basic setup
 
-- A person at a terminal can run the guided `devintern worker init` wizard instead of steps 3 to 6. `--no-service` skips its service offer.
+- A person at a terminal can run the guided `devintern worker init` wizard instead of steps 3 to 6. It checks the agent CLI and git first and writes the recommended worker settings without asking; `--customize` asks each setting and offers Sentry, and `--no-service` skips its service offer.
 - Credential layers: shared worker credentials in the workspace `.env`, repository credentials in repo env layers, tracker credentials in team layers. A checkout's own `.env` is not loaded by the worker. See [workspace configuration](https://devintern.com/docs/code/workspaces).
 - Several tracker sources use `[[teams]]` and routing rules; a single repository needs none. For ongoing workspace changes, automations, Sentry monitors, and policies, use `devintern-workspace` when available. For one-off dispatch, use `devintern-delegate`.
 - Sentry without a terminal: `devintern worker connect sentry --org <slug> --project <slug> [--repo <name>] --json`, with `SENTRY_AUTH_TOKEN` in the environment or a `0600` `--env-file`. Changing an existing monitor needs `--yes`; confirm first.

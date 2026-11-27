@@ -115,6 +115,54 @@ describe("GitHubClient.removeLabel", () => {
   });
 });
 
+describe("GitHubClient label lookup and creation", () => {
+  test("hasLabel returns true when the label exists", async () => {
+    const calls = mockFetch(() => ({ json: { name: "devintern" } }));
+
+    await expect(makeClient().hasLabel("devintern")).resolves.toBe(true);
+
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toContain("/repos/acme/webapp/labels/devintern");
+  });
+
+  test("hasLabel returns false on 404", async () => {
+    mockFetch(() => ({ status: 404, json: { message: "Not Found" } }));
+
+    await expect(makeClient().hasLabel("devintern")).resolves.toBe(false);
+  });
+
+  test("hasLabel throws on other errors", async () => {
+    mockFetch(() => ({ status: 500, json: { message: "boom" } }));
+
+    await expect(makeClient().hasLabel("devintern")).rejects.toThrow("GitHub API error (500)");
+  });
+
+  test("createLabel posts the name, color and description", async () => {
+    const calls = mockFetch(() => ({ json: { name: "devintern" } }));
+
+    await makeClient().createLabel("devintern", {
+      color: "5319e7",
+      description: "Ready for DevIntern",
+    });
+
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toContain("/repos/acme/webapp/labels");
+    expect(calls[0].body).toEqual({
+      name: "devintern",
+      color: "5319e7",
+      description: "Ready for DevIntern",
+    });
+  });
+
+  test("createLabel omits an absent description", async () => {
+    const calls = mockFetch(() => ({ json: { name: "devintern" } }));
+
+    await makeClient().createLabel("devintern", { color: "5319e7" });
+
+    expect(calls[0].body).toEqual({ name: "devintern", color: "5319e7" });
+  });
+});
+
 describe("GitHubClient.getLabels", () => {
   test("paginates until a short page", async () => {
     const calls = mockFetch((req) => {

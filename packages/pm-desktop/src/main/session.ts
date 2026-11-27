@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { listInstalledHarnesses, parseAgentEffort } from "@devintern/agent-harness";
 import { findConfigDir } from "@devintern/utils";
+import { findWorkspaceRepo } from "@devintern/workspace";
 import { getTrackerDisplayName } from "@devintern/task-trackers";
 import type { ConfiguredTracker } from "@devintern/task-trackers";
 import { createEngine, DEFAULT_ISSUE_TYPES } from "@getdevintern/pm/engine";
@@ -209,8 +210,17 @@ function resolvePromptsDir(): string {
   return join(dirname(pmPackageJson), "prompts");
 }
 
-/** True when the project (or an ancestor) already has a `.devintern-code` directory. */
-export async function detectCodeConfig(projectDir: string): Promise<boolean> {
+/**
+ * True when DevIntern Code already knows this project: it is registered in the
+ * workspace (`~/.devintern/workspace.toml`, by `origin` or by directory), or
+ * it (or an ancestor) still has a legacy `.devintern-code` directory.
+ */
+export async function detectCodeConfig(
+  projectDir: string,
+  workspaceDir?: string,
+): Promise<boolean> {
+  if (await findWorkspaceRepo({ dir: projectDir, workspaceDir })) return true;
+  // Legacy layout; DevIntern Code moves it into the workspace on its next run.
   return findConfigDir({ configDirName: ".devintern-code", startDir: projectDir }) !== null;
 }
 

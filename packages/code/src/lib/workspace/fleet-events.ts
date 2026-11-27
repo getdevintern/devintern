@@ -36,6 +36,8 @@ import type { TaskSupervisor } from "../worker/supervisor";
 import { MAX_CONCURRENCY_PER_REPO_ENV } from "../utils/review-worktree";
 import { isBotAuthored, mentionTriggerKey } from "../review/mention-trigger";
 import type { MentionKind, MentionTrigger } from "../review/mention-trigger";
+import { closedPrState, replyToClosedPrMention } from "../review/closed-pr-mention";
+import type { PrStateFields } from "../review/closed-pr-mention";
 
 /**
  * Supervisor exclusive key for one GitHub PR (`owner/repo#123`, lowercased
@@ -89,6 +91,15 @@ export interface FleetEventDeps {
    * failure is retried instead of being treated as a denial.
    */
   userHasPushAccess: (owner: string, repo: string, username: string) => Promise<boolean>;
+  /**
+   * PR state check for mention runs: a mention on a PR that is not open gets
+   * one reply comment instead of a run. Without it, mentions go to the review
+   * runner unchecked (the review adapter's open-PR guard still applies).
+   */
+  closedPrMentions?: {
+    getPrState: (slug: string, prNumber: number) => Promise<PrStateFields>;
+    postPrComment: (slug: string, prNumber: number, body: string) => Promise<void>;
+  };
   /** Review runner (injected for tests; defaults to the CLI subprocess). */
   runReview?: (
     repo: string,
@@ -516,7 +527,9 @@ export type FleetMentionHandler = (
 
 /**
  * Build the fleet mention handler: permission-gate the mentioning user, then
- * run the review pipeline for that PR with the mention as feedback.
+ * run the review pipeline for that PR with the mention as feedback. A mention
+ * on a closed or merged PR gets one reply comment instead of a run and
+ * returns `"skipped"`, so the caller records it as handled.
  *
  * Comments and reviews written by the bot or the worker itself are skipped
  * (bot-loop safety). A confirmed denial returns `"skipped"` (an intentional
@@ -549,6 +562,17 @@ export function createFleetMentionHandler(
       console.log(
         `⛔ [fleet] Skipping mention on ${slug}#${prNumber}: @${actor} does not have push access ` +
           "(mention-triggered automation requires write, maintain, or admin permission)",
+      );
+      return "skipped";
+    }
+
+    const closedPrs = deps.closedPrMentions;
+    const closed = closedPrs && closedPrState(await closedPrs.getPrState(slug, prNumber));
+    if (closedPrs && closed) {
+      await replyToClosedPrMention(
+        { repo: slug, prNumber, state: closed, actor },
+        (body) => closedPrs.postPrComment(slug, prNumber, body),
+        "[fleet]",
       );
       return "skipped";
     }

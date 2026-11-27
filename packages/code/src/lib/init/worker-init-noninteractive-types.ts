@@ -10,6 +10,7 @@ import type { PendingSignIn } from "../account/cli";
 import type { NextStep, ReadinessResult, ReportCheck } from "../observability/readiness-json";
 import type { WorkerDoctorDeps, WorkerEntitlementLike } from "../observability/worker-readiness";
 import type { GitHubCliToken, GitHubTokenSource } from "./github-cli-token";
+import type { DevinternLabelOpsFactory } from "./worker-init-label";
 
 /** `schema` value of the `--json` document. Bump `version` on breaking changes. */
 export const WORKER_INIT_JSON_SCHEMA = "devintern.worker-init";
@@ -30,6 +31,8 @@ export interface NonInteractiveInitArgs {
   signIn?: ResolvedLogin;
   /** `--remove-env-file`: delete the `--env-file` once its values are saved. */
   removeEnvFile?: boolean;
+  /** `--create-label`: create the `devintern` label when the tracker lacks it. */
+  createLabel?: boolean;
 }
 
 /**
@@ -97,6 +100,8 @@ export interface NonInteractiveInitReport {
   signIn?: PendingSignIn;
   /** True when `--remove-env-file` deleted the `--env-file` after saving its values. */
   envFileRemoved?: boolean;
+  /** True when `--create-label` created the `devintern` label in the tracker. */
+  labelCreated?: boolean;
 }
 
 /** The `[[repos]]` entry `--repo-from-cwd` registered. */
@@ -135,4 +140,6 @@ export interface NonInteractiveInitDeps {
   home?: string;
   /** Finds an executable on PATH for the install-agent step (tests). */
   which?: (command: string) => string | null;
+  /** Looks up and creates the `devintern` label (tests); defaults to the tracker API. */
+  devinternLabelOps?: DevinternLabelOpsFactory;
 }

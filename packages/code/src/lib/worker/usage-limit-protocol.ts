@@ -178,6 +178,23 @@ export function readUsageLimitHint(path: string | undefined): UsageLimitHint {
 }
 
 /**
+ * When a limited harness's quota returns, from a child's hint file.
+ *
+ * Used by callers that run a harness outside the failover chain (a pinned
+ * job): they still need the child's real reset time so a retry is not
+ * relaunched into the same limit.
+ *
+ * @param hint - Hint read from the child's usage-limit file
+ * @param now - Current epoch ms
+ */
+export function usageLimitRetryAt(hint: UsageLimitHint, now: number): number {
+  if (hint.untilMs && hint.untilMs > now) return hint.untilMs;
+  const parsed = resetHintToMs(hint.resetsAt, now);
+  if (parsed !== null && parsed > now) return parsed;
+  return now + (hint.period ? RATE_LIMIT_PERIOD_FLOOR_MS[hint.period] : RATE_LIMIT_FALLBACK_MS);
+}
+
+/**
  * If this is a worker child and `error` is a usage limit, write the hint
  * and exit 75. Returns false so callers can continue with one-shot handling.
  *

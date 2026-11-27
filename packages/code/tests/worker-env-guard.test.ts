@@ -17,6 +17,15 @@ describe("stripWorkerInjectedEnv", () => {
     expect(WORKER_INJECTED_ENV_VARS).toContain("DEVINTERN_HARNESS_CHAIN");
   });
 
+  test("strips the agent harness the worker routed the task to", () => {
+    // Regression: the suite inherited AGENT_HARNESS=opencode, so a workflow
+    // that expects the default harness got OpenCode's install hint instead.
+    expect(WORKER_INJECTED_ENV_VARS).toContain("AGENT_HARNESS");
+    const env: NodeJS.ProcessEnv = { AGENT_HARNESS: "opencode" };
+    stripWorkerInjectedEnv(env);
+    expect(env.AGENT_HARNESS).toBeUndefined();
+  });
+
   test("strips the per-repo concurrency cap PR jobs inherit", () => {
     // Regression: agents running the suite inside a worker PR job inherited
     // DEVINTERN_MAX_CONCURRENCY_PER_REPO=8, which raised the idle-worktree cap

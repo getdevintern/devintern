@@ -550,9 +550,7 @@ export async function runTrackerSetup(
   // failed connection check alike.
   const prompted = steps.map((step) => {
     const fallback = options.stepDefaults?.[step.key];
-    return fallback
-      ? { ...step, defaultValue: fallback, label: `${step.label} (origin: ${fallback})` }
-      : step;
+    return fallback ? { ...step, defaultValue: fallback } : step;
   });
   if (!reusedExisting) {
     // The GitHub tracker needs a token; offer a signed-in `gh` session before
