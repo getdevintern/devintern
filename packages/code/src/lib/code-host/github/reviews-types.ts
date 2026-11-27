@@ -5,6 +5,9 @@ export interface PullRequestInfo {
   title: string;
   body: string | null;
   state: "open" | "closed";
+  /** Whether a closed PR was merged. */
+  merged?: boolean;
+  merged_at?: string | null;
   head: {
     ref: string;
     sha: string;
