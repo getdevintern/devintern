@@ -489,6 +489,59 @@ describe("fleet event handlers", () => {
     expect(runs).toEqual([undefined, { kind: "issue_comment", id: 1 }, { kind: "review", id: 2 }]);
   });
 
+  test("mention on a merged or closed PR replies once and starts no run", async () => {
+    const posted: Array<{ slug: string; prNumber: number; body: string }> = [];
+    let prState: { state: string; merged?: boolean } = { state: "closed", merged: true };
+    const handle = createFleetMentionHandler({
+      ...deps(),
+      closedPrMentions: {
+        getPrState: async () => prState,
+        postPrComment: async (slug, prNumber, body) => {
+          posted.push({ slug, prNumber, body });
+        },
+      },
+    });
+    const mention = { id: 9, body: "@devintern-ai fix", user: { login: "maintainer" } };
+
+    expect(await handle("acme/backend", mention, 599)).toBe("skipped");
+    expect(reviews).toHaveLength(0);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ slug: "acme/backend", prNumber: 599 });
+    expect(posted[0].body).toContain("already merged");
+    expect(posted[0].body).toContain("<!-- devintern");
+
+    prState = { state: "closed", merged: false };
+    expect(await handle("acme/backend", { ...mention, id: 10 }, 600)).toBe("skipped");
+    expect(posted[1].body).toContain("already closed");
+
+    // A user without push access would not trigger a run, so no reply either.
+    pushAccess = false;
+    expect(await handle("acme/backend", { ...mention, id: 11 }, 600)).toBe("skipped");
+    expect(posted).toHaveLength(2);
+
+    pushAccess = true;
+    prState = { state: "open" };
+    expect(await handle("acme/backend", { ...mention, id: 12 }, 601)).toBe(true);
+    expect(reviews).toHaveLength(1);
+    expect(posted).toHaveLength(2);
+  });
+
+  test("a failed closed-PR reply still settles the mention without a run", async () => {
+    const handle = createFleetMentionHandler({
+      ...deps(),
+      closedPrMentions: {
+        getPrState: async () => ({ state: "closed", merged_at: "2026-11-27T07:00:00Z" }),
+        postPrComment: async () => {
+          throw new Error("GitHub API 502");
+        },
+      },
+    });
+    expect(
+      await handle("acme/backend", { id: 9, body: "@devintern-ai", user: { login: "m" } }, 5),
+    ).toBe("skipped");
+    expect(reviews).toHaveLength(0);
+  });
+
   test("mention handler propagates permission API errors instead of denying", async () => {
     const handle = createFleetMentionHandler(deps());
 

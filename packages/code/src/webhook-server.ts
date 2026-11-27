@@ -192,7 +192,9 @@ async function handlePullRequestReview(
     return skipResponse("Review does not require processing", "reviewer is a bot");
   }
 
-  if (event.pull_request.state !== "open") {
+  // A review on a closed or merged PR is queued only when it could @mention
+  // the bot: processing then replies on the PR (no run starts) or skips it.
+  if (event.pull_request.state !== "open" && !event.review.body?.includes("@")) {
     console.log(
       `⏭️  Skipping review on PR #${event.pull_request.number}: PR is ${event.pull_request.state} (not open)`,
     );
@@ -275,7 +277,9 @@ async function handleIssueComment(
     return skipResponse("Comment does not require processing", "author is a bot");
   }
 
-  if (event.issue.state !== "open") {
+  // A comment on a closed or merged PR is queued only when it could @mention
+  // the bot: processing then replies on the PR (no run starts) or skips it.
+  if (event.issue.state !== "open" && !event.comment.body?.includes("@")) {
     console.log(
       `⏭️  Skipping comment on #${event.issue.number}: PR is ${event.issue.state} (not open)`,
     );

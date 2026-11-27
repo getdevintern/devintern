@@ -14,6 +14,8 @@ import type { SweptComment, SweptPrInfo } from "../src/lib/acquirers/mention-swe
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
+import { createFleetMentionHandler } from "../src/lib/workspace/fleet-events";
+import type { FleetEventDeps } from "../src/lib/workspace/fleet-events";
 
 describe("mentionsBot", () => {
   test("matches the full bot login", () => {
@@ -280,14 +282,59 @@ describe("MentionSweepAcquirer", () => {
     expect(handled).toEqual([{ id: 3, prNumber: 9 }]);
   });
 
-  test("closed PRs are skipped", async () => {
-    const { acquirer, handled } = makeAcquirer({
-      issueComments: [comment({})],
-      pr: { state: "closed" },
+  test("mentions on closed PRs go to the handler once, without the fork guard", async () => {
+    const { acquirer, handled, posted } = makeAcquirer({
+      issueComments: [comment({ id: 1 }), comment({ id: 2, body: "no mention here" })],
+      pr: { state: "closed", headRepoFullName: "contributor/widgets", maintainerCanModify: false },
     });
 
     await acquirer.tick();
-    expect(handled).toEqual([]);
+    await acquirer.tick();
+    expect(handled).toEqual([{ id: 1, prNumber: 5 }]);
+    expect(posted).toEqual([]);
+  });
+
+  test("with the fleet handler, a merged-PR mention gets one reply and no run", async () => {
+    const replies: string[] = [];
+    const runs: number[] = [];
+    const fleetHandler = createFleetMentionHandler(
+      {
+        userHasPushAccess: async () => true,
+        closedPrMentions: {
+          getPrState: async () => ({ state: "closed", merged: true }),
+          postPrComment: async (_slug: string, _pr: number, body: string) => {
+            replies.push(body);
+          },
+        },
+      } as unknown as FleetEventDeps,
+      async (_slug, pr) => {
+        runs.push(pr);
+        return true;
+      },
+    );
+    const acquirer = new MentionSweepAcquirer({
+      repo: "acme/widgets",
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: {
+        fetchIssueCommentsSince: async () => [
+          comment({ id: 1 }),
+          comment({ id: 2, body: "no mention here" }),
+        ],
+        fetchReviewCommentsSince: async () => [],
+        getBotUsername: async () => "devintern[bot]",
+        getPr: async (prNumber) => ({ number: prNumber, state: "closed" }),
+        postComment: async () => {},
+      },
+      handleMention: (c, prNumber, kind) => fleetHandler("acme/widgets", c, prNumber, kind),
+    });
+
+    await acquirer.tick();
+    await acquirer.tick();
+    expect(runs).toEqual([]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("already merged");
   });
 
   test("fork PRs without maintainer_can_modify are skipped with a comment", async () => {
