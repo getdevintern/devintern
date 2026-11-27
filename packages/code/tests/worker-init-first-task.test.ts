@@ -13,6 +13,7 @@ import {
   SAMPLE_MARKDOWN_STEM,
   SAMPLE_TASK_BODY,
   SAMPLE_TASK_TITLE,
+  defaultEnqueueSampleAdHoc,
   defaultFindSampleRun,
   defaultSampleTicketOps,
   offerFirstTask,
@@ -86,6 +87,20 @@ describe("sampleTaskMatch", () => {
       fields: {},
       unmatched: ["assignee:me", "milestone:v2"],
     });
+  });
+
+  test("github: terms a fresh issue already satisfies are not flagged", () => {
+    expect(
+      sampleTaskMatch(
+        "github",
+        "is:open label:devintern no:assignee no:milestone sort:created-asc is:unassigned repo:Acme/App",
+        "acme/app",
+      ),
+    ).toEqual({ labels: ["devintern"], fields: {}, unmatched: [] });
+    // Another repository's issues are not where the sample goes.
+    expect(sampleTaskMatch("github", "label:ai repo:acme/other", "acme/app").unmatched).toEqual([
+      "repo:acme/other",
+    ]);
   });
 
   test("gitlab: drops the None/Any keywords", () => {
@@ -386,6 +401,29 @@ describe("offerFirstTask", () => {
     expect(logs.join("\n")).toContain("#/runs/5");
   });
 
+  test("github: a registered repo other than GITHUB_REPO gets the sample through worker add", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      '[defaults]\ntracker = "github"\ntask_query = "label:devintern"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/web.git"\n',
+    );
+    const { ops, calls } = recordingOps();
+    const enqueued: Array<{ workspaceDir: string; repo?: string }> = [];
+    const { ctx, questions, logs } = context(["y"], {
+      ...fakeClock(),
+      sampleTicketOps: () => ops,
+      enqueueAdHoc: async (input) => {
+        enqueued.push(input);
+        return { key: "local-sample" };
+      },
+      findRun: () => ({ id: 3, status: "in_progress" }),
+    });
+    expect(await offerFirstTask(ctx)).toEqual({ key: "local-sample" });
+    expect(calls).toEqual([]);
+    expect(enqueued).toEqual([{ workspaceDir, repo: "app" }]);
+    expect(questions[0]).toContain("Queue a sample task with `devintern worker add`");
+    expect(logs.join("\n")).toContain("app is not acme/app");
+  });
+
   test("a failed worker add prints the command to run by hand", async () => {
     const { ctx, logs } = context(["y"], {
       enqueueAdHoc: async () => ({ error: "no repo named app" }),
@@ -393,6 +431,31 @@ describe("offerFirstTask", () => {
     expect(await offerFirstTask(ctx)).toBeUndefined();
     expect(logs.join("\n")).toContain("Could not queue the sample task: no repo named app");
     expect(logs.join("\n")).toContain("Try it yourself: ");
+  });
+});
+
+describe("defaultEnqueueSampleAdHoc", () => {
+  // `worker add` runs the real license check; keep it off the network and
+  // independent of the host's license state, like the worker-add tests.
+  beforeEach(() => {
+    process.env.DEVINTERN_SKIP_LICENSE_CHECK = "1";
+  });
+  afterEach(() => {
+    delete process.env.DEVINTERN_SKIP_LICENSE_CHECK;
+  });
+
+  test("queues the sample in the workspace and returns its task key", async () => {
+    const result = await defaultEnqueueSampleAdHoc({ workspaceDir, repo: "app" });
+    if ("error" in result) throw new Error(result.error);
+    expect(result.key).toBeString();
+    expect(result.key.length).toBeGreaterThan(0);
+    // Queued in this workspace's DB, which the worker reads.
+    expect(existsSync(workspaceDbPath(workspaceDir))).toBe(true);
+  });
+
+  test("an unknown repo is an error, not a task", async () => {
+    const result = await defaultEnqueueSampleAdHoc({ workspaceDir, repo: "nope" });
+    expect("error" in result && result.error).toBeTruthy();
   });
 });
 

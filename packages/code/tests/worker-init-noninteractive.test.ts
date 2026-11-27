@@ -241,11 +241,11 @@ describe("runNonInteractiveWorkerInit", () => {
     // Optional and runnable; nothing is created in flags mode.
     const firstTask = report.nextSteps.find((step) => step.id === "try-first-task")!;
     expect(firstTask.message).toStartWith("Optional:");
-    expect(firstTask.command).toContain("devintern worker add --title ");
+    expect(firstTask.command).toContain("devintern worker add --repo app --title ");
     expect(report.nextSteps.map((step) => step.command)).toEqual([
       `DEVINTERN_WORKSPACE_DIR=${workspaceDir} devintern worker service install --json`,
       `devintern worker connect github --no-wait --json --workspace ${join(workspaceDir, "workspace.toml")}`,
-      sampleTaskAddCommand(workspaceDir),
+      sampleTaskAddCommand(workspaceDir, "app"),
     ]);
     expect(report.changed).toBe(true);
     expect(report.persisted).toBe(true);
@@ -1198,6 +1198,9 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(config.defaults.pollIntervalSeconds).toBe(123);
     expect(config.workspace.ciFailureFix).toBe(true);
     expect(config.repos.map((repo) => repo.name)).toEqual(["other", "app"]);
+    // Two repos: `worker add` requires --repo, so the sample names the one just registered.
+    const firstTask = updated.nextSteps.find((step) => step.id === "try-first-task");
+    expect(firstTask?.command).toBe(sampleTaskAddCommand(workspaceDir, "app"));
   });
 
   test("a concurrent run fails with 'workspace is being modified' and leaves the file intact", async () => {

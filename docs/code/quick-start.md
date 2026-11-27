@@ -97,7 +97,7 @@ When the wizard has started the worker, it ends with one more question: "Create 
 
 | Tracker           | What the wizard creates                                                                                     |
 | ----------------- | ----------------------------------------------------------------------------------------------------------- |
-| GitHub, GitLab    | An issue with the labels your query selects on (`label:devintern`)                                          |
+| GitHub, GitLab    | An issue with the labels your query selects on (`label:devintern`). On GitHub, an ad-hoc task instead when the repository you registered is not `GITHUB_REPO` |
 | Markdown          | A task file in your tasks folder with the fields your query filters on (`status=todo`)                     |
 | Any other tracker | An ad-hoc task queued with [`devintern worker add`](./delegation.md); no ticket                             |
 

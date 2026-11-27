@@ -41,6 +41,7 @@ import type {
   Env,
   InitCheck,
   InitNextStep,
+  InitRepo,
   InitResult,
   InitStartResult,
   NonInteractiveInitArgs,
@@ -336,6 +337,7 @@ function finishReport(run: FlagsRun): void {
     workspaceDir,
     // `--repo-from-cwd` (a failed run's re-run command keeps it), or a repository already there.
     hasRepo: args.repoFromCwd || (run.draft?.existing?.repos.length ?? 0) > 0,
+    sampleRepo: sampleRepoName(report.repo, run.draft?.existing?.repos ?? []),
     persisted: report.persisted,
     signIn: report.signIn,
     checks: report.checks,
@@ -355,6 +357,19 @@ function finishReport(run: FlagsRun): void {
   report.result = result === "success" && !report.changed ? "unchanged" : result;
   const code = failureCodeFor(report.checks);
   if (code) report.code = code;
+}
+
+/**
+ * The repository the sample task targets: the one this run registered
+ * (`--repo-from-cwd`), else the first existing one when there are several
+ * (`worker add` rejects a missing `--repo` then). Undefined for one repository.
+ */
+function sampleRepoName(
+  registered: InitRepo | null,
+  existing: readonly { name: string }[],
+): string | undefined {
+  if (registered) return registered.name;
+  return existing.length > 1 ? existing[0]?.name : undefined;
 }
 
 /** Put back what a failed run wrote, and say so. */
@@ -397,6 +412,8 @@ function nextStepsFor(options: {
   cwd: string;
   workspaceDir: string;
   hasRepo: boolean;
+  /** `--repo` for the `try-first-task` command: `worker add` requires it with several repos. */
+  sampleRepo?: string;
   signIn?: PendingSignIn;
   /** False when a failed check made the run restore what it wrote: fixes re-run setup. */
   persisted: boolean;
@@ -523,7 +540,7 @@ function nextStepsFor(options: {
       id: "try-first-task",
       message:
         "Optional: once the worker runs, queue a small docs-only sample task and watch its run in the dashboard",
-      command: sampleTaskAddCommand(workspaceDir, undefined, home),
+      command: sampleTaskAddCommand(workspaceDir, options.sampleRepo, home),
     });
   }
   return steps;

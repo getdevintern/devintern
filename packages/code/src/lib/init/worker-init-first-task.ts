@@ -7,7 +7,9 @@
  *   saved query selects on (`label:<x>`), after a `[Y/n]` question.
  * - Markdown: write a sample task file into `MARKDOWN_TASKS_DIR` with the
  *   frontmatter the query filters on (`status=todo`).
- * - Any other tracker: queue the same task with `devintern worker add`.
+ * - Any other tracker (Jira, Linear, Trello, Azure DevOps, Asana), or a
+ *   GitHub workspace whose registered repository is not `GITHUB_REPO`: queue
+ *   the same task with `devintern worker add`.
  *
  * Then it polls the worker's run list for that task for a bounded time and
  * prints the dashboard link to the run. Declining creates nothing. Flags mode
@@ -25,7 +27,7 @@ import { RunStore } from "../state/run-recorder";
 import { parseMarkdownTaskQuery } from "../trackers/markdown/markdown-task-tracker-client";
 import { extractQueryLabels } from "../trackers/query-labels";
 import { dashboardUrlFor } from "../worker/service-report";
-import { loadWorkspaceConfig } from "../workspace/config";
+import { gitHubSlugFromRemote, loadWorkspaceConfig } from "../workspace/config";
 import { workspaceConfigPath, workspaceDbPath } from "../workspace/paths";
 import { errorMessage } from "./worker-init-fs";
 import { askYesNo } from "./worker-init-policy";
@@ -129,8 +131,29 @@ export interface FirstTaskContext {
   deps: FirstTaskDeps;
 }
 
-/** Query terms that only say "open issues", which a new issue already is. */
-const OPEN_TERMS = new Set(["is:open", "state:open", "state:opened", "is:issue", "type:issue"]);
+/**
+ * Query terms a new, unassigned issue already satisfies: "open issues",
+ * "unassigned", "not locked". Prefix forms (`no:*`, `sort:*`, ...) are in
+ * {@link SATISFIED_PREFIXES}.
+ */
+const OPEN_TERMS = new Set([
+  "is:open",
+  "state:open",
+  "state:opened",
+  "is:issue",
+  "type:issue",
+  "is:unassigned",
+  "is:unlocked",
+  "archived:false",
+  "scope:all",
+]);
+
+/**
+ * Prefixes of terms a fresh issue satisfies or that do not filter: `no:assignee`,
+ * `no:milestone`, `no:project` (a new issue has none), `sort:*` (ordering only),
+ * `in:*` (where free text is searched).
+ */
+const SATISFIED_PREFIXES = ["no:", "sort:", "in:"];
 
 /** GitLab label filters that are not label names. */
 const GITLAB_LABEL_KEYWORDS = new Set(["none", "any"]);
@@ -144,8 +167,13 @@ const LABEL_TERM = /(^|\s)-?labels?:(?:"[^"]*"|'[^']*'|[^\s,]+)(?:,(?:"[^"]*"|'[
  *
  * @param tracker - `TASK_TRACKER` value
  * @param query - The saved ready-tasks query
+ * @param location - Where the sample goes (`owner/repo`): a `repo:` term naming it is satisfied
  */
-export function sampleTaskMatch(tracker: string, query: string): SampleTaskMatch {
+export function sampleTaskMatch(
+  tracker: string,
+  query: string,
+  location?: string,
+): SampleTaskMatch {
   if (tracker === "markdown") {
     const { filters, text } = parseMarkdownTaskQuery(query);
     return { labels: [], fields: filters, unmatched: text ? [text] : [] };
@@ -157,10 +185,17 @@ export function sampleTaskMatch(tracker: string, query: string): SampleTaskMatch
     const unmatched = query
       .replace(LABEL_TERM, " ")
       .split(/\s+/)
-      .filter((term) => term && !OPEN_TERMS.has(term.toLowerCase()));
+      .filter((term) => term && !satisfiedTerm(term.toLowerCase(), location?.toLowerCase()));
     return { labels, fields: {}, unmatched };
   }
   return { labels: [], fields: {}, unmatched: [] };
+}
+
+/** True when a new issue in `location` already matches the (lowercased) query term. */
+function satisfiedTerm(term: string, location: string | undefined): boolean {
+  if (OPEN_TERMS.has(term)) return true;
+  if (SATISFIED_PREFIXES.some((prefix) => term.startsWith(prefix))) return true;
+  return location !== undefined && term === `repo:${location}`;
 }
 
 /** Markdown sample file: frontmatter from the query's filters, then the task. */
@@ -325,6 +360,22 @@ function savedQuery(workspaceDir: string): string {
   }
 }
 
+/** Lowercased GitHub `owner/repo` of the `[[repos]]` entry `repoName`, or undefined. */
+function registeredGitHubSlug(
+  workspaceDir: string,
+  repoName: string | undefined,
+): string | undefined {
+  if (!repoName) return undefined;
+  try {
+    const repo = loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).repos.find(
+      (entry) => entry.name === repoName,
+    );
+    return repo ? (gitHubSlugFromRemote(repo.remote)?.toLowerCase() ?? undefined) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Poll the run list until the sample's run starts or the bound passes. */
 export async function waitForSampleRun(
   ctx: FirstTaskContext,
@@ -384,8 +435,19 @@ export async function offerFirstTask(
   const since = (deps.now ?? Date.now)();
   if (!ops) return offerAdHoc(ctx, since);
 
+  // A GitHub issue lands in GITHUB_REPO; when the repository just registered
+  // is a different one, queue the sample for that repository instead.
+  const registered = registeredGitHubSlug(workspaceDir, ctx.repoName);
+  if (trackerType === "github" && registered && registered !== ops.location.toLowerCase()) {
+    log(
+      `ℹ️  ${ctx.repoName} is not ${ops.location}, where a sample issue would go; ` +
+        "queueing the sample for it directly instead.",
+    );
+    return offerAdHoc(ctx, since);
+  }
+
   const query = savedQuery(workspaceDir);
-  const match = sampleTaskMatch(trackerType, query);
+  const match = sampleTaskMatch(trackerType, query, ops.location);
   const question =
     ops.noun === "issue"
       ? `\nCreate a sample ticket in ${ops.location} so you can watch the first run? [Y/n]: `
