@@ -365,15 +365,23 @@ cliTest(
       expect(writers).toHaveLength(1);
       expect(writers[0]!.error).toBeUndefined();
       expect(writers[0]!.result).toBe("success");
-      const refused = reports.filter((report) => report.filesWritten.length === 0);
-      expect(refused).toHaveLength(2);
-      for (const report of refused) {
+      const others = runs
+        .map((run, index) => ({ run, report: reports[index]! }))
+        .filter(({ report }) => report.filesWritten.length === 0);
+      expect(others).toHaveLength(2);
+      for (const { run, report } of others) {
+        if (report.result === "unchanged") {
+          // Started after the winner saved the same config: a no-op (exit 0).
+          expect(report.error).toBeUndefined();
+          expect(run.exitCode).toBe(0);
+          continue;
+        }
+        // Otherwise the write lock was held while the winner was writing.
         expect(report.result).toBe("failure");
         expect(report.checks).toEqual([]);
-        // Either the plan saw the finished workspace, or the write lock was held.
         expect(report.error).toMatch(/already exists|being modified|another|in progress|lock/i);
+        expect(run.exitCode).toBe(1);
       }
-      expect(runs.map((run) => run.exitCode).sort()).toEqual([0, 1, 1]);
       const config = readFileSync(fixture.configPath, "utf8");
       expect(config.match(/^\[\[repos\]\]$/gm)).toHaveLength(1);
       expect(fixture.config().repos).toHaveLength(1);
