@@ -354,6 +354,42 @@ export class GitLabClient {
   }
 
   /**
+   * Whether the project (or one of its groups) has a label with this name.
+   *
+   * @param name - Label name.
+   * @returns True when the label exists.
+   * @throws When the GitLab API request fails for another reason than 404.
+   */
+  async hasLabel(name: string): Promise<boolean> {
+    try {
+      await this.request(
+        `${this.projectEndpoint}/labels/${encodeURIComponent(name)}?include_ancestor_groups=true`,
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("GitLab API error (404)")) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Create a project label.
+   *
+   * @param name - Label name.
+   * @param options - Hex color without `#`, and an optional description.
+   * @throws When the GitLab API request fails.
+   */
+  async createLabel(name: string, options: { color: string; description?: string }): Promise<void> {
+    await this.request(`${this.projectEndpoint}/labels`, "POST", {
+      name,
+      color: `#${options.color}`,
+      ...(options.description ? { description: options.description } : {}),
+    });
+  }
+
+  /**
    * Add labels to an issue (does not remove existing labels).
    *
    * @param issueIid - Target issue iid.

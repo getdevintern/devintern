@@ -27,7 +27,7 @@ Ask once, up front, and record the answers:
 
 1. The worker host (this machine, or which server) and the repository (`owner/repo`).
 2. The coding agent CLI: Claude Code (default), Codex, OpenCode, Cursor, or another [harness](https://devintern.com/docs/code/agent-harness).
-3. The tracker and the ready-tasks query in its language, kept narrow. For GitHub Issues, suggest `is:open label:devintern`; init rejects JQL such as `labels = x` with `code` `invalid_query`.
+3. The tracker, and whether open tickets labeled `devintern` is the right ready-tasks query (the default when `--task-query` is omitted; `asana` and `markdown` need one). A custom query is in the tracker's language, kept narrow; init rejects JQL such as `labels = x` for GitHub with `code` `invalid_query`. On GitHub or GitLab, ask whether to create a missing `devintern` label (`--create-label`); never pass it without a yes.
 4. The branch PRs should target. The default is the repository's default branch.
 5. How they sign in on devintern.com: `github`, `google`, `x`, or their email address. Skip when they have a paid `LICENSE_KEY` and want no relay.
 6. Whether to install the background service now. It starts picking up matching tickets right away.
@@ -67,7 +67,7 @@ Ask once, up front, and record the answers:
 Inside the checkout:
 
 ```bash
-devintern worker init --non-interactive --tracker <id> --task-query '<query>' \
+devintern worker init --non-interactive --tracker <id> [--task-query '<query>'] [--create-label] \
   --repo-from-cwd --env-file ~/devintern.env --remove-env-file --sign-in <method> --json
 ```
 
@@ -78,7 +78,7 @@ Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 | `result` | `success` (exit 0, ready), `unchanged` (exit 0, the workspace already had exactly this setup), `action_required` (exit 2, saved and nothing broken; only sign-in is left), `failure` (exit 1). `action_required` is not a broken setup |
 | `code` | Set on every failure, for example `missing_input`, `env_file_unreadable`, `invalid_query`, `workspace_exists`, `credentials_rejected`, `query_rejected`, `repo_access_denied`, `agent_missing` |
 | `error` | Input problem; with `missing_input`, `missing[]` names every missing flag and variable |
-| `checks[]` | `name`, `label`, `status` (`pass`, `warn`, `action`, `fail`, `skipped`), `message`, `hint`. A `query` warn with 0 matches is fine when nothing is labelled yet |
+| `checks[]` | `name`, `label`, `status` (`pass`, `warn`, `action`, `fail`, `skipped`), `message`, `hint`. A `query` warn with 0 matches is fine when nothing is labelled yet. A `label` warn means the `devintern` label is missing (fix: `--create-label` with the user's yes) |
 | `signIn` | `url`, `method`, `expiresAt`, `complete`, `reused`; present when `--sign-in` started a sign-in (step 4) |
 | `repo` | `name`, `remote`, `added`, `defaultBranch`, `branch` |
 | `warnings[]` | Not failures; relay each one to the user |

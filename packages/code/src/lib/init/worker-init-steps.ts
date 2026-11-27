@@ -32,7 +32,12 @@ import { toReportCheck } from "../observability/readiness-json";
 import { collectWorkerDoctorChecks } from "../observability/worker-readiness";
 import type { WorkerDoctorDeps } from "../observability/worker-readiness";
 import {
+  DEVINTERN_LABEL,
   TRACKER_CAPABILITIES,
+  defaultQueryZeroMatchHint,
+  defaultTaskQuery,
+  isDefaultTaskQuery,
+  supportsLabelCreation,
   supportsPolling,
   trackersSupportingPolling,
 } from "../trackers/capabilities";
@@ -61,6 +66,7 @@ import {
   serviceStep,
 } from "./worker-init-activation";
 import { errorMessage } from "./worker-init-fs";
+import { defaultDevinternLabelOps } from "./worker-init-label";
 import {
   applyPlan,
   planChangesNothing,
@@ -159,6 +165,7 @@ export function initRerunCommand(
     parts.push(`--task-query ${shellQuote(taskQuery)}`);
   }
   if (args.repoFromCwd) parts.push("--repo-from-cwd");
+  if (args.createLabel) parts.push("--create-label");
   const envFile = overrides.envFile ?? ctx.envFilePath;
   if (envFile) parts.push(`--env-file ${envFile.startsWith("<") ? envFile : shellQuote(envFile)}`);
   if (args.signIn) {
@@ -307,27 +314,35 @@ async function queryStep(run: SetupRun): Promise<boolean> {
 /** Prompt for the ready-tasks query until one is entered (and, with a dry run, works). */
 async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined): Promise<string> {
   run.log("\n3️⃣  Which tasks should the worker pick up?");
-  run.log("   The query uses the same language as 'devintern --query' for your tracker.");
+  // A re-run keeps the saved query as the Enter default; a new workspace
+  // offers the tracker's devintern-label query.
+  const fallback = currentQuery || defaultTaskQuery(run.trackerType);
   if (currentQuery) {
+    run.log("   The query uses the same language as 'devintern --query' for your tracker.");
     run.log("   Press Enter to keep the current query.");
-  } else if (run.queryExample) {
-    run.log(`   Example: ${run.queryExample}`);
+  } else if (fallback) {
+    run.log(
+      `   Press Enter to pick up open tickets labeled ${DEVINTERN_LABEL}, or type your own query`,
+    );
+    run.log("   (the same language as 'devintern --query' for your tracker).");
+  } else {
+    run.log("   The query uses the same language as 'devintern --query' for your tracker.");
+    if (run.queryExample) run.log(`   Example: ${run.queryExample}`);
   }
 
   let query = "";
   for (;;) {
     query =
       (
-        await run.prompt(
-          currentQuery ? `Ready-tasks query [${currentQuery}]: ` : "Ready-tasks query: ",
-        )
+        await run.prompt(fallback ? `Ready-tasks query [${fallback}]: ` : "Ready-tasks query: ")
       ).trim() ||
-      currentQuery ||
+      fallback ||
       "";
     if (!query) {
       run.log("❌ A query is required — it defines what 'ready for the agent' means.");
       continue;
     }
+    await offerDevinternLabel(run, query);
     if (!run.deps.dryRunQuery) {
       break;
     }
@@ -335,7 +350,12 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
       const count = await run.deps.dryRunQuery(query);
       run.log(`✅ Query works: ${count} task(s) match right now.`);
       if (count === 0) {
-        run.log("   (0 matches is fine if nothing is ready yet — the worker will poll.)");
+        const labelHint = defaultQueryZeroMatchHint(run.trackerType, query);
+        run.log(
+          labelHint
+            ? `   ${labelHint}.`
+            : "   (0 matches is fine if nothing is ready yet — the worker will poll.)",
+        );
       }
       break;
     } catch (error) {
@@ -357,6 +377,38 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
     }
   }
   return query;
+}
+
+/**
+ * With the default query, a tracker that can create labels and lacks the
+ * devintern label: ask before creating it (never silently). A failed lookup
+ * or creation only warns; the query still works once a ticket is labeled.
+ */
+async function offerDevinternLabel(run: PromptRun, query: string): Promise<void> {
+  const { trackerType, trackerName } = run;
+  if (!isDefaultTaskQuery(trackerType, query) || !supportsLabelCreation(trackerType)) return;
+  const ops = run.deps.devinternLabelOps?.(trackerType, process.env);
+  if (!ops) return;
+  try {
+    if (await ops.exists()) return;
+  } catch (error) {
+    run.log(`⚠️  Could not check for the ${DEVINTERN_LABEL} label: ${errorMessage(error)}`);
+    return;
+  }
+  run.log(`   ${trackerName} has no ${DEVINTERN_LABEL} label yet.`);
+  if (
+    !(await askYesNo(run, `Create the ${DEVINTERN_LABEL} label in ${trackerName}? [Y/n]: `, true))
+  ) {
+    run.log(`   Not created. Create it in ${trackerName} before labeling tickets.`);
+    return;
+  }
+  try {
+    await ops.create();
+    run.log(`🏷️  Created the ${DEVINTERN_LABEL} label in ${trackerName}.`);
+  } catch (error) {
+    run.log(`⚠️  Could not create the ${DEVINTERN_LABEL} label: ${errorMessage(error)}`);
+    run.log(`   Create it in ${trackerName} (the token may lack permission to manage labels).`);
+  }
 }
 
 /**
@@ -586,6 +638,8 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
   );
 
   const checks: InitCheck[] = [auth];
+  const label = authFailed ? undefined : await labelCheck(run, timeoutMs);
+  if (label) checks.push(label);
   for (const check of readiness) {
     const mapped = toReportCheck(check);
     if (check.id === "query" && authFailed) {
@@ -602,6 +656,61 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
     checks.push(mapped);
   }
   return checks;
+}
+
+/**
+ * Flags mode: the `devintern` label the default query selects. Checked when
+ * the default query is in use or `--create-label` was given, and created
+ * only with `--create-label`. A missing or uncreatable label warns: the
+ * query still works, it just matches nothing until a ticket is labeled.
+ *
+ * @returns The report row, or undefined when there is nothing to check
+ */
+async function labelCheck(run: FlagsRun, timeoutMs: number): Promise<InitCheck | undefined> {
+  const plan = run.plan!;
+  const { createLabel } = run.args;
+  if (!createLabel && !plan.taskQueryDefaulted) return undefined;
+  const base = { name: "label", label: `${DEVINTERN_LABEL} label` } as const;
+  const name = trackerDisplayName(plan.tracker);
+  if (!supportsLabelCreation(plan.tracker)) {
+    // Jira and Azure DevOps create a label (tag) the first time it is used.
+    return createLabel
+      ? {
+          ...base,
+          status: "skipped",
+          message: `${name}: setup cannot create labels here; adding ${DEVINTERN_LABEL} to a ticket creates it`,
+        }
+      : undefined;
+  }
+  const ops = (run.deps.devinternLabelOps ?? defaultDevinternLabelOps)(
+    plan.tracker,
+    plan.credentialEnv,
+  );
+  if (!ops) return undefined;
+  try {
+    if (await withTimeout(ops.exists(), timeoutMs, `${name} label lookup`)) {
+      return { ...base, status: "pass", message: `${name} has the ${DEVINTERN_LABEL} label` };
+    }
+    if (!createLabel) {
+      return {
+        ...base,
+        status: "warn",
+        message: `${name} has no ${DEVINTERN_LABEL} label yet, so the default query matches nothing`,
+        hint: `Re-run with --create-label to create it, or create the ${DEVINTERN_LABEL} label in ${name}`,
+      };
+    }
+    await withTimeout(ops.create(), timeoutMs, `${name} label creation`);
+    run.report.labelCreated = true;
+    run.log(`🏷️  Created the ${DEVINTERN_LABEL} label in ${name}`);
+    return { ...base, status: "pass", message: `Created the ${DEVINTERN_LABEL} label in ${name}` };
+  } catch (error) {
+    return {
+      ...base,
+      status: "warn",
+      message: `${name}: could not ${createLabel ? "create" : "look up"} the ${DEVINTERN_LABEL} label: ${condenseMessage(errorMessage(error))}`,
+      hint: `Create the ${DEVINTERN_LABEL} label in ${name} (the token may lack permission to manage labels)`,
+    };
+  }
 }
 
 function applyEnvFile(envPath: string): Record<string, string> {

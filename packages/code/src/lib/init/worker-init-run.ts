@@ -21,6 +21,7 @@ import type {
   ServiceState,
 } from "../worker/service";
 import type { StartCheck } from "../worker/service-control";
+import type { DevinternLabelOpsFactory } from "./worker-init-label";
 import type { AppliedWrite, Plan, PlanDraft } from "./worker-init-noninteractive-plan";
 import type {
   Env,
@@ -58,6 +59,11 @@ export interface WorkerInitDeps {
   cwd?: string;
   /** Evaluate the ready-tasks query; returns the number of matching tasks. */
   dryRunQuery?: (query: string) => Promise<number>;
+  /**
+   * Looks up and creates the `devintern` label the default query selects.
+   * Without it the wizard never offers to create the label.
+   */
+  devinternLabelOps?: DevinternLabelOpsFactory;
   /** Automation license check; returns a human-readable failure, or null when entitled. */
   checkAutomationLicense?: (workspaceDir: string) => Promise<string | null>;
   /** Override tracker-config step. Return tracker id, or null to abort. */

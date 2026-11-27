@@ -256,9 +256,9 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
 
 const WORKER_INIT_USAGE = [
   "Usage: devintern worker init [--no-service]",
-  "       devintern worker init --non-interactive --tracker <id> --task-query <query>",
+  "       devintern worker init --non-interactive --tracker <id> [--task-query <query>]",
   "                             [--repo-from-cwd] [--env-file <path>] [--yes]",
-  "                             [--sign-in <method>] [--remove-env-file] [--json]",
+  "                             [--sign-in <method>] [--remove-env-file] [--create-label] [--json]",
   "",
   "Interactively configure unattended automation and a native user service.",
   "",
@@ -268,7 +268,10 @@ const WORKER_INIT_USAGE = [
   "Non-interactive mode (coding agents, scripts, SSH without a TTY):",
   "  --non-interactive   Set up from flags; never prompts, pairs, or installs (signs in only with --sign-in)",
   "  --tracker <id>      Tracker the worker polls (jira, linear, github, ...)",
-  "  --task-query <q>    Ready-tasks query, written to [defaults].task_query",
+  "  --task-query <q>    Ready-tasks query, written to [defaults].task_query; a new",
+  "                      workspace defaults to open tickets labeled devintern (every",
+  "                      tracker except asana and markdown)",
+  "  --create-label      Create the devintern label if the tracker lacks it (github, gitlab)",
   "  --repo-from-cwd     Register the current Git repository (uses its origin remote)",
   "  --env-file <path>   Read credentials from this file (mode 0600) and save them",
   "                      to the workspace .env; otherwise they come from the environment",
@@ -381,6 +384,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       "--yes",
       "--sign-in",
       "--remove-env-file",
+      "--create-label",
     ].includes(arg.split("=")[0]),
   );
   if (nonInteractiveOnly) {
@@ -390,6 +394,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
   }
   loadEnvironment();
   const { checkWorkerEntitlement, runWorkerInit } = await import("../init/worker-init");
+  const { defaultDevinternLabelOps } = await import("../init/worker-init-label");
   const { isInteractive } = await import("../init/wizard");
   if (!isInteractive(args, process.stdin)) {
     console.log("❌ 'devintern worker init' needs a terminal for its prompts.");
@@ -405,6 +410,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
   try {
     const result = await runWorkerInit({
       noService: args.some((arg) => arg === "--no-service"),
+      devinternLabelOps: defaultDevinternLabelOps,
       dryRunQuery: async (query) => {
         const result = await trackerManager.getClient().searchTasks(query);
         return result.tasks.length;

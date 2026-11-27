@@ -70,7 +70,7 @@ devintern worker init
 You don't need to run `devintern init` first; if you already did, the wizard reuses the tracker settings it saved. The wizard asks for:
 
 1. Your tracker and its token. It links to the page where you create the token and checks the connection.
-2. The ready-tasks query: which tickets the worker picks up, for example `is:open label:devintern` on GitHub Issues. Keep it narrow at first.
+2. The ready-tasks query: which tickets the worker picks up. Press Enter to pick up open tickets labeled `devintern`, or type your own query. On GitHub and GitLab it offers to create the `devintern` label if it is missing.
 3. "Use the recommended worker settings?": no CI repair, automatic conflict resolution, task pickup at any hour, and no Sentry project. Answer `n` to choose each one.
 4. Sign-in, which starts the [14-day free Worker Pilot](./worker.md#worker-pilot-and-licenses) (no card required) when you have no license. While it waits for the browser, press Enter to skip and sign in later with `devintern worker login github`.
 5. [Relay](./relay.md) pairing when you are signed in, so PR reviews reach the worker in seconds. Without it the worker polls.
