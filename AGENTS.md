@@ -17,6 +17,7 @@ Bun-based monorepo with workspace packages under `packages/*`. The marketing sit
 | `@devintern/text-formatter`    | Shared text formatting                                                                                                        | no, source-only |
 | `@devintern/utils`             | Shared utilities (`fetchWithRetry`, CLI auto-update check, etc.)                                                              | no, source-only |
 | `@devintern/task-trackers`     | Shared task tracker config and API clients (Jira, Linear, Trello, etc.)                                                       | no, source-only |
+| `@devintern/workspace`         | Shared read access to the `~/.devintern` workspace (paths, a checkout's `[[repos]]` entry, its credentials)                   | no, source-only |
 
 **Tooling:** Bun exclusively: runtime, package manager, bundler, and test runner. Do not use `node`, `npm`, `pnpm`, `jest`, or `vitest`.
 
@@ -64,7 +65,7 @@ Packages with more involved rules keep their own `AGENTS.md` (listed under [Refe
 
 ### Source-only shared packages
 
-`agent-harness`, `auth`, `license-check`, `license-policy`, `text-formatter`, `utils`, `task-trackers`:
+`agent-harness`, `auth`, `license-check`, `license-policy`, `text-formatter`, `utils`, `task-trackers`, `workspace`:
 
 - No build step. `build` script just echoes.
 - Consumed directly via `"exports": { ".": "./src/index.ts" }`.
