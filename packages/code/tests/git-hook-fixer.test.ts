@@ -179,6 +179,93 @@ describe("verifyPushHookFix", () => {
     expect(git(repoDir, "rev-parse HEAD")).toBe(head);
   });
 
+  test("verifies a hook fix with the lease after the agent rewrote the resumed branch", async () => {
+    // The run resumed an already-published branch and the agent amended it, so
+    // HEAD no longer contains the published commit. Publish rewrites that
+    // branch under an explicit lease; the verification dry-run must probe the
+    // same way instead of being rejected as non-fast-forward.
+    const publishedSha = git(repoDir, "rev-parse HEAD");
+    git(repoDir, "commit --amend -m 'amended by the resumed run'");
+
+    const result = await verifyPushHookFix({
+      cwd: repoDir,
+      expectedBranch: "feature/dev-74",
+      lease: { branch: "feature/dev-74", sha: publishedSha },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.alreadyOnRemote).toBe(false);
+    // A dry-run never updates origin.
+    expect(git(remoteDir, "rev-parse feature/dev-74")).toBe(publishedSha);
+  });
+
+  test("retries a one-time hook failure on a rewritten resumed branch", async () => {
+    // Integration-style flow: the resumed run amended the published branch and
+    // its push hit a pre-push hook that fails once. The agent then only amends
+    // the commit; the retried verification must accept the rewritten branch
+    // under the recorded lease.
+    const publishedSha = git(repoDir, "rev-parse HEAD");
+    git(repoDir, "commit --amend -m 'amended by the resumed run'");
+
+    const sentinel = join(testDir, "hook-failed-once");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      [
+        "#!/bin/sh",
+        `if [ ! -f '${sentinel}' ]; then`,
+        `  : > '${sentinel}'`,
+        "  echo 'pre-push hook declined (first attempt)'",
+        "  exit 1",
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(hookPath, 0o755);
+
+    const lease = { branch: "feature/dev-74", sha: publishedSha };
+    const push = await Utils.pushCurrentBranch({
+      cwd: repoDir,
+      expectedBranch: "feature/dev-74",
+      lease,
+    });
+    expect(push.success).toBe(false);
+    expect(push.hookError).toContain("pre-push hook declined");
+
+    // The hook-fixer agent only amends the existing commit.
+    git(repoDir, "commit --amend -m 'amended by the hook fixer'");
+
+    const second = await verifyPushHookFix({
+      cwd: repoDir,
+      expectedBranch: "feature/dev-74",
+      lease,
+    });
+    expect(second.success).toBe(true);
+    expect(git(remoteDir, "rev-parse feature/dev-74")).toBe(publishedSha);
+  });
+
+  test("refuses a lease dry-run that would only delete published commits", async () => {
+    const baseSha = git(repoDir, "rev-parse HEAD");
+    git(repoDir, "commit --allow-empty -m 'published commit'");
+    git(repoDir, "push origin feature/dev-74");
+    const publishedSha = git(repoDir, "rev-parse HEAD");
+    git(repoDir, `reset --hard ${baseSha}`);
+
+    // The agent rewound HEAD to an earlier commit; a force-with-lease dry-run
+    // would succeed and green-light deleting the published commit.
+    const result = await verifyPushHookFix({
+      cwd: repoDir,
+      expectedBranch: "feature/dev-74",
+      lease: { branch: "feature/dev-74", sha: publishedSha },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain(publishedSha.slice(0, 7));
+    expect(git(remoteDir, "rev-parse feature/dev-74")).toBe(publishedSha);
+  });
+
   test("pushCurrentBranch skips git push when origin already has HEAD", async () => {
     installFailingPrePushHook(repoDir);
 
@@ -376,5 +463,23 @@ describe("buildGitHookFixPrompt", () => {
     expect(prompt).toContain("git push origin HEAD");
     expect(prompt).toContain("git commit --amend --no-edit");
     expect(prompt).toContain("**Verify the fix**");
+  });
+
+  test("lease push prompt verifies under the lease and forbids a plain push", () => {
+    const prompt = buildGitHookFixPrompt("push", "/out/*/git-hook-errors.log", {
+      branch: "feature/dev-74",
+      sha: "abc123",
+    });
+
+    const leasedPush =
+      "git push --force-with-lease=refs/heads/feature/dev-74:abc123 origin HEAD:refs/heads/feature/dev-74 --dry-run";
+    expect(prompt).toContain(leasedPush);
+    expect(prompt).not.toContain("git push origin HEAD");
+    expect(prompt).not.toContain("git push --force ");
+    expect(prompt).toContain("**Verify the fix** with the lease (dry run — do not publish)");
+    expect(prompt).toContain("Do not run `git push --force` or a plain `git push`");
+    expect(prompt).toContain(
+      "- Do not push: the runner publishes this rewritten branch under `--force-with-lease` after verification",
+    );
   });
 });

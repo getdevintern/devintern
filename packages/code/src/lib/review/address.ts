@@ -437,8 +437,7 @@ async function commitWithHookRetry(params: {
         params.harness,
         params.executablePath,
         params.maxTurns,
-        params.workDir,
-        params.prBranch,
+        { cwd: params.workDir, expectedBranch: params.prBranch },
       );
       if (fixed) {
         if (await isCommitAlreadyComplete(params.workDir)) {
@@ -506,8 +505,7 @@ export async function pushWithHookRetry(params: {
         params.harness,
         params.executablePath,
         params.maxTurns,
-        params.workDir,
-        params.prBranch,
+        { cwd: params.workDir, expectedBranch: params.prBranch },
       );
       if (fixed) {
         console.log(

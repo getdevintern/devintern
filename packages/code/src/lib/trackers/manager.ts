@@ -10,7 +10,7 @@
  * team (isolated credentials) without mutating `process.env`.
  */
 
-import { isMarkdownFilePath } from "@devintern/task-trackers";
+import { azureDevOpsFakeBaseUrl, isMarkdownFilePath } from "@devintern/task-trackers";
 import type { TaskTrackerClient } from "./client";
 import { JiraTaskTrackerClient } from "./jira/jira-task-tracker-client";
 import { AsanaTaskTrackerClient } from "./asana/asana-task-tracker-client";
@@ -20,31 +20,6 @@ import { GitLabTaskTrackerClient } from "./gitlab/gitlab-task-tracker-client";
 import { LinearTaskTrackerClient } from "./linear/linear-task-tracker-client";
 import { MarkdownTaskTrackerClient } from "./markdown/markdown-task-tracker-client";
 import { TrelloTaskTrackerClient } from "./trello/trello-task-tracker-client";
-
-/** The fake endpoint opt-in is captured before project env files are loaded. */
-const allowAzureDevOpsFake = process.env.DEVINTERN_E2E_FAKE_AZURE_DEVOPS === "1";
-
-/** Accept only a loopback fake endpoint when the process opted into E2E mode. */
-function azureDevOpsFakeBaseUrl(raw: string | undefined): string | undefined {
-  if (!allowAzureDevOpsFake || !raw?.trim()) return undefined;
-  let url: URL;
-  try {
-    url = new URL(raw.trim());
-  } catch {
-    throw new Error("AZURE_DEVOPS_BASE_URL must be an absolute loopback http(s) URL");
-  }
-  if (
-    !["http:", "https:"].includes(url.protocol) ||
-    !["127.0.0.1", "[::1]"].includes(url.hostname) ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash
-  ) {
-    throw new Error("AZURE_DEVOPS_BASE_URL must be an absolute loopback http(s) URL");
-  }
-  return url.toString().replace(/\/+$/, "");
-}
 
 /** Env var names each tracker reads its configuration/credentials from. */
 const TRACKER_ENV_KEYS: Record<string, string[]> = {

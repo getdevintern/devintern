@@ -21,7 +21,7 @@ After the [worker](./worker.md) opens a pull request, it keeps watching it. This
 | [Fix failing CI](#ci-failures-on-the-agents-prs)              | off     | `[workspace].ci_failure_fix`            |
 | [Respond to `@mentions`](#mention-the-bot-on-any-pr)          | on      | needs the relay or a customer-owned App |
 
-All of these settings apply without a restart. The worker never force-pushes: if someone pushed to the branch meanwhile, its push is rejected instead of overwriting their work.
+All of these settings apply without a restart. The PR follow-up paths below push fast-forward only, except the auto-review loop, which force-pushes with a lease after it amends. A resumed task run that rewrites its own published branch (for example after an amend or rebase) also replaces that branch, but only while the branch still points at the commit the run started from, so a concurrent push still blocks it. See [Resuming and interrupted tasks](./delegation-runs.md#resuming-and-interrupted-tasks---resume).
 
 ## Review feedback on the agent's PRs
 
