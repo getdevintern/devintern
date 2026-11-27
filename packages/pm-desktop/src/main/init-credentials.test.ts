@@ -262,7 +262,8 @@ describe("renderer values outside the tracker's wizard fields", () => {
     expect(written).toContain("LINEAR_DEFAULT_TEAM_KEY=T");
     expect(written).not.toContain("attacker.example");
     expect(written).not.toContain("AGENT_CLI_PATH");
-    for (const key of Object.keys(injected)) expect(process.env[key]).toBeUndefined();
+    // Compare against the injected value: CI itself sets AGENT_CLI_PATH.
+    for (const [key, value] of Object.entries(injected)) expect(process.env[key]).not.toBe(value);
   });
 
   test("probe and init never see keys outside the wizard fields", async () => {
