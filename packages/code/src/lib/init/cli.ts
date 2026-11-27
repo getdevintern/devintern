@@ -9,6 +9,8 @@ import { migrateLegacyCheckout } from "../workspace/migrate-checkout";
 import type { ManualWorkspaceRun } from "../workspace/manual-run";
 import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 import { registerManualCheckout } from "../workspace/register-checkout";
+import { resolveWizardPrompts } from "../cli/prompt-session";
+import type { PromptFn } from "../cli/prompt-session";
 import { buildEnvExample } from "./scaffold";
 import { isInteractive, runInitUpgrade, runInitWizard } from "./wizard";
 import type { InitWizardDeps } from "./wizard";
@@ -17,7 +19,11 @@ const INIT_USAGE = [
   "Usage: devintern init [options]",
   "",
   "Set up DevIntern for the repository in the current directory.",
-  "A checkout with an origin remote is registered in ~/.devintern/workspace.toml",
+  "In a terminal, init first asks how you want to run tickets: automatically",
+  "with a worker (recommended; runs the `devintern worker init` wizard) or by",
+  "hand from this terminal (the per-repository setup below).",
+  "",
+  "For manual runs, a checkout with an origin remote is registered in ~/.devintern/workspace.toml",
   "as a manual-only repo, with its settings in ~/.devintern/env/<repo>.env.",
   "Re-running init in a registered checkout updates that file.",
   "In a terminal this opens the interactive setup wizard; --yes, --no-interactive,",
@@ -79,7 +85,46 @@ async function initializeProject(cwd: string, log: (message: string) => void): P
 export type InitCommandDeps = Omit<InitWizardDeps, "source"> & {
   /** Whether prompts are available; defaults to a TTY check on stdin. */
   interactive?: boolean;
+  /**
+   * The interactive `worker init` wizard, run when the user chooses a
+   * worker; defaults to the `devintern worker init` command body.
+   *
+   * @returns Process exit code
+   */
+  runWorkerSetup?: () => Promise<number>;
 };
+
+/** How the user wants to run tickets, asked first by an interactive init. */
+export type RunMode = "worker" | "manual";
+
+const RUN_MODE_QUESTION = [
+  "How do you want to run tickets?",
+  "  1) Automatically with a worker (recommended)",
+  "  2) By hand from this terminal",
+].join("\n");
+
+/**
+ * Ask how tickets should run. Enter picks the worker; anything other than
+ * 1 or 2 asks again.
+ */
+export async function promptRunMode(
+  prompt: PromptFn,
+  log: (message: string) => void,
+): Promise<RunMode> {
+  log(RUN_MODE_QUESTION);
+  for (;;) {
+    const answer = (await prompt("Enter 1 or 2 [1]: ")).trim().toLowerCase();
+    if (answer === "" || answer === "1" || answer === "worker") return "worker";
+    if (answer === "2" || answer === "manual") return "manual";
+    log("Please enter 1 or 2.");
+  }
+}
+
+/** Run `devintern worker init` interactively (the production default). */
+async function defaultRunWorkerSetup(): Promise<number> {
+  const { runInteractiveWorkerInit } = await import("../worker/cli");
+  return runInteractiveWorkerInit([]);
+}
 
 /**
  * Run `devintern init`: the interactive wizard on a TTY (or the upgrade variant
@@ -113,6 +158,18 @@ export async function runInit(deps: InitCommandDeps = {}): Promise<number> {
       return await updateRegisteredCheckout(registered, interactive, deps);
     }
     if (interactive) {
+      const session = await resolveWizardPrompts(deps);
+      let mode: RunMode;
+      try {
+        mode = await promptRunMode(session.prompt, log);
+      } finally {
+        // The chosen wizard opens its own prompt session.
+        session.close();
+      }
+      if (mode === "worker") {
+        log("");
+        return await (deps.runWorkerSetup ?? defaultRunWorkerSetup)();
+      }
       await runInitWizard({ ...deps, cwd });
     } else {
       await initializeProject(cwd, log);
@@ -149,14 +206,22 @@ async function updateRegisteredCheckout(
   const envPath = isAbsolute(run.repo.envFile)
     ? run.repo.envFile
     : join(run.workspaceDir, run.repo.envFile);
+  const workerHint = run.repo.manualOnly
+    ? "   To run its tickets automatically instead, run `devintern worker init` here."
+    : null;
   if (!interactive) {
     log(`ℹ️  This checkout is registered in ${configPath} as "${run.repo.name}".`);
     log(`   Edit ${envPath} to change its settings.`);
+    if (workerHint) log(workerHint);
     return 0;
   }
   if (!existsSync(envPath)) {
     mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
     writeFileSync(envPath, "", { mode: 0o600 });
+  }
+  if (workerHint) {
+    log(`ℹ️  This checkout is set up for manual runs as "${run.repo.name}".`);
+    log(workerHint);
   }
   await runInitUpgrade({ ...deps, envPath });
   return 0;

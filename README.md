@@ -87,12 +87,14 @@ curl -fsSL https://claude.ai/install.sh | bash   # Claude Code; or Codex, Cursor
 claude                                           # sign the agent in once
 
 # Connect your tracker, choose ready tickets, install the background service
-devintern worker init
+# Choose 1 to run tickets automatically with a worker (the default)
+devintern init
+# Or open the worker wizard directly: devintern worker init
 # If you skipped the service step:
 # devintern worker service install
 ```
 
-The wizard configures your ready-tasks query and operating policy, checks automation access, and installs the worker as a background service. Without a paid license, it offers sign-in for the 14-day Worker Pilot. You don't need to run `devintern init` first. The [quick start](docs/code/quick-start.md) walks through each step.
+The wizard asks how you want to run tickets: automatically with a worker (recommended), the same setup as `devintern worker init`, or by hand from this terminal. It configures your ready-tasks query and operating policy, checks automation access, and installs the worker as a background service. Without a paid license, it offers sign-in for the 14-day Worker Pilot. The [quick start](docs/code/quick-start.md) walks through each step.
 
 Start with a narrow queue of well-specified tasks. Watch the runs in the local dashboard at `http://localhost:4400`, review the resulting PRs, and leave feedback on their branches. The worker picks up that feedback and pushes follow-up commits.
 
@@ -191,7 +193,7 @@ Every run is recorded stage by stage, including tickets handed back to the track
 Want to inspect the pipeline before leaving a worker running? Run a single ticket first. It does not keep watching your backlog or responding to review feedback. Interactive runs are free forever, with no signup and no time limit.
 
 ```bash
-devintern init                              # connect a tracker, or pick Markdown for a local spec
+devintern init                              # choose 2 (by hand), then connect a tracker or pick Markdown
 # Choose one: a ticket in your configured tracker, or an existing local task file
 devintern PROJ-123 --create-pr
 # Or: devintern ./tasks/my-task.md --create-pr

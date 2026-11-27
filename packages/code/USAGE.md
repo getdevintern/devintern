@@ -36,18 +36,16 @@ The easiest way to set up @devintern/code for your project is using the `init` c
 devintern init
 ```
 
-This creates a `.devintern-code` folder in your current project with:
+In a terminal, `init` first asks how you want to run tickets: **1) Automatically with a worker** (the default) runs the same wizard as `devintern worker init`; **2) By hand from this terminal** sets up manual runs as described below. With `--yes` or piped input it sets up manual runs without asking.
 
-- `.env` - Your project-specific configuration file with JIRA credentials
-- `.env.example` - Template with all configuration options
-- `settings.json` - Per-project settings (status transitions, story points field, etc.)
-
-**Automatic .gitignore Protection:** The `init` command automatically adds `.devintern-code/.env` to your `.gitignore` file (or creates one if it doesn't exist) to prevent accidentally committing credentials to version control.
+For manual runs, `init` writes the repository's settings to `~/.devintern/env/<repo>.env` and registers the repository in `~/.devintern/workspace.toml` as a `manual_only` entry, so a worker skips it. Nothing is written into your checkout: there is no `.devintern-code/` folder, no `.env.example` or `settings.json`, and no `.gitignore` change.
 
 After running `init`:
 
-1. Edit `.devintern-code/.env` with your JIRA credentials
-2. (Optional) Edit `.devintern-code/settings.json` to configure per-project status transitions for your task tracker
+1. Edit `~/.devintern/env/<repo>.env` with your tracker credentials (with `--yes` or piped input, `init` writes a commented template to fill in)
+2. (Optional) Set status transitions and the story-points field under `[trackers.<tracker>.projects.<KEY>]` in `~/.devintern/workspace.toml`
+
+A repository that still has a `.devintern-code/` folder from an older release is migrated automatically the first time it runs; see [Moving from `.devintern-code/`](../../docs/code/configuration.md#moving-from-devintern-code).
 
 ### Manual Environment File Setup
 

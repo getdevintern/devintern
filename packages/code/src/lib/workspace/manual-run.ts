@@ -141,11 +141,20 @@ export function findRepoForCheckout(
  * entry matches the checkout's `origin` or directory. An invalid
  * `workspace.toml` is reported and treated as no match, so a manual run
  * keeps working.
+ *
+ * Read-only lookups that do not compose an environment (such as
+ * `devintern doctor` routing) pass `ignoreWorkerSubprocess` so they resolve
+ * the entry inside a worker task subprocess too.
  */
 export async function findWorkspaceRepoForCheckout(
-  options: { cwd?: string; workspaceDir?: string } = {},
+  options: {
+    cwd?: string;
+    workspaceDir?: string;
+    /** Resolve the entry inside a worker task subprocess instead of returning null. */
+    ignoreWorkerSubprocess?: boolean;
+  } = {},
 ): Promise<ManualWorkspaceRun | null> {
-  if (isWorkerSubprocess()) return null;
+  if (!options.ignoreWorkerSubprocess && isWorkerSubprocess()) return null;
   const workspaceDir = options.workspaceDir ?? resolveWorkspaceDir();
   const configPath = workspaceConfigPath(workspaceDir);
   if (!existsSync(configPath)) return null;
