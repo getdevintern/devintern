@@ -200,6 +200,41 @@ image is kept so later runs start faster (`docker rmi devintern-e2e-systemd:loca
 removes it). What it checks is in
 [docs/coverage/worker-daemon.md](docs/coverage/worker-daemon.md#native-systemd-service).
 
+## Onboarding golden path
+
+One run walks a first-time user's whole setup on a blank systemd container:
+`bun add -g` from a login shell, `worker init --non-interactive` against
+GitHub Issues, `worker doctor`, `worker service install`, a labelled issue on
+the fixture repository turned into a PR by the service worker, service
+stop/restart/uninstall, and the interactive wizard on a PTY for a second user.
+Commands run with no TTY and nothing injected (no PATH, git identity, or
+`XDG_RUNTIME_DIR`), so setup regressions that only show end to end fail it.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:e2e:golden-path
+# The published package (a release build: sign-in stays required, so the
+# service and PR steps are replaced by checks that it is still asked for):
+DEVINTERN_CLI_SOURCE=npm:latest bun run --filter @devintern/e2e test:e2e:golden-path
+```
+
+It needs Docker with privileged containers, network access, and the same
+GitHub fixture as `test:e2e`: locally `gh auth token` and
+`getdevintern/devintern-e2e`; in CI the repository variable
+`E2E_GITHUB_REPOSITORY` and the secret `E2E_GITHUB_TOKEN` (Contents, Pull
+requests and Issues write on that repository). The run creates a unique base
+branch, label, issue and PR and removes them afterwards (the issue and PR are
+closed, since GitHub keeps them as history). It takes about 1-2 minutes from
+source and under a minute against npm, plus about a minute the first time the
+`devintern-e2e-golden-path:local` image is built.
+
+The **onboarding-golden-path** workflow runs it nightly (a failure opens or
+updates an issue labelled `onboarding-regression`), before every
+`@getdevintern/code` release, on pull requests that change the suite, and
+against the package just published after each release. Without the variable
+and secret (forks) it skips with a notice. Step-by-step coverage is in
+[docs/coverage/onboarding.md](docs/coverage/onboarding.md).
+
 ## Bitbucket Cloud and GitLab.com
 
 Create a **dedicated fixture repository/project** on each hosted provider and

@@ -76,6 +76,12 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     status: "skip",
   },
   {
+    name: "Onboarding golden path (systemd container + GitHub fixture)",
+    script: "test:e2e:golden-path",
+    reason: "needs Docker and writes an issue, branches and a PR to the GitHub fixture repository",
+    status: "skip",
+  },
+  {
     name: "Workspace tracker smoke (read-only)",
     script: "test:trackers",
     reason: "reads the worker env and contacts Jira/Trello; no writes",

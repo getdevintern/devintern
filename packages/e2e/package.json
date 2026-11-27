@@ -22,7 +22,8 @@
     "test:e2e:tracker": "bun run scripts/tracker.ts",
     "test:e2e:tracker:gitlab": "bun run scripts/tracker-gitlab.ts",
     "test:e2e:tracker:gitlab-com": "bun run scripts/tracker-gitlab-com.ts",
-    "test:e2e:service": "bun run scripts/service.ts"
+    "test:e2e:service": "bun run scripts/service.ts",
+    "test:e2e:golden-path": "bun run scripts/golden-path.ts"
   },
   "dependencies": {
     "@devintern/agent-harness": "workspace:*"

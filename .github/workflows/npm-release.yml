@@ -57,15 +57,32 @@ jobs:
     permissions:
       contents: read
 
+  # Onboarding golden path from source: install, worker init, doctor, the
+  # systemd service opening a real PR, and the wizard. A red run blocks
+  # publishing; without the fixture secrets (forks) it skips with a notice.
+  golden-path:
+    if: >-
+      startsWith(github.ref, 'refs/tags/code-v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.code)
+    uses: ./.github/workflows/onboarding-golden-path.yml
+    with:
+      cli-source: source
+    secrets: inherit
+    permissions:
+      contents: read
+      issues: write
+
   # Two explicit jobs instead of a matrix: the matrix context is not
   # available in job-level `if`, which broke workflow parsing entirely.
   release-code:
-    needs: e2e-local
+    needs: [e2e-local, golden-path]
     if: >-
       startsWith(github.ref, 'refs/tags/code-v') ||
       (github.event_name == 'workflow_dispatch' && inputs.code)
 
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     env:
       # Job-level so any rebuild (e.g. a prepublishOnly hook during publish)
       # still bakes the analytics key into the bundle.
@@ -96,6 +113,11 @@ jobs:
             exit 1
           fi
 
+      - name: Read version
+        id: version
+        working-directory: packages/code
+        run: echo "version=$(bun -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
       - name: Build
         working-directory: packages/code
         run: bun run build
@@ -120,6 +142,21 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Post-release smoke: the golden path against the package just published
+  # to npm (a release build, so sign-in stays required: doctor and service
+  # install must report action_required). A failure cannot unpublish, so it
+  # opens or updates an onboarding-regression issue.
+  smoke-published-code:
+    needs: release-code
+    uses: ./.github/workflows/onboarding-golden-path.yml
+    with:
+      cli-source: npm:${{ needs.release-code.outputs.version }}
+      report-failures: true
+    secrets: inherit
+    permissions:
+      contents: read
+      issues: write
 
   release-pm:
     if: >-
