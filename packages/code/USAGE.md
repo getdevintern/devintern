@@ -6,7 +6,13 @@
 
 ### Global Installation
 
-Requires [Bun](https://bun.sh) runtime. Install globally:
+Requires [Bun](https://bun.sh) runtime. On Linux and macOS, one command installs Bun (if missing) and DevIntern, and puts `~/.bun/bin` on your PATH:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh
+```
+
+See [Quick start: Install](../../docs/code/quick-start.md#1-install) for its options. To install manually instead:
 
 ```bash
 # Install Bun if not already installed

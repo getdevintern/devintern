@@ -74,17 +74,15 @@ Interactive runs are free with no signup. Unattended automation starts with a 14
 
 ## Set up your worker
 
-Start in a Git repository on the machine that will run the worker. You need access to your tracker and source-control host. First install [Bun](https://bun.sh) (on Debian and Ubuntu, `sudo apt-get install -y unzip` first):
+Start in a Git repository on the machine that will run the worker. You need access to your tracker and source-control host. Install DevIntern (and [Bun](https://bun.sh), if it is missing) with one command, or follow the [manual steps](docs/code/quick-start.md#install-manually):
 
 ```bash
-curl -fsSL https://bun.sh/install | bash
-exec $SHELL -l   # new shell, so bun is on your PATH
+curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh
 ```
 
-Then install DevIntern and a coding agent, and run the guided setup:
+Then install a coding agent and run the guided setup:
 
 ```bash
-bun install -g @getdevintern/code
 curl -fsSL https://claude.ai/install.sh | bash   # Claude Code; or Codex, Cursor, OpenCode
 claude                                           # sign the agent in once
 
