@@ -412,6 +412,24 @@ describe("runPmInitWizard", () => {
     expect(env).not.toContain("lin_api_old");
   });
 
+  test("a prompt that keeps giving unusable answers stops with exit code 1", async () => {
+    const logs: string[] = [];
+    const { prompt } = promptQueue(["", "", ""]);
+
+    const code = await runPmInitWizard({
+      prompt,
+      probe: okProbe,
+      cwd: tempDir,
+      log: (message) => logs.push(message),
+    });
+
+    expect(code).toBe(1);
+    const output = logs.join("\n");
+    expect(output).toContain("No valid tracker choice after 3 attempts");
+    expect(output).toContain("setup stopped. Re-run `devpm init`.");
+    expect(existsSync(join(tempDir, ".devintern-pm", ".env"))).toBe(false);
+  });
+
   test("declining the overwrite prompt leaves the existing .env untouched", async () => {
     const first = promptQueue(["jira", "https://a.b", "d@a.com", "tok", "P"]);
     await runPmInitWizard({ prompt: first.prompt, probe: okProbe, cwd: tempDir, log: silentLog });

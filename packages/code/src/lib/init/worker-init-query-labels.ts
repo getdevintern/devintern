@@ -21,6 +21,27 @@ import type { InitCheck } from "./worker-init-noninteractive-types";
 import type { LogFn, PromptFn } from "./worker-init-policy";
 import { withTimeout } from "./worker-init-run";
 
+/**
+ * Deliberate "fix the query" corrections (and failed dry runs after choosing
+ * to edit) one wizard run allows. Higher than the shared prompt budget: these
+ * are valid answers, not unusable input, but a scripted prompt that never
+ * improves the query still has to stop.
+ */
+const MAX_QUERY_CORRECTIONS = 5;
+
+/**
+ * Counter for query corrections chosen by the user (or forced by a failing dry
+ * run). Valid answers get a larger budget than unusable input, but stay
+ * bounded so a scripted prompt cannot loop.
+ */
+export function createQueryCorrectionAttempts(): (overrideMessage?: string) => void {
+  return createPromptAttempts(
+    "ready-tasks query",
+    `The ready-tasks query still does not work after ${MAX_QUERY_CORRECTIONS} corrections; fix it later in workspace.toml`,
+    MAX_QUERY_CORRECTIONS,
+  );
+}
+
 /** Report check name (flags mode) for labels the query names but the tracker lacks. */
 export const QUERY_LABELS_CHECK = "query-labels";
 

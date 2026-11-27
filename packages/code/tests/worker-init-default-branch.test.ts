@@ -9,6 +9,7 @@ import { execSync } from "child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { PromptAttemptsExceededError } from "@devintern/task-trackers";
 
 import { runWorkerInit } from "../src/lib/init/worker-init";
 import { Utils } from "../src/lib/utils";
@@ -192,6 +193,39 @@ describe("worker init interactive default_branch", () => {
     );
     expect(question).toContain("[feature/pr-base]");
     expect(config().repos[0]?.defaultBranch).toBe("feature/pr-base");
+  });
+
+  test("three invalid base-branch answers stop setup without saving", async () => {
+    git("checkout -q -b feature/pr-base");
+    publishCurrentBranch();
+    const questions: string[] = [];
+    const output: string[] = [];
+    const run = runWorkerInit({
+      cwd: repoDir,
+      log: (message) => output.push(message),
+      prompt: async (question) => {
+        questions.push(question);
+        if (question.startsWith("Base tasks and PRs on")) return "not-a-branch";
+        if (question.startsWith("Ready-tasks query")) return "*";
+        return "";
+      },
+      ensureTracker: async () => "markdown",
+      detectGithubRepo: async () => null,
+      checkAutomationLicense: async () => null,
+      getUser: async () => null,
+      signIn: async () => null,
+      noService: true,
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid default branch after 3 attempts");
+    expect(
+      questions.filter((question) => question.startsWith("Base tasks and PRs on")),
+    ).toHaveLength(3);
+    expect(config().repos[0]?.defaultBranch).toBeUndefined();
   });
 
   test("a saved branch deleted from origin is replaced on a re-run", async () => {

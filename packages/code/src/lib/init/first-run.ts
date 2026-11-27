@@ -9,6 +9,7 @@
  * TTY, a real wizard, or real environment mutation.
  */
 
+import { PromptAttemptsExceededError } from "@devintern/task-trackers";
 import type { LogFn } from "@devintern/task-trackers";
 import { isPromptAbort, promptAbortReason } from "../cli/prompt-abort";
 import { trackSetupDeclined, trackSetupFailed } from "../observability/analytics";
@@ -104,12 +105,17 @@ export async function ensureTrackerEnvConfigured(
   try {
     await runWizard();
   } catch (error) {
-    // Closed input (Ctrl+D) is a user action, not a crash: keep it out of
-    // main()'s error path. Credentials written before the abort (e.g. when
-    // input closes at the sign-in step) still count, so fall through to the
+    // Closed input (Ctrl+D) and a prompt that keeps returning unusable input
+    // are user actions, not crashes: keep them out of main()'s error path.
+    // Credentials written before the stop still count, so fall through to the
     // reload and re-check below.
-    if (!isPromptAbort(error)) throw error;
-    log(`\n❌ ${promptAbortReason(error)}; setup stopped. Run \`devintern init\` to finish.`);
+    if (error instanceof PromptAttemptsExceededError) {
+      log(`\n❌ ${error.message}; setup stopped. Run \`devintern init\` to finish.`);
+    } else if (isPromptAbort(error)) {
+      log(`\n❌ ${promptAbortReason(error)}; setup stopped. Run \`devintern init\` to finish.`);
+    } else {
+      throw error;
+    }
   }
 
   await deps.reloadEnv?.();

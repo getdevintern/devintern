@@ -16,7 +16,6 @@ import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 import {
-  MAX_PROMPT_ATTEMPTS,
   condenseMessage,
   createPromptAttempts,
   defaultProbe,
@@ -75,7 +74,11 @@ import { recordRepoDefaultBranch } from "./worker-init-branch";
 import { errorMessage } from "./worker-init-fs";
 import { hostStep, withoutRepeatedHostFailures } from "./worker-init-host";
 import { defaultDevinternLabelOps } from "./worker-init-label";
-import { queryLabelsCheck, reviewQueryLabels } from "./worker-init-query-labels";
+import {
+  createQueryCorrectionAttempts,
+  queryLabelsCheck,
+  reviewQueryLabels,
+} from "./worker-init-query-labels";
 import {
   applyPlan,
   planChangesNothing,
@@ -331,8 +334,7 @@ async function queryStep(run: SetupRun): Promise<boolean> {
 /** Prompt for the ready-tasks query until one is entered (and, with a dry run, works). */
 async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined): Promise<string> {
   run.log("\n3️⃣  Which tasks should the worker pick up?");
-  // A re-run keeps the saved query as the Enter default; a new workspace
-  // offers the tracker's devintern-label query.
+  // A re-run keeps the saved query as the Enter default; a new workspace uses the default.
   const fallback = currentQuery || defaultTaskQuery(run.trackerType);
   if (currentQuery) {
     run.log("   The query uses the same language as 'devintern --query' for your tracker.");
@@ -348,7 +350,9 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
   }
 
   let query = "";
+  // Empty answers are input errors; chosen fixes get a larger, separate budget.
   const rejectQuery = createPromptAttempts("ready-tasks query");
+  const correctQuery = createQueryCorrectionAttempts();
   for (;;) {
     query =
       (
@@ -361,19 +365,33 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
       rejectQuery();
       continue;
     }
-    // Offer the devintern label only once the query works; the default query's
-    // label is handled there, so the rest are checked afterwards.
+    // Offer the devintern label only once the query works; the default query's is handled.
     const handled = isDefaultTaskQuery(run.trackerType, query) ? [DEVINTERN_LABEL] : [];
-    if (!run.deps.dryRunQuery) {
-      await offerDevinternLabel(run, query);
-      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") {
-        rejectQuery(`No usable ready-tasks query after ${MAX_PROMPT_ATTEMPTS} attempts`);
+    if (run.deps.dryRunQuery) {
+      // Only the dry run may fail as a query error; the label prompts and
+      // `correctQuery()` below surface their own bounded-attempt errors.
+      let count: number;
+      try {
+        count = await run.deps.dryRunQuery(query);
+      } catch (error) {
+        const failure = describeQueryFailure((error as Error).message, process.env.GITHUB_REPO);
+        if (failure.access) {
+          // Not the query's fault: editing it cannot help.
+          run.log(`❌ ${failure.text}`);
+          run.log(
+            `   Keeping the query. Fix the token or GITHUB_REPO in ${workspaceEnvPath(resolveWorkspaceDir())}, ` +
+              "then check with `devintern worker doctor`.",
+          );
+          break;
+        }
+        run.log(`❌ Query failed against ${run.trackerName}: ${failure.text}`);
+        if (!(await askYesNo(run, "Edit the query and try again? [Y/n]: ", true))) {
+          run.log("   Keeping the query as entered; fix it later in workspace.toml.");
+          break;
+        }
+        correctQuery();
         continue;
       }
-      break;
-    }
-    try {
-      const count = await run.deps.dryRunQuery(query);
       run.log(`✅ Query works: ${count} task(s) match right now.`);
       if (count === 0) {
         const labelHint = defaultQueryZeroMatchHint(run.trackerType, query);
@@ -383,30 +401,13 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
             : "   (0 matches is fine if nothing is ready yet — the worker will poll.)",
         );
       }
-      await offerDevinternLabel(run, query);
-      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") {
-        rejectQuery(`No usable ready-tasks query after ${MAX_PROMPT_ATTEMPTS} attempts`);
-        continue;
-      }
-      break;
-    } catch (error) {
-      const failure = describeQueryFailure((error as Error).message, process.env.GITHUB_REPO);
-      if (failure.access) {
-        // Not the query's fault: editing it cannot help.
-        run.log(`❌ ${failure.text}`);
-        run.log(
-          `   Keeping the query. Fix the token or GITHUB_REPO in ${workspaceEnvPath(resolveWorkspaceDir())}, ` +
-            "then check with `devintern worker doctor`.",
-        );
-        break;
-      }
-      run.log(`❌ Query failed against ${run.trackerName}: ${failure.text}`);
-      if (!(await askYesNo(run, "Edit the query and try again? [Y/n]: ", true))) {
-        run.log("   Keeping the query as entered; fix it later in workspace.toml.");
-        break;
-      }
-      rejectQuery(`No working ready-tasks query after ${MAX_PROMPT_ATTEMPTS} attempts`);
     }
+    await offerDevinternLabel(run, query);
+    if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") {
+      correctQuery();
+      continue;
+    }
+    break;
   }
   return query;
 }

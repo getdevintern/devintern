@@ -12,6 +12,7 @@ import { tmpdir, userInfo } from "os";
 import path from "path";
 
 import { stdinClosedError } from "@devintern/auth";
+import { PromptAttemptsExceededError } from "@devintern/task-trackers";
 
 import { isPromptAbort } from "../src/lib/cli/prompt-abort";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
@@ -441,6 +442,80 @@ describe("runWorkerInit", () => {
       expect(logs.join("\n")).toContain("0 matches is fine");
     });
 
+    test("three deliberate fixes do not exhaust the query budget", async () => {
+      const labels = repoLabels(["ready"]);
+      const questions: string[] = [];
+      const queries: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async (q) => {
+            queries.push(q);
+            return 0;
+          },
+          devinternLabelOps: labels.factory,
+          prompt: scripted(
+            [
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:ready",
+            ],
+            questions,
+          ),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(queries).toHaveLength(4);
+      expect(queries.at(-1)).toBe("is:open label:ready");
+      expect(labels.calls.create).toEqual([]);
+      const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+      expect(config.defaults.taskQuery).toBe("is:open label:ready");
+    });
+
+    test("the fifth fix exhausts the query budget and stops setup", async () => {
+      const labels = repoLabels(["ready"]);
+      const questions: string[] = [];
+      const run = runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => 0,
+          devinternLabelOps: labels.factory,
+          prompt: scripted(
+            [
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              // Would answer the extra "Edit the query?" prompt if the budget
+              // error were misread as a failed dry run.
+              "n",
+            ],
+            questions,
+          ),
+        }),
+      );
+      const error = await run.then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+      expect((error as Error).message).toContain("after 5 corrections");
+      // The budget error stops setup instead of being read as a failed query.
+      expect(questions.filter((q) => q.startsWith("Edit the query and try again?"))).toEqual([]);
+      const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+      expect(config.defaults.taskQuery).not.toBe("is:open label:redy");
+    });
+
     test("c creates the missing labels and keeps the query", async () => {
       const labels = repoLabels([]);
       const result = await runWorkerInit(
@@ -473,6 +548,29 @@ describe("runWorkerInit", () => {
       expect(logs.join("\n")).toContain("Keeping the query");
       const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
       expect(config.defaults.taskQuery).toBe("is:open label:redy");
+    });
+
+    test("three invalid label choices stop setup without writing the query", async () => {
+      const labels = repoLabels([]);
+      const questions: string[] = [];
+      const run = runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => 0,
+          devinternLabelOps: labels.factory,
+          prompt: scripted(["is:open label:redy", "z", "z", "z"], questions),
+        }),
+      );
+      const error = await run.then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+      expect((error as Error).message).toContain("No valid label choice after 3 attempts");
+      expect(questions.filter((q) => q.includes("[f/c/k]"))).toHaveLength(3);
+      expect(labels.calls.create).toEqual([]);
+      const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+      expect(config.defaults.taskQuery).not.toBe("is:open label:redy");
     });
 
     test("no lookup without a label term, and none for existing labels or -label:", async () => {
@@ -532,6 +630,98 @@ describe("runWorkerInit", () => {
     expect(config.worker.schedule?.timezone).toBe("Asia/Ho_Chi_Minh");
   });
 
+  test("three invalid conflict-handling answers stop before writing the policy", async () => {
+    const configPath = path.join(workspaceDir, "workspace.toml");
+    const before = readFileSync(configPath, "utf8");
+    const answers = ["n", "bogus", "bogus", "bogus"];
+    const questions: string[] = [];
+    const run = configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async (question) => {
+        questions.push(question);
+        return answers.shift() ?? "";
+      },
+      log: (message) => logs.push(message),
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid conflict handling after 3 attempts");
+    expect(questions.filter((q) => q.startsWith("Conflict handling"))).toHaveLength(3);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  test("three invalid conflict schedules stop before writing the policy", async () => {
+    const configPath = path.join(workspaceDir, "workspace.toml");
+    const before = readFileSync(configPath, "utf8");
+    const answers = ["n", "scheduled", "bogus", "bogus", "bogus"];
+    const questions: string[] = [];
+    const run = configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async (question) => {
+        questions.push(question);
+        return answers.shift() ?? "";
+      },
+      log: (message) => logs.push(message),
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid conflict schedule after 3 attempts");
+    expect(questions.filter((q) => q.startsWith("Conflict-resolution schedule"))).toHaveLength(3);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  test("three invalid active-window answers stop before writing the policy", async () => {
+    const configPath = path.join(workspaceDir, "workspace.toml");
+    const before = readFileSync(configPath, "utf8");
+    const answers = ["n", "auto", "y", "bogus", "bogus", "bogus"];
+    const questions: string[] = [];
+    const run = configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async (question) => {
+        questions.push(question);
+        return answers.shift() ?? "";
+      },
+      log: (message) => logs.push(message),
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid active windows after 3 attempts");
+    expect(questions.filter((q) => q.startsWith("Active windows"))).toHaveLength(3);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  test("three invalid timezones stop before writing the policy", async () => {
+    const configPath = path.join(workspaceDir, "workspace.toml");
+    const before = readFileSync(configPath, "utf8");
+    const answers = ["n", "auto", "y", "09:00-17:00", "Not/AZone", "Not/AZone", "Not/AZone"];
+    const questions: string[] = [];
+    const run = configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async (question) => {
+        questions.push(question);
+        return answers.shift() ?? "";
+      },
+      log: (message) => logs.push(message),
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid timezone after 3 attempts");
+    expect(questions.filter((q) => q.startsWith("Timezone"))).toHaveLength(3);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
   test("failing dry run offers a retry then accepts the corrected query", async () => {
     let calls = 0;
     const result = await runWorkerInit(
@@ -547,6 +737,36 @@ describe("runWorkerInit", () => {
     expect(calls).toBe(2);
     const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
     expect(config.defaults.taskQuery).toBe("status=todo");
+  });
+
+  test("the fifth failing dry-run correction stops setup instead of keeping the query", async () => {
+    const questions: string[] = [];
+    let dryRuns = 0;
+    const run = runWorkerInit(
+      deps([], {
+        dryRunQuery: async () => {
+          dryRuns += 1;
+          throw new Error("syntax error");
+        },
+        prompt: async (question: string) => {
+          questions.push(question);
+          if (question.startsWith(RECOMMENDED_QUESTION)) throw new Error(`asked: ${question}`);
+          if (question.startsWith("Ready-tasks")) return `bad-${dryRuns + 1}`;
+          // "Edit the query and try again?" — keep correcting until the bound.
+          return "y";
+        },
+      }),
+    );
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("after 5 corrections");
+    expect(dryRuns).toBe(5);
+    expect(questions.filter((q) => q.startsWith("Edit the query and try again?"))).toHaveLength(5);
+    const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+    expect(config.defaults.taskQuery ?? "").not.toContain("bad-");
   });
 
   test("license failure is reported but does not abort setup", async () => {
@@ -652,6 +872,32 @@ describe("runWorkerInit", () => {
     expect(isPromptAbort(error)).toBe(true);
     expect(checks).toBe(1);
     expect(logs.join("\n")).not.toContain("Sign-in failed");
+    expect(logs.join("\n")).not.toContain("License check errored");
+  });
+
+  test("three invalid license sign-in answers stop setup", async () => {
+    const questions: string[] = [];
+    const run = runWorkerInit(
+      deps([], {
+        customize: false,
+        checkAutomationLicense: async () => "No automation license found.",
+        getUser: async () => null,
+        prompt: async (question: string) => {
+          questions.push(question);
+          if (question.startsWith("Ready-tasks")) return "status=todo";
+          if (question.includes("Worker Pilot")) return "maybe";
+          throw new Error(`unexpected prompt: ${question}`);
+        },
+      }),
+    );
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid yes/no answer after 3 attempts");
+    expect(questions.filter((q) => q.includes("Worker Pilot"))).toHaveLength(3);
+    // The license step must not swallow the bound and report success.
     expect(logs.join("\n")).not.toContain("License check errored");
   });
 
