@@ -67,7 +67,7 @@ In your project's checkout:
 devintern init
 ```
 
-It first asks how you want to run tickets. Choose **1) Automatically with a worker** (the default) to start the worker setup; `devintern worker init` opens the same wizard directly. If you already set the repository up for manual runs, the wizard reuses the tracker settings it saved. The wizard first checks this machine: the agent CLI from step 1, git, and whether a background service can be installed. If the agent CLI or git is missing, it tells you right away how to install it, and you can continue anyway or stop. It then asks for:
+In a checkout that is not set up yet, it first asks how you want to run tickets. Choose **1) Automatically with a worker** (the default) to start the worker setup; `devintern worker init` opens the same wizard directly. If you already set the repository up for manual runs, run `devintern worker init` here instead: it reuses the tracker settings it saved and turns the manual-only entry into a worker repository. The wizard first checks this machine: the agent CLI from step 1, git, and whether a background service can be installed. If the agent CLI or git is missing, it tells you right away how to install it, and you can continue anyway or stop. It then asks for:
 
 1. Your tracker and its token. It links to the page where you create the token and checks the connection.
 2. The ready-tasks query: which tickets the worker picks up, for example `is:open label:devintern` on GitHub Issues. Keep it narrow at first.
