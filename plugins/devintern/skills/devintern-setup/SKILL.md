@@ -78,7 +78,7 @@ Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 | `result` | `success` (exit 0, ready), `unchanged` (exit 0, the workspace already had exactly this setup), `action_required` (exit 2, saved and nothing broken; only sign-in is left), `failure` (exit 1). `action_required` is not a broken setup |
 | `code` | Set on every failure, for example `missing_input`, `env_file_unreadable`, `invalid_query`, `workspace_exists`, `credentials_rejected`, `query_rejected`, `repo_access_denied`, `agent_missing` |
 | `error` | Input problem; with `missing_input`, `missing[]` names every missing flag and variable |
-| `checks[]` | `name`, `label`, `status` (`pass`, `warn`, `action`, `fail`, `skipped`), `message`, `hint`. A `query` warn with 0 matches is fine when nothing is labelled yet. A `label` warn means the `devintern` label is missing (fix: `--create-label` with the user's yes) |
+| `checks[]` | `name`, `label`, `status` (`pass`, `warn`, `action`, `fail`, `skipped`), `message`, `hint`. A `query` warn with 0 matches is fine when nothing is labelled yet. A `label` warn means the `devintern` label is missing (fix: `--create-label` with the user's yes). A `query-labels` warn means a label `--task-query` names does not exist, often a typo: ask the user to correct the query or create the label |
 | `signIn` | `url`, `method`, `expiresAt`, `complete`, `reused`; present when `--sign-in` started a sign-in (step 4) |
 | `repo` | `name`, `remote`, `added`, `defaultBranch`, `branch` |
 | `warnings[]` | Not failures; relay each one to the user |

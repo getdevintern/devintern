@@ -45,6 +45,7 @@ import type {
   NonInteractiveInitDeps,
   NonInteractiveInitReport,
 } from "./worker-init-noninteractive-types";
+import { QUERY_LABELS_CHECK } from "./worker-init-query-labels";
 import { emptyOutcome, secretValues } from "./worker-init-run";
 import type { FlagsRun } from "./worker-init-run";
 import { initRerunCommand, runWorkerInitSteps } from "./worker-init-steps";
@@ -428,6 +429,20 @@ function nextStepsFor(options: {
       },
     }),
   );
+  // Warn-only, so not a blocker above: a label the query names is missing.
+  const missingLabel = options.checks.find(
+    (check) => check.name === QUERY_LABELS_CHECK && check.status === "warn",
+  );
+  if (missingLabel) {
+    const command = initRerunCommand(args, ctx, { taskQuery: "<query>" });
+    if (!steps.some((step) => step.id === "fix-query" && step.command === command)) {
+      steps.push({
+        id: "fix-query",
+        message: `${missingLabel.message}. Re-run setup with the corrected query, or create the label and keep this one`,
+        command,
+      });
+    }
+  }
   if (!options.hasRepo) {
     steps.push({
       id: "add-repo",

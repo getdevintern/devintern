@@ -386,6 +386,136 @@ describe("runWorkerInit", () => {
     });
   });
 
+  describe("labels a custom query names", () => {
+    const LABEL_QUESTION = '⚠️  Label "redy" does not exist in acme/app.';
+
+    /** Label ops where only `existing` labels exist; records lookups and creations. */
+    function repoLabels(existing: string[]) {
+      const calls = { exists: [] as string[], create: [] as string[] };
+      return {
+        calls,
+        factory: () => ({
+          location: "acme/app",
+          exists: async (name = "devintern") => {
+            calls.exists.push(name);
+            return existing.includes(name);
+          },
+          create: async (name = "devintern") => {
+            calls.create.push(name);
+          },
+        }),
+      };
+    }
+
+    function scripted(answers: string[], questions: string[]) {
+      return async (question: string) => {
+        questions.push(question);
+        return question.startsWith(RECOMMENDED_QUESTION) ? "y" : (answers.shift() ?? "n");
+      };
+    }
+
+    test("f re-prompts for the query, and the corrected one is saved", async () => {
+      const labels = repoLabels(["ready"]);
+      const questions: string[] = [];
+      const queries: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async (q) => {
+            queries.push(q);
+            return 0;
+          },
+          devinternLabelOps: labels.factory,
+          prompt: scripted(["is:open label:redy", "f", "is:open label:ready"], questions),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(queries).toEqual(["is:open label:redy", "is:open label:ready"]);
+      expect(questions.filter((q) => q.startsWith(LABEL_QUESTION))).toEqual([
+        `${LABEL_QUESTION} Fix the query, create the label, or continue? [f/c/k]: `,
+      ]);
+      expect(labels.calls.create).toEqual([]);
+      const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+      expect(config.defaults.taskQuery).toBe("is:open label:ready");
+      // The generic 0-match hint still shows after the dry run.
+      expect(logs.join("\n")).toContain("0 matches is fine");
+    });
+
+    test("c creates the missing labels and keeps the query", async () => {
+      const labels = repoLabels([]);
+      const result = await runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => 0,
+          devinternLabelOps: labels.factory,
+          prompt: scripted(['is:open label:"good first",docs', "c"], []),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(labels.calls.create).toEqual(["good first", "docs"]);
+      expect(logs.join("\n")).toContain('Created the label "good first" in acme/app');
+      const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+      expect(config.defaults.taskQuery).toBe('is:open label:"good first",docs');
+    });
+
+    test("k keeps the query without creating anything", async () => {
+      const labels = repoLabels([]);
+      const result = await runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => 0,
+          devinternLabelOps: labels.factory,
+          prompt: scripted(["is:open label:redy", "k"], []),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(labels.calls.create).toEqual([]);
+      expect(logs.join("\n")).toContain("Keeping the query");
+      const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+      expect(config.defaults.taskQuery).toBe("is:open label:redy");
+    });
+
+    test("no lookup without a label term, and none for existing labels or -label:", async () => {
+      const labels = repoLabels(["bug"]);
+      const questions: string[] = [];
+      await runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => 1,
+          devinternLabelOps: labels.factory,
+          prompt: scripted(["is:open assignee:@me"], questions),
+        }),
+      );
+      expect(labels.calls.exists).toEqual([]);
+
+      await runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => 1,
+          devinternLabelOps: labels.factory,
+          prompt: scripted(["is:open label:bug -label:wontfix"], questions),
+        }),
+      );
+      expect(labels.calls.exists).toEqual(["bug"]);
+      expect(questions.some((q) => q.includes("[f/c/k]"))).toBe(false);
+    });
+
+    test("the default query's devintern label is only offered once", async () => {
+      const labels = repoLabels([]);
+      const questions: string[] = [];
+      await runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => 0,
+          devinternLabelOps: labels.factory,
+          prompt: scripted(["", "n"], questions),
+        }),
+      );
+      expect(labels.calls.exists).toEqual(["devintern"]);
+      expect(questions.some((q) => q.includes("[f/c/k]"))).toBe(false);
+    });
+  });
+
   test("configures task hours and pull-request maintenance policy", async () => {
     const answers = ["y", "scheduled", "1d", "y", "09:00-17:00", "Asia/Ho_Chi_Minh"];
     await configureWorkerOperatingPolicy({

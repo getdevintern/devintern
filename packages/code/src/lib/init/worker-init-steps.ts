@@ -69,6 +69,7 @@ import { recordRepoDefaultBranch } from "./worker-init-branch";
 import { errorMessage } from "./worker-init-fs";
 import { hostStep, withoutRepeatedHostFailures } from "./worker-init-host";
 import { defaultDevinternLabelOps } from "./worker-init-label";
+import { queryLabelsCheck, reviewQueryLabels } from "./worker-init-query-labels";
 import {
   applyPlan,
   planChangesNothing,
@@ -352,8 +353,12 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
       run.log("❌ A query is required — it defines what 'ready for the agent' means.");
       continue;
     }
+    // Offer the devintern label only once the query works; the default query's
+    // label is handled there, so the rest are checked afterwards.
+    const handled = isDefaultTaskQuery(run.trackerType, query) ? [DEVINTERN_LABEL] : [];
     if (!run.deps.dryRunQuery) {
       await offerDevinternLabel(run, query);
+      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") continue;
       break;
     }
     try {
@@ -368,6 +373,7 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
         );
       }
       await offerDevinternLabel(run, query);
+      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") continue;
       break;
     } catch (error) {
       const failure = describeQueryFailure((error as Error).message, process.env.GITHUB_REPO);
@@ -666,6 +672,7 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
   const checks: InitCheck[] = [auth];
   const label = authFailed ? undefined : await labelCheck(run, timeoutMs);
   if (label) checks.push(label);
+  let labelsChecked = false;
   for (const check of readiness) {
     const mapped = toReportCheck(check);
     if (check.id === "query" && authFailed) {
@@ -680,6 +687,21 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
     // The entitlement row has the same verdict as `worker doctor`: `action`
     // when nobody is signed in yet, `fail` for anything else.
     checks.push(mapped);
+    // A dry run that ran (0 matches warns); once, for the workspace query.
+    if (
+      check.id === "query" &&
+      (check.status === "ok" || check.status === "warn") &&
+      !labelsChecked
+    ) {
+      labelsChecked = true;
+      // The label row above already covers the devintern label.
+      const labels = await queryLabelsCheck(plan, {
+        labelOps: run.deps.devinternLabelOps ?? defaultDevinternLabelOps,
+        timeoutMs,
+        skip: label ? [DEVINTERN_LABEL] : [],
+      });
+      if (labels) checks.push(labels);
+    }
   }
   return checks;
 }
