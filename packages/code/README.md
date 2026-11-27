@@ -22,6 +22,14 @@ Pair with **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)
 
 ## Install
 
+On Linux and macOS, one command installs [Bun](https://bun.sh) if it is missing, then DevIntern ([details](https://devintern.com/docs/code/quick-start#1-install)):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh
+```
+
+Or, with Bun or npm already installed:
+
 ```bash
 bun install -g @getdevintern/code
 # or
@@ -34,13 +42,10 @@ npm install -g @getdevintern/code
 # Zero tracker credentials: local markdown task → PR
 devintern ./tasks/feature-spec.md --create-pr
 
-# Or configure a real tracker
+# Or set up in your checkout: choose a worker that picks up ready tickets
+# (recommended), or manual runs from this terminal
 devintern init
-devintern PROJ-123 --create-pr
-
-# Or keep processing ready tickets across configured repositories
-devintern worker init
-devintern worker
+devintern PROJ-123 --create-pr   # after choosing manual runs
 ```
 
 The standard workspace setup keeps `GITHUB_TOKEN` local and installs the central DevIntern AI GitHub App for relay events—no custom App ID, private key, webhook URL, or open port. Air-gapped/no-relay installations retain an advanced customer-owned App workflow.

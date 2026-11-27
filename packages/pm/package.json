@@ -84,6 +84,7 @@
     "@devintern/task-trackers": "workspace:*",
     "@devintern/text-formatter": "workspace:*",
     "@devintern/utils": "workspace:*",
+    "@devintern/workspace": "workspace:*",
     "@types/bun": "1.4.0"
   },
   "peerDependencies": {

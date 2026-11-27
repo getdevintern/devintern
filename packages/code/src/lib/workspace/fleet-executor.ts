@@ -162,6 +162,7 @@ export interface WorkspaceTaskAcquirerDeps {
       cwd: string;
       env: Record<string, string | undefined>;
       signal?: AbortSignal;
+      isDraining?: () => boolean;
       onChildSpawn?: (pid: number) => void;
     },
   ) => Promise<TaskExecutionResult>;
@@ -195,6 +196,24 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
     return raw.trim().split(/\s+/);
   }
   return workerTaskArgs();
+}
+
+/**
+ * Give a task run its repo's `default_branch` as `--pr-target-branch` unless
+ * the configured args already choose one.
+ *
+ * `RepoManager.createTaskWorktree` cuts the worktree from `origin/<branch>`, and
+ * the pipeline cuts the feature branch from `options.prTargetBranch`; passing
+ * the same branch keeps the worktree base, the feature branch, and the PR base
+ * in agreement. An explicit flag stays authoritative.
+ */
+export function repoTaskArgs(args: string[], repo: RepoConfig): string[] {
+  const branch = repo.defaultBranch;
+  if (!branch) return args;
+  if (args.some((arg) => arg === "--pr-target-branch" || arg.startsWith("--pr-target-branch="))) {
+    return args;
+  }
+  return [...args, "--pr-target-branch", branch];
 }
 
 /**
@@ -575,10 +594,11 @@ export function createGatedFleetTaskExecutor(
           activeTaskWorktrees.add(worktree);
           let ok: TaskExecutionResult;
           try {
-            ok = await runTask(options.taskRef ?? taskKey, extraArgs, {
+            ok = await runTask(options.taskRef ?? taskKey, repoTaskArgs(extraArgs, repo), {
               cwd: worktree,
               env: childEnv,
               signal,
+              isDraining: () => supervisor.isDraining(),
               ...(options.onChildSpawn ? { onChildSpawn: options.onChildSpawn } : {}),
             });
           } finally {

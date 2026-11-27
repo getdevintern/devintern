@@ -263,6 +263,9 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log(
     "  --require-checks       Code PRs need at least one passing CI check (failing or pending checks always block)",
   );
+  console.log(
+    "  --require-approval     Wait until the base branch's required reviews are met, even if this credential could bypass them",
+  );
   console.log("  --method <m>           merge | squash | rebase (default: squash)");
   console.log(
     "  --policy <p>           Review rubric: strict | standard | relaxed | custom (default: strict)",
@@ -342,6 +345,13 @@ function pathListFlag(arg: string, policy: AutoMergeCommandArgs["policy"]): stri
   return undefined;
 }
 
+/** The policy requirement a `--require-checks` / `--require-approval` flag turns on. */
+function requirementFlag(arg: string): "requireChecks" | "requireApproval" | undefined {
+  if (arg === "--require-checks") return "requireChecks";
+  if (arg === "--require-approval") return "requireApproval";
+  return undefined;
+}
+
 function parseAutoMergeFlags(
   args: string[],
   gate: MergeGateModule,
@@ -365,6 +375,7 @@ function parseAutoMergeFlags(
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string;
     const pathList = pathListFlag(arg, policy);
+    const requirement = requirementFlag(arg);
     if (pathList) {
       const value = takeFlagValue(arg, args[++i]);
       if (value === undefined) return undefined;
@@ -406,8 +417,8 @@ function parseAutoMergeFlags(
     } else if (arg === "--no-recheck-on-push") {
       // Worker-internal: the PR is not re-checked after new commits (status comment wording).
       policy.recheckOnPush = false;
-    } else if (arg === "--require-checks") {
-      policy.requireChecks = true;
+    } else if (requirement) {
+      policy[requirement] = true;
     } else if (arg === "--no-review-label") {
       policy.reviewLabel = "";
     } else if (arg === "--dry-run") {

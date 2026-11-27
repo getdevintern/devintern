@@ -184,6 +184,13 @@ export async function runTaskViaCli(
     cwd?: string;
     env?: Record<string, string | undefined>;
     signal?: AbortSignal;
+    /**
+     * True once the worker has begun a shutdown drain. A child that exits on a
+     * termination signal while this holds was stopped together with the
+     * worker (a service manager signals the whole service, not just the
+     * daemon), so it counts as interrupted even before the drain aborts it.
+     */
+    isDraining?: () => boolean;
     /** Called once with the spawned child pid, for durable interrupt recovery. */
     onChildSpawn?: (pid: number) => void;
   } = {},
@@ -248,7 +255,10 @@ export async function runTaskViaCli(
           killTimer.unref?.();
         };
         opts.signal?.addEventListener("abort", abort, { once: true });
-        child.on("close", (code) => {
+        child.on("close", (code, signal) => {
+          if (!interrupted && opts.isDraining?.() && exitedOnTermination(code, signal)) {
+            interrupted = true;
+          }
           finish(code ?? 1);
         });
         child.on("error", (error) => {
@@ -260,6 +270,19 @@ export async function runTaskViaCli(
   );
   if (interrupted) return "interrupted";
   return cliResultToTaskResult(result);
+}
+
+/**
+ * Exit codes of a task child that stopped on a termination signal: its own
+ * SIGINT/SIGTERM handler exits 130/143, and an unhandled SIGHUP/SIGINT/SIGTERM
+ * reaches `close` as the signal itself.
+ */
+const TERMINATION_EXIT_CODES = new Set([129, 130, 143]);
+const TERMINATION_SIGNALS = new Set<string>(["SIGHUP", "SIGINT", "SIGTERM"]);
+
+function exitedOnTermination(code: number | null, signal: string | null): boolean {
+  if (signal !== null) return TERMINATION_SIGNALS.has(signal);
+  return code !== null && TERMINATION_EXIT_CODES.has(code);
 }
 
 /**

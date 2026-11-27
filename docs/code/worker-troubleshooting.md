@@ -4,7 +4,7 @@ sidebarLabel: "Worker Troubleshooting"
 description: "Use when the worker service keeps failing or stops at logout, or a worker task did not run, ran again, or failed: retrying tickets, actioned tickets, interrupted runs, pickup log messages, and reading worker logs."
 section: "Automation"
 order: 2.3
-dateModified: 2026-11-26
+dateModified: 2026-11-27
 ---
 
 # Worker Troubleshooting
@@ -22,6 +22,20 @@ If `worker doctor` reports `Agent harness — <harness>: AGENT_CLI_PATH=<path> (
 If it warns `worker failover: Harness "<harness>" is not installed`, the worker skips that `AGENT_HARNESS` entry. The worker chooses its failover entries using `~/.devintern/.env` only, so set that harness's `<HARNESS>_CLI_PATH` there, not in a repository `env_file` or `[repos.env]`.
 
 If it warns `<harness>: after failover the task runs AGENT_CLI_PATH=<path>`, worker tasks that fail over to that harness would start the primary's CLI. Replace `AGENT_CLI_PATH` with the primary harness's own path key (for example `CLAUDE_CODE_CLI_PATH`).
+
+## `devintern: command not found` over SSH or in cron
+
+The installer writes the `PATH` line to `~/.bashrc` on Linux bash (below Debian's non-interactive guard), to `~/.bash_profile` on macOS bash, and to `~/.zshrc` or `~/.config/fish/config.fish` for zsh and fish. Shells that never read that file still miss `~/.bun/bin`, so fix each context where it happens:
+
+| Context                                                        | Fix                                                                                                                                                                                                            |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Login shell (`bash -lc`, `zsh -lc`, or `ssh host` then typing) | Add `export PATH="$HOME/.bun/bin:$PATH"` to the file your login shell reads: `~/.bash_profile` or `~/.profile` for bash, `~/.zprofile` or `~/.zshenv` for zsh. Fish has no `export`: add `fish_add_path "$HOME/.bun/bin"` to `~/.config/fish/config.fish` (or run it once) |
+| cron                                                           | Put `PATH=/home/<user>/.bun/bin:/usr/local/bin:/usr/bin:/bin` at the top of the crontab, or call `devintern` by absolute path                                                                                  |
+| SSH one-liner (`ssh host 'devintern …'`)                       | Use the absolute path (`~/.bun/bin/devintern …`), or put a literal `PATH=/home/<user>/.bun/bin:/usr/local/bin:/usr/bin:/bin` line in `~/.ssh/environment` and set `PermitUserEnvironment yes` in `sshd_config` |
+
+`~/.ssh/environment` is parsed by sshd, not by a shell: each line is split at the first `=` and nothing is expanded, so write the real path with no `$HOME`/`$PATH` and no `export`. To use `BASH_ENV` instead, it must already be in the environment sshd starts the shell with: put `BASH_ENV=/home/<user>/.devintern-path` in `~/.ssh/environment` (or in `SetEnvironment` in `sshd_config`), then create that file with `export PATH="$HOME/.bun/bin:$PATH"`.
+
+The systemd service is not affected: `worker service install` pins `PATH` in the unit.
 
 ## The service keeps failing
 
@@ -95,7 +109,7 @@ Either way, the run is recorded as `failed` with the reason `pushed but PR creat
 
 ## Interrupted runs
 
-A graceful stop (Ctrl-C, `SIGTERM`) comments on in-flight tickets and moves them back to To Do. After a hard crash (power loss, `kill -9`), the worker does the same at its next startup, before picking up new work. If the interrupted run already had commits on its branch, the worker continues it instead.
+A graceful stop (Ctrl-C, `SIGTERM`) comments on in-flight tickets and moves them back to To Do. After a hard crash (power loss, `kill -9`), the worker does the same at its next startup, before picking up new work. If the interrupted run already had commits on its branch, the worker continues it instead. Ad-hoc tasks (`devintern worker add`) interrupted by a stop or restart resume at the next start; one that still ended `failed` can be re-queued with `devintern worker add --resume <task>`.
 
 Tickets that someone moved out of In Progress after the crash are left alone. Runs older than 7 days are marked failed without a comment; change the cutoff with `WORKER_ORPHAN_MAX_AGE_HOURS` in the workspace `.env` (`0` disables the comments). Recovered tickets are not re-run automatically; they follow the [retry rules](#re-running-a-task).
 

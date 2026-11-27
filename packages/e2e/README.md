@@ -213,8 +213,9 @@ Commands run with no TTY and nothing injected (no PATH, git identity, or
 ```sh
 bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test:e2e:golden-path
-# The published package (a release build: sign-in stays required, so the
-# service and PR steps are replaced by checks that it is still asked for):
+# The published package (a release build, where the skip flag is ignored).
+# It checks that sign-in is still asked for; with E2E_LICENSE_KEY set to a
+# paid LICENSE_KEY it then adds the key and runs the service and PR steps too:
 DEVINTERN_CLI_SOURCE=npm:latest bun run --filter @devintern/e2e test:e2e:golden-path
 ```
 
@@ -222,7 +223,8 @@ It needs Docker with privileged containers, network access, and the same
 GitHub fixture as `test:e2e`: locally `gh auth token` and
 `getdevintern/devintern-e2e`; in CI the repository variable
 `E2E_GITHUB_REPOSITORY` and the secret `E2E_GITHUB_TOKEN` (Contents, Pull
-requests and Issues write on that repository). The run creates a unique base
+requests and Issues write on that repository), plus the optional secret
+`E2E_LICENSE_KEY` for release-build runs. The run creates a unique base
 branch, label, issue and PR and removes them afterwards (the issue and PR are
 closed, since GitHub keeps them as history). It takes about 1-2 minutes from
 source and under a minute against npm, plus about a minute the first time the

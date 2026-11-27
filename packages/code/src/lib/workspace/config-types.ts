@@ -245,6 +245,13 @@ export interface RepoConfig {
    * agent sandbox provider in the repo's effective env. Off by default.
    */
   syncTeamPrs?: boolean;
+  /**
+   * `auto_merge_team_prs`: extend auto-merge (`[workspace].auto_merge`)
+   * beyond the agent's own PRs to this repo's open, non-draft, same-repo PRs
+   * authored by team members (OWNER/MEMBER/COLLABORATOR/MAINTAIN). They pass
+   * the same gates and policy as the agent's PRs. GitHub-only. Off by default.
+   */
+  autoMergeTeamPrs?: boolean;
   /** Inline env overrides (highest precedence). */
   env: Record<string, string>;
   /**

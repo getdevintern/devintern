@@ -20,9 +20,11 @@
  *
  * Source mode (a packed local build) stands in for sign-in with
  * DEVINTERN_SKIP_LICENSE_CHECK. Release mode (`DEVINTERN_CLI_SOURCE=npm:...`)
- * installs the published package, where that flag is ignored, so it asserts
- * that sign-in stays the one step left instead (steps 5 and 6 need a running
- * worker and are skipped).
+ * installs the published package, where that flag is ignored, so it first
+ * asserts that sign-in stays the one step left (doctor `action_required`,
+ * service install refused). With E2E_LICENSE_KEY set it then writes that key
+ * to the workspace `.env`, as a paying user would, and runs steps 3 to 6 like
+ * source mode; without it those steps are skipped.
  *
  * Every GitHub resource is unique to the run and removed in `afterAll`: the
  * issue is closed, the PR closed, both branches and the trigger label deleted.
@@ -48,6 +50,14 @@ const tarball = process.env.E2E_GOLDEN_CLI_TARBALL;
 const npmSpec = process.env.E2E_GOLDEN_CLI_NPM_SPEC;
 /** A release build (the npm package) ignores DEVINTERN_SKIP_LICENSE_CHECK. */
 const releaseBuild = process.env.E2E_GOLDEN_RELEASE_BUILD === "1";
+/**
+ * A paid LICENSE_KEY for release mode (CI secret E2E_LICENSE_KEY). With it a
+ * release build runs the full path to a PR; without it those steps skip.
+ * Source mode ignores it and keeps the skip flag.
+ */
+const licenseKey = releaseBuild ? (process.env.E2E_LICENSE_KEY?.trim() ?? "") : "";
+/** Steps that need a licensed worker: source mode, or release mode with a key. */
+const fullPath = !releaseBuild || licenseKey !== "";
 const expectedVersion = process.env.E2E_GOLDEN_CLI_VERSION ?? "";
 const repository = process.env.E2E_GITHUB_REPOSITORY ?? "";
 const token = process.env.E2E_GITHUB_TOKEN ?? "";
@@ -139,7 +149,7 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
         } catch (error) {
           failedStep ??= name;
           const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
-          throw new Error(redact(`${detail}\n${await diagnostics()}`, token));
+          throw new Error(redact(redact(`${detail}\n${await diagnostics()}`, token), licenseKey));
         }
       },
       options.timeout ?? 240_000,
@@ -348,6 +358,57 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
   });
 
   step(
+    "release build: worker doctor --json still needs sign-in (the skip flag is ignored)",
+    async () => {
+      const { exitCode, doc } = await json<DoctorReport>("worker doctor");
+      const shown = JSON.stringify(doc, null, 2);
+      expect(doc.schema).toBe("devintern.worker-doctor");
+      expect(
+        doc.checks.filter((check) => check.status === "fail"),
+        shown,
+      ).toEqual([]);
+      expect(doc.result, shown).toBe("action_required");
+      expect(exitCode, shown).toBe(2);
+      expect(doc.setup, shown).toBe("action_required");
+      expect(doc.nextSteps[0]?.id, shown).toBe("sign-in");
+      expect(
+        doc.nextSteps.map((next) => next.id),
+        shown,
+      ).not.toContain("service");
+    },
+    { skip: !releaseBuild },
+  );
+
+  step(
+    "release build: worker service install refuses until sign-in (exit 2)",
+    async () => {
+      const { exitCode, doc } = await json<ServiceDoc>("worker service install");
+      const shown = JSON.stringify(doc, null, 2);
+      expect(doc.result, shown).toBe("action_required");
+      expect(exitCode, shown).toBe(2);
+      // Sign in first, then install the service.
+      expect(
+        doc.nextSteps.map((next) => next.id),
+        shown,
+      ).toEqual(["sign-in", "service"]);
+      expect(await sh(`test -e ${UNIT}`)).toMatchObject({ exitCode: 1 });
+      expect((await json<ServiceDoc>("worker service status")).doc.result).toBe("not_installed");
+    },
+    { skip: !releaseBuild },
+  );
+
+  step(
+    "release build: a LICENSE_KEY in the workspace .env replaces sign-in",
+    async () => {
+      // What a user with a paid license does: add the key to the workspace
+      // .env (kept 0600). The relay is not paired with it.
+      await container.appendPrivateFile(USER, `${WORKSPACE}/.env`, `LICENSE_KEY=${licenseKey}\n`);
+      expect((await checked(`stat -c %a ${WORKSPACE}/.env`)).trim()).toBe("600");
+    },
+    { skip: !releaseBuild || !licenseKey },
+  );
+
+  step(
     "worker doctor --json: ready",
     async () => {
       const { exitCode, doc } = await json<DoctorReport>("worker doctor");
@@ -370,29 +431,7 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
         shown,
       ).not.toContain("sign-in");
     },
-    { skip: releaseBuild },
-  );
-
-  step(
-    "release build: worker doctor --json still needs sign-in (the skip flag is ignored)",
-    async () => {
-      const { exitCode, doc } = await json<DoctorReport>("worker doctor");
-      const shown = JSON.stringify(doc, null, 2);
-      expect(doc.schema).toBe("devintern.worker-doctor");
-      expect(
-        doc.checks.filter((check) => check.status === "fail"),
-        shown,
-      ).toEqual([]);
-      expect(doc.result, shown).toBe("action_required");
-      expect(exitCode, shown).toBe(2);
-      expect(doc.setup, shown).toBe("action_required");
-      expect(doc.nextSteps[0]?.id, shown).toBe("sign-in");
-      expect(
-        doc.nextSteps.map((next) => next.id),
-        shown,
-      ).not.toContain("service");
-    },
-    { skip: !releaseBuild },
+    { skip: !fullPath },
   );
 
   step(
@@ -425,25 +464,7 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
       expect(doctor.doc.setup, JSON.stringify(doctor.doc, null, 2)).toBe("complete");
       expect(doctor.exitCode).toBe(0);
     },
-    { skip: releaseBuild },
-  );
-
-  step(
-    "release build: worker service install refuses until sign-in (exit 2)",
-    async () => {
-      const { exitCode, doc } = await json<ServiceDoc>("worker service install");
-      const shown = JSON.stringify(doc, null, 2);
-      expect(doc.result, shown).toBe("action_required");
-      expect(exitCode, shown).toBe(2);
-      // Sign in first, then install the service.
-      expect(
-        doc.nextSteps.map((next) => next.id),
-        shown,
-      ).toEqual(["sign-in", "service"]);
-      expect(await sh(`test -e ${UNIT}`)).toMatchObject({ exitCode: 1 });
-      expect((await json<ServiceDoc>("worker service status")).doc.result).toBe("not_installed");
-    },
-    { skip: !releaseBuild },
+    { skip: !fullPath },
   );
 
   step(
@@ -517,7 +538,7 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
       ]);
       expect(await unitProperty("ActiveState")).toBe("active");
     },
-    { timeout: PR_TIMEOUT_MS + 180_000, skip: releaseBuild },
+    { timeout: PR_TIMEOUT_MS + 180_000, skip: !fullPath },
   );
 
   step(
@@ -543,7 +564,7 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
       expect(await sh(`test -e ${UNIT}`)).toMatchObject({ exitCode: 1 });
       expect((await json<ServiceDoc>("worker service status")).doc.result).toBe("not_installed");
     },
-    { timeout: 300_000, skip: releaseBuild },
+    { timeout: 300_000, skip: !fullPath },
   );
 
   step(
@@ -569,9 +590,12 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
       const wizard = await runWizard();
       const output = wizard.output;
       expect(wizard.seen, output).toEqual(
-        expect.arrayContaining(["tracker", "tasks-dir", "query", "settings", "sign-in", "relay"]),
+        expect.arrayContaining(["tracker", "tasks-dir", "query", "sign-in", "relay"]),
       );
       expect(output).toContain("✅ Query works: 1 task(s) match right now.");
+      // No settings question: the recommended settings are written.
+      expect(wizard.seen).not.toContain("ci-repair");
+      expect(output).toContain("💾 Wrote the recommended worker settings to workspace.toml (");
       expect(output).toContain("📋 Readiness (the same checks as `devintern worker doctor`):");
       expect(output).toContain(
         "👉 Worker setup saved. One step left: sign in to begin your 14-day free Worker Pilot, no card required.",
@@ -635,7 +659,6 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
       ],
       ["token", /GitHub token for creating pull requests[^\n]*: $/, "\r"],
       ["query", /Ready-tasks query[^\n]*: $/, "status=todo\r"],
-      ["settings", /Use the recommended worker settings[^\n]*\]: $/, "\r"],
       ["relay-sign-in", /Sign in now to connect the relay[^\n]*\]: $/, "n\r"],
       ["ci-repair", /Automatically repair failing CI[^\n]*\]: $/, "n\r"],
       ["hours", /Limit new-task pickup to active hours[^\n]*\]: $/, "n\r"],

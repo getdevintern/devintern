@@ -175,7 +175,6 @@
       // once the file is split; do not add new ones.
       "files": [
         "packages/code/src/lib/acquirers/review-polling.ts",
-        "packages/code/src/lib/init/worker-init.ts",
         "packages/code/src/lib/observability/dashboard-api.ts",
         "packages/code/src/lib/review/conflict-resolver.ts",
         "packages/code/src/lib/state/run-recorder.ts",

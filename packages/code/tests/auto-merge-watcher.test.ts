@@ -14,11 +14,11 @@ import {
   autoMergeCliArgs,
   parseAutoMergeResultLine,
   runAutoMergeViaCli,
-  usageLimitRetryAt,
 } from "../src/lib/acquirers/auto-merge-cli";
 import type { AutoMergeResult } from "../src/lib/review/auto-merge";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
+import { usageLimitRetryAt } from "../src/lib/worker/usage-limit-protocol";
 
 const REPO = "acme/widgets";
 const HEAD = "a".repeat(40);
@@ -120,6 +120,143 @@ describe("AutoMergeWatcherAcquirer", () => {
     enabled = false;
     await watcher().tick();
     expect(calls).toHaveLength(0);
+  });
+
+  describe("team PRs (auto_merge_team_prs)", () => {
+    const teamItem = (number: number, extra: Record<string, unknown> = {}) => ({
+      number,
+      author_association: "MEMBER",
+      head: { repo: { full_name: REPO } },
+      ...extra,
+    });
+    const mainBase = { sha: "b".repeat(40), ref: "main", repo: { default_branch: "main" } };
+    let teamFlags: Array<{ prNumber: number; team: boolean }> = [];
+    beforeEach(() => {
+      teamFlags = [];
+    });
+    const teamWatcher = (
+      items: Array<ReturnType<typeof teamItem>>,
+      opts: { repos?: () => string[]; prs?: Record<number, AutoMergePolledPr> } = {},
+    ) => {
+      const listCalls: Array<string | undefined> = [];
+      const w = new AutoMergeWatcherAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        enabled: () => enabled,
+        now: () => now,
+        quietSeconds: 0,
+        fetchPr: async (_repo, n) => ({
+          data: opts.prs?.[n] ?? (n === 7 ? pr : { ...pr, base: mainBase }),
+          notModified: false,
+        }),
+        mergePr: async (_repo, prNumber, sha, { team }) => {
+          calls.push({ prNumber, sha });
+          teamFlags.push({ prNumber, team: team === true });
+          return results.shift() ?? { outcome: "merged", message: "ok", reviewed: false };
+        },
+        teamPrRepos: opts.repos ?? (() => [REPO]),
+        listOpenPullRequests: async (_repo, etag) => {
+          listCalls.push(etag);
+          return etag
+            ? { data: null, notModified: true }
+            : { data: items, notModified: false, etag: '"v1"' };
+        },
+      });
+      return { w, listCalls };
+    };
+
+    test("evaluates teammates' same-repo, non-draft PRs alongside the agent's", async () => {
+      const team = { ...pr, base: mainBase, author_association: "COLLABORATOR" };
+      const { w } = teamWatcher(
+        [
+          teamItem(7), // the agent's own PR: not duplicated
+          teamItem(8),
+          teamItem(9, { draft: true }),
+          teamItem(10, { author_association: "CONTRIBUTOR" }),
+          teamItem(11, { head: { repo: { full_name: "someone/fork" } } }),
+        ],
+        { prs: { 8: team } },
+      );
+      await w.tick();
+      expect(calls.map((call) => call.prNumber)).toEqual([7, 8]);
+      // Only the teammate's PR is checked against required reviews.
+      expect(teamFlags).toEqual([
+        { prNumber: 7, team: false },
+        { prNumber: 8, team: true },
+      ]);
+      // A merged teammate PR is decided, not recorded as an agent PR merge.
+      expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 8, HEAD))).toBe(true);
+    });
+
+    test("re-checks the team gate on the fresh PR payload", async () => {
+      const { w } = teamWatcher([teamItem(8)], {
+        prs: { 8: { ...pr, base: mainBase, author_association: "NONE" } },
+      });
+      await w.tick();
+      expect(calls.map((call) => call.prNumber)).toEqual([7]);
+    });
+
+    test("reuses the cached list on 304 and stops once the repo opts out", async () => {
+      let repos = [REPO];
+      const { w, listCalls } = teamWatcher([teamItem(8)], {
+        repos: () => repos,
+        prs: { 8: { ...pr, base: mainBase, author_association: "OWNER" } },
+      });
+      results = [
+        { outcome: "waiting", message: "not yet", reviewed: false },
+        { outcome: "waiting", message: "not yet", reviewed: false },
+      ];
+      await w.tick();
+      now += 60 * 60_000;
+      await w.tick();
+      expect(listCalls).toEqual([undefined, '"v1"']);
+      expect(calls.filter((call) => call.prNumber === 8)).toHaveLength(2);
+
+      repos = [];
+      now += 60 * 60_000;
+      calls = [];
+      await w.tick();
+      expect(listCalls).toHaveLength(2);
+      expect(calls.filter((call) => call.prNumber === 8)).toHaveLength(0);
+    });
+
+    test("merges a teammate's PR only into the default branch", async () => {
+      const into = (ref: string) => ({
+        ...pr,
+        base: { ...mainBase, ref },
+        author_association: "MEMBER",
+      });
+      const { w } = teamWatcher([teamItem(8), teamItem(9), teamItem(10)], {
+        prs: {
+          8: into("release/1.2"),
+          9: into("alice/feature"),
+          10: { ...pr, author_association: "MEMBER" }, // no base in the payload: fail closed
+        },
+      });
+      const logs: string[] = [];
+      const original = console.log;
+      console.log = (...args: unknown[]) => logs.push(args.join(" "));
+      try {
+        await w.tick();
+        now += 60 * 60_000;
+        await w.tick();
+      } finally {
+        console.log = original;
+      }
+      expect(calls.filter((call) => call.prNumber !== 7)).toEqual([]);
+      const skips = logs.filter((line) => line.includes("only into the default branch"));
+      // Logged once per PR, not on every tick.
+      expect(skips).toHaveLength(3);
+      expect(skips.some((line) => line.includes("#8") && line.includes("release/1.2"))).toBe(true);
+    });
+
+    test("without opted-in repos, only the agent's PRs are considered", async () => {
+      const { w, listCalls } = teamWatcher([teamItem(8)], { repos: () => [] });
+      await w.tick();
+      expect(listCalls).toHaveLength(0);
+      expect(calls.map((call) => call.prNumber)).toEqual([7]);
+    });
   });
 
   describe("stacked-base guard", () => {
@@ -651,6 +788,67 @@ describe("AutoMergeWatcherAcquirer", () => {
     // ...and a policy change (e.g. require_checks turned on) re-checks it now.
     fingerprint = "p2";
     now += 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(4);
+  });
+
+  test("a clean PR waiting on approval backs off 10, 20, 40, then 60 minutes; a review ends it early", async () => {
+    // A credential that can bypass reviews sees `clean`; the approval gate holds it.
+    pr = { ...pr, mergeable_state: "clean", updated_at: "2026-01-01T00:00:00Z" };
+    const unapproved = {
+      outcome: "waiting" as const,
+      message: "branch protection requires an approving review",
+      reviewed: false,
+      approvalWait: true,
+    };
+    results = Array.from({ length: 6 }, () => unapproved);
+    const w = watcher();
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    const gaps: number[] = [];
+    let last = now;
+    for (let minute = 1; minute <= 200 && calls.length < 6; minute++) {
+      now += 60_000;
+      const before = calls.length;
+      await w.tick();
+      if (calls.length > before) {
+        gaps.push((now - last) / 60_000);
+        last = now;
+      }
+    }
+    expect(gaps).toEqual([10, 20, 40, 60, 60]);
+    // Mid-backoff, a submitted review (bumps updated_at) is evaluated right away.
+    now += 60_000;
+    pr = { ...pr, updated_at: "2026-01-02T00:00:00Z" };
+    results = [{ outcome: "merged", message: "merged", reviewed: false }];
+    await w.tick();
+    expect(calls).toHaveLength(7);
+  });
+
+  test("a changes-requested wait backs off and a later non-approval wait resets to 10 minutes", async () => {
+    pr = { ...pr, mergeable_state: "clean", updated_at: "t1" };
+    const changes = {
+      outcome: "waiting" as const,
+      message: "changes requested by bob",
+      reviewed: false,
+      approvalWait: true,
+    };
+    const headMoved = { outcome: "waiting" as const, message: "head moved", reviewed: false };
+    results = [changes, changes, headMoved, headMoved];
+    const w = watcher();
+    await w.tick();
+    now += 10 * 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(2);
+    // 20-minute backoff now: nothing at +19.
+    now += 19 * 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(2);
+    now += 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(3);
+    // A plain wait is back to the flat 10 minutes.
+    now += 10 * 60_000;
     await w.tick();
     expect(calls).toHaveLength(4);
   });

@@ -16,8 +16,6 @@
  * worker lock, opens a port, or touches the network.
  */
 
-import { Database } from "bun:sqlite";
-import { existsSync } from "fs";
 import { dirname, resolve } from "path";
 import { parseArgs } from "util";
 
@@ -59,8 +57,8 @@ import type { HarnessLogContent } from "../observability/harness-logs";
 import { hourProfile, quietestWindow } from "../state/run-activity";
 import type { RunRecord, RunStageRecord, RunStats } from "../state/run-recorder";
 import type { WorkerLogsResult } from "../observability/worker-logs";
-import { configureSqliteConnection } from "../state/sqlite";
 import { resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
+import { probeDatabase } from "./database-probe";
 import { summarizeStartupFailure } from "./lifecycle";
 
 /** Top-level `devintern worker` subcommands handled here. */
@@ -371,41 +369,6 @@ function resolveSelectedWorkspace(
 }
 
 /**
- * Confirm the state database exists and is readable without creating or
- * changing anything. A plain read-only open is used on purpose: unlike
- * `immutable=1` it still sees committed rows in the WAL, and SQLite falls back
- * to a private read-only wal-index when the `-shm` file cannot be written.
- */
-function probeDatabase(dbPath: string): string | null {
-  if (!existsSync(dbPath)) {
-    return (
-      `No worker database at ${dbPath}.\n` +
-      "   The worker creates it on first start (`devintern worker`); pass --workspace\n" +
-      "   or set DEVINTERN_WORKSPACE_DIR if the workspace lives elsewhere."
-    );
-  }
-  let db: Database | null = null;
-  try {
-    db = new Database(dbPath, { readonly: true });
-    configureSqliteConnection(db, { readonly: true });
-    db.query("SELECT count(*) FROM sqlite_master").get();
-    return null;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    // SQLite can read a WAL database from a read-only location only while its
-    // `-wal`/`-shm` files exist (i.e. while the worker has it open).
-    const hint = existsSync(`${dbPath}-wal`)
-      ? ""
-      : "\n   No -wal file exists next to it: if this directory is read-only (sandbox), SQLite\n" +
-        "   cannot open the WAL database until the worker is running. Run the command\n" +
-        "   outside the sandbox or start `devintern worker`.";
-    return `Cannot read the worker database at ${dbPath}: ${message}${hint}`;
-  } finally {
-    db?.close();
-  }
-}
-
-/**
  * Build the dashboard data source the worker's embedded dashboard would use:
  * history and queues both in `<workspace>/state/queue.db`, liveness and
  * transcripts from the workspace home, automations from `workspace.toml`.
@@ -485,12 +448,26 @@ export function runWorkerReadCommand(
     return 1;
   }
   const dbPath = workspaceDbPath(workspace.dir);
-  const dbError = probeDatabase(dbPath);
+  const dbProbe = probeDatabase(dbPath);
   // `status` still answers before the first successful start: a worker that
   // failed its license check never created the database, and saying why it
   // is stopped matters more than empty queue counts.
-  if (dbError && !(key === "status" && !existsSync(dbPath))) {
-    io.stderr(`❌ ${dbError}\n`);
+  if (dbProbe.kind !== "ok" && !(dbProbe.kind === "missing" && key === "status")) {
+    // `queue` is a common first command: an empty queue before the worker has
+    // ever started is not an error worth a red cross. Keep the database path
+    // and the --workspace hint so a wrong workspace does not look like a
+    // worker that has not started. Only a missing database takes this path:
+    // an unreadable one (EACCES/EPERM, a sandbox denial) is a real error.
+    // `--json` stays an error too: scripts need to tell "no database" from an
+    // empty queue.
+    if (dbProbe.kind === "missing" && key === "queue" && !values.json) {
+      io.stdout(
+        `ℹ️  ${dbProbe.message}\n` +
+          "   The worker has not started yet; check `devintern worker service status`.\n",
+      );
+      return 0;
+    }
+    io.stderr(`❌ ${dbProbe.message}\n`);
     return 1;
   }
 

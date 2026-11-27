@@ -47,7 +47,7 @@ pr_labels = ["devintern"]         # GitHub only
 [[repos]]
 name = "backend"
 remote = "git@github.com:acme/backend.git"
-default_branch = "main"         # optional; default is the remote's HEAD
+default_branch = "main"         # optional; base for task worktrees and task PRs (default: remote HEAD)
 env_file = "env/backend.env"    # optional, relative to ~/.devintern
   [repos.env]
   GITHUB_REPO = "acme/backend"
@@ -76,7 +76,7 @@ Keys not shown here are documented on the page for their feature:
 | `[[automations]]`                                                                                        | [Recurring Automations](./automations.md)                                          |
 | `[[estimations]]`                                                                                        | [Story Points Estimation](./story-points-estimation.md#scheduled-estimation-with-the-worker) |
 | `[[error_monitors]]`                                                                                     | [Sentry Auto-fixes](./sentry-integration.md)                                       |
-| `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths` | [PR Follow-up](./pr-follow-up.md) |
+| `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths` | [PR Follow-up](./pr-follow-up.md) |
 | `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
 | `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
 | `[workspace].git_author_name`, `git_author_email` (also per `[[repos]]`)                                 | [Configuration: Commit identity](./configuration.md#commit-identity)               |

@@ -62,7 +62,7 @@ describe("isPromptAbort", () => {
 });
 
 describe("runInit: closed input", () => {
-  test("first-run wizard: Ctrl+D at the tracker prompt exits 1 with one line", async () => {
+  test("first-run wizard: Ctrl+D at the run-mode prompt exits 1 with one line", async () => {
     const { prompt, asked } = promptThenFail([], ctrlDError());
 
     const code = await runInit({ ...baseDeps(), prompt });
@@ -75,7 +75,7 @@ describe("runInit: closed input", () => {
 
   test("first-run wizard: Ctrl+D inside the sign-in flow stops setup", async () => {
     const { prompt } = promptThenFail(
-      ["markdown", "", "", "y"], // tracker, tasks dir, PR token, accept sign-in
+      ["2", "markdown", "", "", "y"], // by hand, tracker, tasks dir, PR token, accept sign-in
       new Error("no more prompts expected"),
     );
 

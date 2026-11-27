@@ -35,6 +35,7 @@ import {
   listCheckRunsForRef,
   listLatestCommitStatuses,
 } from "../code-host/github/commit-checks";
+import { pullRequestReviewDecision } from "../code-host/github/review-decision";
 import { GitHubReviewsClient } from "../code-host/github/reviews";
 import type {
   PullRequestFile,
@@ -52,8 +53,11 @@ import {
   parseMergeSafetyVerdict,
 } from "./merge-gate";
 import type { AutoMergeMethod, MergePathPolicy, MergeSafetyPolicy } from "./merge-gate";
+import { approvalFailure, outstandingChangeRequests } from "./merge-approvals";
 import { buildMergeSafetyPrompt } from "./merge-safety-prompt";
 import { loadMergeSafetyRules, mergeSafetyPolicyLabel } from "./merge-safety-rules";
+
+export { outstandingChangeRequests } from "./merge-approvals";
 
 /** Full auto-merge policy for one repository. */
 export interface AutoMergePolicy extends MergePathPolicy {
@@ -85,6 +89,8 @@ export interface AutoMergePolicy extends MergePathPolicy {
    * appended in a marked section that can only add restrictions.
    */
   reviewInstructions?: string;
+  /** Wait for the base branch's required reviews (see `merge-approvals.ts`). */
+  requireApproval?: boolean;
   /** `custom` policy: inline rubric text (`auto_merge_rules`). */
   rules?: string;
   /**
@@ -140,6 +146,8 @@ export interface AutoMergeResult {
    * read, so whether the checks are the hold is unknown (retry soon).
    */
   ciChecksUnread?: boolean;
+  /** `waiting` on reviewers (changes requested, or required approval missing): the worker backs off. */
+  approvalWait?: boolean;
 }
 
 /** GitHub operations on one PR (injected for tests). */
@@ -147,6 +155,8 @@ export interface AutoMergeGitHub {
   getPullRequest(): Promise<PullRequestInfo>;
   listFiles(): Promise<PullRequestFile[]>;
   listReviews(): Promise<Array<{ state: string; user: { login: string } | null }>>;
+  /** GitHub's `reviewDecision` (`null`: no review required); throws when unreadable. */
+  getReviewDecision(): Promise<string | null>;
   getDiff(): Promise<string>;
   /** Every check run and legacy commit status on `sha`; throws when it cannot read them all. */
   listCiChecks(sha: string): Promise<CiCheck[]>;
@@ -282,21 +292,6 @@ function describeMergeableState(state: string | undefined): string {
   }
 }
 
-/** Reviewers whose most recent decisive review requests changes. */
-export function outstandingChangeRequests(
-  reviews: ReadonlyArray<{ state: string; user: { login: string } | null }>,
-): string[] {
-  const latest = new Map<string, string>();
-  for (const review of reviews) {
-    const login = review.user?.login;
-    if (!login) continue;
-    // Comments do not change a reviewer's decision; dismissals clear it.
-    if (review.state === "COMMENTED" || review.state === "PENDING") continue;
-    latest.set(login, review.state);
-  }
-  return [...latest].filter(([, state]) => state === "CHANGES_REQUESTED").map(([login]) => login);
-}
-
 /** HTTP status embedded in a GitHub client error message, if any. */
 function gitHubErrorStatus(error: unknown): number | undefined {
   const match = /GitHub API error \((\d{3})\)/.exec(
@@ -311,6 +306,7 @@ function defaultGitHub(owner: string, repo: string, prNumber: number): AutoMerge
     getPullRequest: () => client.getPullRequest(owner, repo, prNumber),
     listFiles: () => client.listPullRequestFiles(owner, repo, prNumber),
     listReviews: () => client.listPullRequestReviews(owner, repo, prNumber),
+    getReviewDecision: () => pullRequestReviewDecision(client, owner, repo, prNumber),
     getDiff: () => client.getPullRequestDiff(owner, repo, prNumber),
     listCiChecks: async (sha) => {
       const [runs, statuses] = await Promise.all([
@@ -677,7 +673,7 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
 async function mergeAtHead(
   ctx: GateContext,
   decision: Extract<MergeDecision, { kind: "merge" }>,
-): Promise<Pick<AutoMergeResult, "outcome" | "message">> {
+): Promise<Pick<AutoMergeResult, "outcome" | "message" | "approvalWait">> {
   const { options, github, baseRepo, pr } = ctx;
   const { policy, dryRun = false, verbose = false } = options;
   const message = decision.viaReview ? `agent review: ${decision.reason}` : decision.reason;
@@ -685,6 +681,8 @@ async function mergeAtHead(
   // Re-check right before merging: the review can take minutes.
   const stale = preconditionFailure(await github.getPullRequest(), baseRepo, pr.head.sha);
   if (stale) return stale;
+  const unapproved = await approvalFailure(policy, github);
+  if (unapproved) return unapproved;
   if (dryRun) return { outcome: "would-merge", message };
 
   let merge: PullRequestMergeResult;
@@ -753,8 +751,11 @@ export async function autoMergePr(
       outcome: "waiting",
       message: `changes requested by ${blockers.join(", ")}`,
       reviewed: false,
+      approvalWait: true,
     };
   }
+  const unapproved = await approvalFailure(options.policy, github);
+  if (unapproved) return { ...unapproved, reviewed: false };
 
   const ctx: GateContext = { options, github, baseRepo, prNumber, pr };
   const notMergeable = mergeableStateFailure(pr);

@@ -13,6 +13,7 @@ import {
   harnessChainBlockedUntil,
   WorkerFailover,
   resetWorkerFailover,
+  runHarnessForRecording,
   runWithFailover,
   startWorkerFailover,
 } from "../src/lib/worker/failover";
@@ -238,6 +239,30 @@ describe("runWithFailover", () => {
         harnessPin: "codex",
       }),
     ).toBe("deferred");
+  });
+});
+
+describe("runHarnessForRecording", () => {
+  test("uses the active failover entry instead of the configured primary", async () => {
+    const failover = await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "claude-code,codex",
+      log: () => {},
+    });
+    failover.reportFromHint({ untilMs: Date.now() + 60_000 }, "claude-code");
+    expect(failover.activeName).toBe("codex");
+    expect(runHarnessForRecording()).toBe("codex");
+  });
+
+  test("prefers the harness a job pinned", async () => {
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "claude-code,codex",
+      log: () => {},
+    });
+    expect(runHarnessForRecording("grok")).toBe("grok");
   });
 });
 

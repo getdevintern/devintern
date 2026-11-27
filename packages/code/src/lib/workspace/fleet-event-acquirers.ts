@@ -13,10 +13,11 @@ import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { createGatedFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
 import { relayMentionGitHub, reviewFeedGitHub } from "./fleet-mention-github";
 import type { TrackerDependencyGate } from "./tracker-dependency-gate";
-import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
+import { assertTeamPrSyncSandbox, teamAutoMergeSlugs, teamPrSyncSlugs } from "./team-pr-sync";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
 import type { TaskSupervisor } from "../worker/supervisor";
+import { runHarnessForRecording } from "../worker/failover";
 import type { TaskTrackerClient } from "../trackers/client";
 
 type FleetGitHubClient = import("../code-host/github/reviews").GitHubReviewsClient;
@@ -243,9 +244,9 @@ async function buildAutoMergeWatcher(params: {
   const { config, gh, workspaceDir } = params;
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
     await import("../acquirers/auto-merge-watcher");
-  const { parseHarnessList } = await import("@devintern/agent-harness");
   const { isGitHubNotFound } = await import("../code-host/github/github-errors");
   const { fleetAutoMergePolicyFingerprint } = await import("./fleet-events");
+  const { OPEN_PR_LIST_PAGE_SIZE } = await import("../acquirers/team-pr-sweep");
   const settings = config.workspace.autoMerge;
   if (
     settings.enabled &&
@@ -274,15 +275,31 @@ async function buildAutoMergeWatcher(params: {
     },
     mergePr: params.mergePr,
     runStore: params.runStore,
-    // Only a run that can reach the agent review names a harness.
+    // Only a run that can reach the agent review names a harness: the pinned
+    // review agent, otherwise the failover entry that is active right now.
     harness: () =>
       config.workspace.autoMerge.review
-        ? (config.workspace.autoMerge.agent?.harness ??
-          parseHarnessList(process.env.AGENT_HARNESS)[0])
+        ? runHarnessForRecording(config.workspace.autoMerge.agent?.harness)
         : undefined,
     policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug, workspaceDir),
     recheckOnPush: () => config.workspace.autoMerge.recheckOnPush,
     isStackedBase: params.isStackedBase,
+    // Factory form: reloads toggling `auto_merge_team_prs` apply next tick.
+    teamPrRepos: () => teamAutoMergeSlugs(config),
+    listOpenPullRequests: async (repo, etag) => {
+      const [owner = "", name = ""] = repo.split("/");
+      try {
+        return await gh(repo).conditionalGet(
+          `/repos/${repo}/pulls?state=open&per_page=${OPEN_PR_LIST_PAGE_SIZE}`,
+          owner,
+          name,
+          etag,
+        );
+      } catch (error) {
+        if (isGitHubNotFound(error)) return { data: null, notModified: false, gone: true };
+        throw error;
+      }
+    },
     quietSeconds: parseEnvInteger(
       "WORKER_AUTO_MERGE_QUIET_SECONDS",
       DEFAULT_AUTO_MERGE_QUIET_SECONDS,
@@ -542,6 +559,8 @@ export async function buildFleetEventAcquirers(
       shouldPollFeedback,
       workerState: state.workerState,
       queue: state.queue,
+      // Read at run time so a live reload of the conflict agent applies.
+      harness: () => config.workspace.conflictAgent?.harness,
       github: {
         fetchPr: async (repo, n, etag) => {
           try {

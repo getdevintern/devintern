@@ -4,7 +4,7 @@ sidebarLabel: "Quick Start"
 description: "Use when installing DevIntern Code for the first time: set up a worker that turns ready tracker tickets into pull requests, or run one task by hand."
 section: "Automation"
 order: 0
-dateModified: 2026-11-26
+dateModified: 2026-11-27
 tags: ["devintern/code", "quick start", "worker", "jira", "github", "cli"]
 ---
 
@@ -25,7 +25,24 @@ Prefer to set up from a chat? Install the [devintern-setup skill](agent-skills.m
 
 ## 1. Install
 
-Install [Bun](https://bun.sh). On Debian and Ubuntu, the Bun installer needs `unzip`:
+Install DevIntern Code with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh
+```
+
+The script installs [Bun](https://bun.sh) if it is missing, installs `@getdevintern/code` globally, adds `~/.bun/bin` to your shell profile, and prints the installed version. It is safe to re-run and upgrades DevIntern to the latest version. As root it installs missing system packages such as `unzip`; otherwise it prints the `sudo` command and stops. It never runs `sudo` itself. Set `DEVINTERN_VERSION` to install a specific version, or `DEVINTERN_NO_MODIFY_PATH=1` to leave your shell profile alone.
+
+Then install and sign in to a coding agent:
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash   # Claude Code, the default agent
+claude                                           # sign in once, then exit
+```
+
+### Install manually
+
+Install Bun. On Debian and Ubuntu, the Bun installer needs `unzip`:
 
 ```bash
 sudo apt-get install -y unzip   # Debian/Ubuntu only
@@ -47,14 +64,14 @@ claude                                           # sign in once, then exit
 In your project's checkout:
 
 ```bash
-devintern worker init
+devintern init
 ```
 
-You don't need to run `devintern init` first; if you already did, the wizard reuses the tracker settings it saved. The wizard asks for:
+In a checkout that is not set up yet, it first asks how you want to run tickets. Choose **1) Automatically with a worker** (the default) to start the worker setup; `devintern worker init` opens the same wizard directly. If you already set the repository up for manual runs, run `devintern worker init` here instead: it reuses the tracker settings it saved and turns the manual-only entry into a worker repository. The wizard first checks this machine: the agent CLI from step 1, git, and whether a background service can be installed. If the agent CLI or git is missing, it tells you right away how to install it, and you can continue anyway or stop. It then asks for:
 
 1. Your tracker and its token. It links to the page where you create the token and checks the connection.
-2. The ready-tasks query: which tickets the worker picks up, for example `is:open label:devintern` on GitHub Issues. Keep it narrow at first.
-3. "Use the recommended worker settings?": no CI repair, automatic conflict resolution, task pickup at any hour, and no Sentry project. Answer `n` to choose each one.
+2. The ready-tasks query: which tickets the worker picks up. Press Enter to pick up open tickets labeled `devintern` (for example `is:open label:devintern` on GitHub Issues), or type your own query; keep it narrow at first. On GitHub and GitLab it offers to create the `devintern` label if it is missing.
+3. Nothing about worker settings: a new workspace gets the recommended ones (no CI repair, automatic conflict resolution, task pickup at any hour, no Sentry project). Change them in `~/.devintern/workspace.toml`, or run `devintern worker init --customize` to choose each one and add a Sentry project.
 4. Sign-in, which starts the [14-day free Worker Pilot](./worker.md#worker-pilot-and-licenses) (no card required) when you have no license. While it waits for the browser, press Enter to skip and sign in later with `devintern worker login github`.
 5. [Relay](./relay.md) pairing when you are signed in, so PR reviews reach the worker in seconds. Without it the worker polls.
 6. Installing the background service (step 3 below).
@@ -85,14 +102,14 @@ Make a ticket match your query, for example by adding the `devintern` label to a
 
 The run checks the ticket is clear enough, implements it, and opens a PR. Review the PR and leave comments; the worker pushes follow-up commits to the same branch. A ticket that is too vague gets questions on the tracker instead of a PR.
 
-Nothing picked up after a few minutes? Run `devintern worker doctor` and see [Worker Troubleshooting](./worker-troubleshooting.md).
+Nothing picked up after a few minutes? Run `devintern doctor` in the checkout (in a worker repository it runs the `devintern worker doctor` checks) and see [Worker Troubleshooting](./worker-troubleshooting.md).
 
 ## Run one task by hand
 
-To try one task without a worker, run the per-repository setup in your checkout. Interactive runs are free and need no sign-in.
+To try one task without a worker, run `devintern init` in your checkout and choose **2) By hand from this terminal**. Interactive runs are free and need no sign-in.
 
 ```bash
-devintern init      # connect a tracker, or choose Markdown files
+devintern init      # choose 2, then connect a tracker or choose Markdown files
 devintern doctor    # check that everything is wired up
 ```
 

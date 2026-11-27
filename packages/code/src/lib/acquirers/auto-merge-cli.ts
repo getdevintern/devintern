@@ -9,8 +9,6 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { resetHintToMs } from "@devintern/agent-harness";
-
 import { pinnedHarnessChildEnv } from "../agent/selection";
 import { childOutputMode, forwardChildOutput } from "../observability/child-output";
 import { harnessLogRunEnv } from "../observability/harness-logs";
@@ -21,13 +19,11 @@ import { getWorkerFailover, runWithFailover } from "../worker/failover";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
   HARNESS_UNAVAILABLE_EXIT_CODE,
-  RATE_LIMIT_FALLBACK_MS,
-  RATE_LIMIT_PERIOD_FLOOR_MS,
   readUsageLimitHint,
+  usageLimitRetryAt,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
 } from "../worker/usage-limit-protocol";
-import type { UsageLimitHint } from "../worker/usage-limit-protocol";
 import { serializePrRun } from "./review-polling";
 
 /** Default wall-clock budget for one auto-merge subprocess (review included). */
@@ -69,6 +65,7 @@ export function autoMergeCliArgs(
     ...(policy.review ? [] : ["--no-review"]),
     ...(policy.recheckOnPush === false ? ["--no-recheck-on-push"] : []),
     ...(policy.requireChecks ? ["--require-checks"] : []),
+    ...(policy.requireApproval ? ["--require-approval"] : []),
     ...(policy.reviewPolicy ? ["--policy", policy.reviewPolicy] : []),
     // `=` form: the text may start with "-" (a bullet list).
     ...(policy.reviewInstructions ? [`--review-instructions=${policy.reviewInstructions}`] : []),
@@ -121,6 +118,7 @@ export function parseAutoMergeResultLine(output: string): AutoMergeResult | null
         ...(record.ciWait === true ? { ciWait: true } : {}),
         ...(isCiChecksProblem(record.ciWaitProblem) ? { ciWaitProblem: record.ciWaitProblem } : {}),
         ...(record.ciChecksUnread === true ? { ciChecksUnread: true } : {}),
+        ...(record.approvalWait === true ? { approvalWait: true } : {}),
       };
     }
   }
@@ -198,14 +196,6 @@ function spawnOnce(
       finish(1);
     });
   });
-}
-
-/** When a limited harness's quota returns, from the child's hint file. */
-export function usageLimitRetryAt(hint: UsageLimitHint, now: number): number {
-  if (hint.untilMs && hint.untilMs > now) return hint.untilMs;
-  const parsed = resetHintToMs(hint.resetsAt, now);
-  if (parsed !== null && parsed > now) return parsed;
-  return now + (hint.period ? RATE_LIMIT_PERIOD_FLOOR_MS[hint.period] : RATE_LIMIT_FALLBACK_MS);
 }
 
 /** Earliest instant a usage-limited harness in the failover chain returns. */
