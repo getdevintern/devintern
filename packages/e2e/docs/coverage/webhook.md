@@ -43,24 +43,48 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: External dependency: GitLab Pipeline Hook and Job Hook payloads; MR, pipelines, pipeline jobs, commit statuses and job trace REST API
 - Status: `default`
 - Evidence: `tests/local/webhook-gitlab-ci-sync.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: A real GitLab instance; failing external commit statuses (served empty) and `allow_failure` jobs; several failed jobs or paginated job lists; a failed or usage-limited repair run; a Job Hook for a stale SHA.
-- Last reviewed: 2026-11-24
+- Missing: A real GitLab instance; failing external commit statuses (served empty) and `allow_failure` jobs; several failed jobs or paginated job lists; a failed or usage-limited repair run. Stale-SHA Job and Pipeline Hooks are in the stale-head row below.
+- Last reviewed: 2026-11-27
 
 ### webhook serve: signed GitLab MR conflict delivery runs conflict resolution
 
 - Surface: External dependency: GitLab Merge Request Hook `detailed_merge_status` payloads and MR mergeability REST API
 - Status: `default`
 - Evidence: `tests/local/webhook-gitlab-ci-sync.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: A real GitLab instance; `merge_status: cannot_be_merged` without `detailed_merge_status`; a stale `last_commit` SHA; a conflict the agent cannot resolve.
-- Last reviewed: 2026-11-24
+- Missing: A real GitLab instance; a conflict the agent cannot resolve. Legacy `merge_status` and a stale `last_commit` SHA are in the rows below.
+- Last reviewed: 2026-11-27
 
 ### webhook serve: GitLab `X-Gitlab-Token` shared-secret mode on the review path
 
 - Surface: External dependency: GitLab webhook secret-token header
 - Status: `default`
 - Evidence: `tests/local/webhook-gitlab-ci-sync.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: A real GitLab instance; both `GITLAB_WEBHOOK_SECRET` and `GITLAB_WEBHOOK_SIGNING_TOKEN` configured at once.
-- Last reviewed: 2026-11-24
+- Missing: A real GitLab instance. Both secrets configured at once is the next row.
+- Last reviewed: 2026-11-27
+
+### webhook serve: both `GITLAB_WEBHOOK_SECRET` and `GITLAB_WEBHOOK_SIGNING_TOKEN` configured, no downgrade from a forged signature
+
+- Surface: External dependency: GitLab webhooks (Self-Managed and GitLab.com)
+- Status: `default`
+- Evidence: `tests/local/webhook-gitlab-delivery-drift.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: A real GitLab instance; a stale or malformed `webhook-timestamp` together with a valid `X-Gitlab-Token` (only a wrong HMAC is sent).
+- Last reviewed: 2026-11-27
+
+### webhook serve: legacy `merge_status: cannot_be_merged` (no `detailed_merge_status`) runs conflict resolution
+
+- Surface: External dependency: GitLab webhooks (Self-Managed and GitLab.com)
+- Status: `default`
+- Evidence: `tests/local/webhook-gitlab-delivery-drift.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: A real older GitLab Self-Managed instance (the payload shape is pinned only by the test's builder); legacy `merge_status` values other than `cannot_be_merged` / `can_be_merged` (for example `unchecked`).
+- Last reviewed: 2026-11-27
+
+### webhook serve: conflict and Job/Pipeline deliveries for a stale head SHA run nothing
+
+- Surface: External dependency: GitLab webhooks (Self-Managed and GitLab.com)
+- Status: `default`
+- Evidence: `tests/local/webhook-gitlab-delivery-drift.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: A real GitLab instance; a stale delivery for an MR that is no longer `opened` on the forge (the other branch of the same guard); a stale `need_rebase` delivery.
+- Last reviewed: 2026-11-27
 
 ## Backlog
 
@@ -203,3 +227,43 @@ bun run --filter @devintern/e2e test
 Isolation and cleanup match the review test. The webhook secret, forge token,
 shared token and a wrong token are random per run. Tests assert that none of
 them appears in server output, raw or URL-encoded.
+
+### GitLab secret precedence, legacy `merge_status` and stale-SHA deliveries
+
+`tests/local/webhook-gitlab-delivery-drift.test.ts` reuses the same setup for
+payload and auth shapes that differ between GitLab versions. It needs only the
+built CLI and runs in the default offline suite:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+- Both secrets configured (`GITLAB_WEBHOOK_SECRET` and
+  `GITLAB_WEBHOOK_SIGNING_TOKEN`): a delivery signed with a random unknown
+  `whsec_` secret is rejected with 401 even when it also carries the correct
+  `X-Gitlab-Token`. The same goes for a forged signature alone and for a
+  delivery with neither header. None of them makes a forge request, an agent
+  run or a queue row. A token-only delivery with the right token is accepted
+  and settled. A correctly signed note on the registered MR runs
+  address-review. The forged-signature-plus-token delivery is still refused
+  after that run.
+- Legacy mergeability: Merge Request Hooks built by `mergeabilityHook` with
+  `legacyOnly`, so they carry `merge_status` and no `detailed_merge_status`.
+  `can_be_merged` is acknowledged with no forge request or agent run.
+  `cannot_be_merged` on a branch that really conflicts runs one
+  conflict-resolution run, with the same merge-commit and fast-forward checks
+  as the `detailed_merge_status: conflict` test.
+- Stale head SHA: `advanceAgentBranch` pushes a commit to the MR branch through
+  a throwaway clone, so the fake forge reports a newer head. A conflict Merge
+  Request Hook, a failed Job Hook and a failed Pipeline Hook that name the old
+  SHA are each accepted (200, one matched MR) and settle. The MR is read, but
+  no CI data is fetched, no agent runs, and nothing is pushed or written. The
+  same conflict delivery or failed Job Hook naming the current head then runs
+  conflict resolution or CI repair, which shows the head-SHA guard is what
+  skipped the stale ones. For the CI case, `FakeGitlabForge.setCiSha` moves the
+  served failed pipeline to the new head.
+
+Waits poll the delivery dedupe row in the state database, never a fixed timer.
+Isolation, random credentials, the no-secret-in-output assertions and cleanup
+match the tests above.
