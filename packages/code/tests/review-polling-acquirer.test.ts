@@ -5,6 +5,8 @@ import { tmpdir } from "os";
 import { Database } from "bun:sqlite";
 
 import { listNotifications } from "../src/lib/notifications/store";
+import { baseSyncExhaustedGroupKey } from "../src/lib/notifications/base-sync";
+import { NotificationEmitter } from "../src/lib/notifications/emitter";
 
 import {
   baseSyncRetryBackoffMs,
@@ -626,6 +628,51 @@ describe("ReviewPollingAcquirer", () => {
     gh.mergeableState = "behind";
     await acquirer.tick();
     expect(resolved).toEqual(["acme/widgets#42"]);
+  });
+
+  test("an unknown or missing mergeability never clears a restart-exhaustion row", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = { ...conflictGh(), mergeableState: "unknown" };
+    const { acquirer } = makeAcquirer(gh);
+    await acquirer.tick();
+
+    const writer = new Database(dbPath);
+    try {
+      new NotificationEmitter(writer).emit({
+        kind: "escalated",
+        severity: "high",
+        groupKey: baseSyncExhaustedGroupKey("acme/widgets", 42),
+        title: "Conflict resolution keeps getting cut off",
+      });
+    } finally {
+      writer.close();
+    }
+
+    const unresolvedEscalations = (): number => {
+      const reader = new Database(dbPath);
+      try {
+        return listNotifications(reader, {
+          unresolved: true,
+          includeMuted: true,
+        }).notifications.filter((notification) => notification.kind === "escalated").length;
+      } finally {
+        reader.close();
+      }
+    };
+
+    // GitHub is still recomputing: the PR may still conflict, so wait.
+    await acquirer.tick();
+    expect(unresolvedEscalations()).toBe(1);
+
+    // A payload gap cannot prove the conflict is gone either.
+    gh.mergeableState = undefined;
+    await acquirer.tick();
+    expect(unresolvedEscalations()).toBe(1);
+
+    // Only a definitive verdict clears it.
+    gh.mergeableState = "clean";
+    await acquirer.tick();
+    expect(unresolvedEscalations()).toBe(0);
   });
 
   test("a fork PR is terminally skipped without invoking the resolver", async () => {
@@ -1411,11 +1458,40 @@ describe("ReviewPollingAcquirer", () => {
     await made.acquirer.tick();
     expect(made.resolved).toEqual([]);
 
+    // Model an earlier restart loop that exhausted the automatic base sync.
+    const writer = new Database(dbPath);
+    try {
+      new NotificationEmitter(writer, () => now).emit({
+        kind: "escalated",
+        severity: "high",
+        groupKey: baseSyncExhaustedGroupKey("acme/widgets", 42),
+        title: "Conflict resolution keeps getting cut off",
+      });
+      expect(
+        listNotifications(writer, { unresolved: true, includeMuted: true }).notifications.filter(
+          (notification) => notification.kind === "escalated",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      writer.close();
+    }
+
     // Someone (e.g. `devintern resolve-conflicts <pr-url>`) fixed it out of band.
     gh.mergeableState = "clean";
     now += DAY_MS + 1;
     await made.acquirer.tick();
     expect(made.resolved).toEqual([]);
+
+    const reader = new Database(dbPath);
+    try {
+      expect(
+        listNotifications(reader, { unresolved: true, includeMuted: true }).notifications.filter(
+          (notification) => notification.kind === "escalated",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      reader.close();
+    }
   });
 
   const MIN = 60_000;
@@ -2257,6 +2333,32 @@ describe("ReviewPollingAcquirer team-PR base sync (sync_team_prs)", () => {
     return { acquirer, addressed, resolved };
   }
 
+  function emitEscalation(prNumber: number): void {
+    const writer = new Database(dbPath);
+    try {
+      new NotificationEmitter(writer).emit({
+        kind: "escalated",
+        severity: "high",
+        groupKey: baseSyncExhaustedGroupKey(REPO, prNumber),
+        title: "Conflict resolution keeps getting cut off",
+      });
+    } finally {
+      writer.close();
+    }
+  }
+
+  function unresolvedEscalations(): number {
+    const reader = new Database(dbPath);
+    try {
+      return listNotifications(reader, {
+        unresolved: true,
+        includeMuted: true,
+      }).notifications.filter((notification) => notification.kind === "escalated").length;
+    } finally {
+      reader.close();
+    }
+  }
+
   test("default off: no repo opted in sends no discovery requests", async () => {
     workerState.recordAgentPr({ repo: REPO, prNumber: 42 });
     for (const syncTeamPrsRepos of [undefined, [] as string[]]) {
@@ -2293,6 +2395,107 @@ describe("ReviewPollingAcquirer team-PR base sync (sync_team_prs)", () => {
     // Deduped by base/head like the agent's own PRs.
     await made.acquirer.tick();
     expect(made.resolved).toEqual([`${REPO}#7`]);
+  });
+
+  test("a teammate PR leaving the open list clears its exhaustion row", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+    await made.acquirer.tick();
+
+    // Model an earlier restart loop that exhausted the automatic base sync.
+    const writer = new Database(dbPath);
+    try {
+      new NotificationEmitter(writer).emit({
+        kind: "escalated",
+        severity: "high",
+        groupKey: baseSyncExhaustedGroupKey(REPO, 7),
+        title: "Conflict resolution keeps getting cut off",
+      });
+    } finally {
+      writer.close();
+    }
+
+    // Closed/merged: the PR drops out of the open list.
+    gh.prs.delete(7);
+    gh.version += 1;
+    await made.acquirer.tick();
+
+    const reader = new Database(dbPath);
+    try {
+      expect(
+        listNotifications(reader, { unresolved: true, includeMuted: true }).notifications.filter(
+          (notification) => notification.kind === "escalated",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      reader.close();
+    }
+  });
+
+  test("a team sweep does not clear an own PR's exhaustion row", async () => {
+    workerState.recordAgentPr({ repo: REPO, prNumber: 42 });
+    const gh = new TeamGitHub();
+    // GitHub is recomputing, so the main poller leaves the row alone and the
+    // team sweep is the only path that could clear it this tick.
+    gh.add({ number: 42, association: "MEMBER", mergeable: "unknown" });
+    const made = make(gh);
+    emitEscalation(42);
+
+    await made.acquirer.tick();
+
+    // The main poller owns the PR and may have base-synced it, but the
+    // restart-exhaustion row is not cleared by merely seeing it in the sweep.
+    expect(gh.listCalls.length).toBeGreaterThan(0);
+    expect(unresolvedEscalations()).toBe(1);
+  });
+
+  test("an unusable fresh PR state keeps the teammate escalation row", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+    await made.acquirer.tick();
+    emitEscalation(7);
+
+    // A transient payload gap must not read as "not open".
+    gh.listOverride = [{ number: 7, author_association: "MEMBER" }];
+    gh.prs.get(7)!.state = "";
+    gh.version += 1;
+    await made.acquirer.tick();
+
+    expect(unresolvedEscalations()).toBe(1);
+  });
+
+  test("a missing fresh author association keeps the teammate escalation row", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+    await made.acquirer.tick();
+    emitEscalation(7);
+
+    // The list still identifies a teammate; the per-PR payload is incomplete.
+    gh.listOverride = [{ number: 7, author_association: "MEMBER" }];
+    gh.prs.get(7)!.association = undefined;
+    gh.version += 1;
+    await made.acquirer.tick();
+
+    expect(unresolvedEscalations()).toBe(1);
+  });
+
+  test("a missing list association keeps the teammate escalation row", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+    await made.acquirer.tick();
+    emitEscalation(7);
+
+    // The list payload itself lost the association; that cannot prove the PR
+    // left the team, so the escalation row must survive.
+    gh.listOverride = [{ number: 7 }];
+    gh.version += 1;
+    await made.acquirer.tick();
+
+    expect(unresolvedEscalations()).toBe(1);
   });
 
   test("non-team authors are skipped at discovery and logged once", async () => {

@@ -31,7 +31,11 @@ import {
 } from "./run-outputs";
 import type { RunOutputRecord, StoredRunOutput } from "./run-outputs";
 import { notifyRunFinished } from "../notifications/run-rules";
-import { ORPHANED_FOLLOW_UP_REASON, settleOrphanedFollowUps } from "./orphaned-follow-ups";
+import {
+  notifyOrphanedBaseSyncExhausted,
+  ORPHANED_FOLLOW_UP_REASON,
+  settleOrphanedFollowUps,
+} from "./orphaned-follow-ups";
 import { isRunOutcomeClass, isRunWorkStatus } from "./run-outcome";
 import type { RunFailure, RunOutcomeClass, RunWork, RunWorkStatus } from "./run-outcome";
 import type { RunFinishRuleOptions } from "../notifications/run-rules";
@@ -694,7 +698,7 @@ export class RunStore {
   reapOrphanedRunIds(options: ReapOrphanedRunsOptions = {}): number[] {
     const reason = ORPHANED_FOLLOW_UP_REASON;
     const now = options.now ?? Date.now();
-    const reapedIds = this.db
+    const { reapedIds, exhausted } = this.db
       .transaction(() => {
         // Select inside the immediate transaction and update per id so a
         // concurrent writer (an outlived subprocess committing `finishRun`)
@@ -723,21 +727,18 @@ export class RunStore {
             ids.push(orphan.id);
           }
         }
-        return ids;
+        // Settle the consumed attempt here so a crash cannot split the two.
+        const reapedRuns = ids.flatMap((id) => this.getRun(id) ?? []);
+        const settled = settleOrphanedFollowUps(this.db, reapedRuns, {
+          now,
+          notify: false,
+          ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
+        });
+        return { reapedIds: ids, exhausted: settled };
       })
       .immediate();
-    // An automatic per-PR attempt was already consumed before its resolver
-    // started, so finish that event's failure bookkeeping now: the orphaned
-    // attempt must wait out the retry backoff and count toward exhaustion.
-    // Settle before notifications so the clear exhausted outcome is recorded
-    // on the run first.
-    const reapedRuns = reapedIds
-      .map((id) => this.getRun(id))
-      .filter((run): run is RunRecord => run !== null);
-    settleOrphanedFollowUps(this.db, reapedRuns, {
-      now,
-      ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
-    });
+    // Notifications after the commit, so listeners never see uncommitted work.
+    notifyOrphanedBaseSyncExhausted(this.db, exhausted, now);
     // Reaped runs never reached `endRun`, so their outputs files are still on disk.
     this.ingestSettledRunOutputs();
     // A reaped run is a failed run nothing retried: evaluate the finish rules

@@ -21,6 +21,7 @@ import {
 } from "../src/lib/state/run-recorder";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
+import { settleInProgressCiFixRun } from "../src/lib/state/orphaned-follow-ups";
 import { listNotifications } from "../src/lib/notifications/store";
 
 describe("RunStore", () => {
@@ -232,6 +233,52 @@ describe("RunStore", () => {
     }
   });
 
+  test("a pending base-sync event that opened after the orphaned run is left alone", () => {
+    const queue = new WebhookQueue({ dbPath });
+    const repo = "acme/widgets";
+    const oldId = "base-sync:acme/widgets#42:base1:head1";
+    const newId = "base-sync:acme/widgets#42:base1:head2";
+    try {
+      queue.observeBaseSyncEvent({
+        externalId: oldId,
+        repo,
+        prNumber: 42,
+        baseSha: "base1",
+        headSha: "head1",
+        now: 1_750_000_000_000,
+      });
+      queue.beginBaseSyncAttempt(oldId, 1_750_000_000_000);
+      const runId = store.createRun({
+        origin: "conflict_resolution",
+        repo,
+        prNumber: 42,
+        attempt: 1,
+      });
+      const startedAt = store.getRun(runId)!.startedAt;
+      // The dead worker's run was for head1; a later push opened a fresh
+      // event for head2 after that run started.
+      queue.observeBaseSyncEvent({
+        externalId: newId,
+        repo,
+        prNumber: 42,
+        baseSha: "base1",
+        headSha: "head2",
+        now: startedAt + 1_000,
+      });
+      const before = queue.getBaseSyncEvent(newId);
+
+      store.reapOrphanedRunIds({ maxRetries: 3, now: startedAt + 60_000 });
+
+      const after = queue.getBaseSyncEvent(newId);
+      expect(after?.status).toBe("pending");
+      expect(after?.attempts).toBe(0);
+      expect(after?.lastError).toBeUndefined();
+      expect(after?.updatedAt).toBe(before?.updatedAt);
+    } finally {
+      queue.close();
+    }
+  });
+
   test("orphaned CI fix attempts consume the PR's autofix budget", () => {
     const workerState = new WorkerState(dbPath);
     try {
@@ -245,6 +292,30 @@ describe("RunStore", () => {
         store.reapOrphanedRunIds({ maxRetries: 3, now: 1_750_000_000_000 + attempt });
       }
       expect(workerState.getCiFixState("acme/widgets", 42).consecutiveFailures).toBe(2);
+    } finally {
+      workerState.close();
+    }
+  });
+
+  test("a parent-settled CI fix run is not counted again at restart", () => {
+    const workerState = new WorkerState(dbPath);
+    try {
+      const runId = store.createRun({ origin: "ci_fix", repo: "acme/widgets", prNumber: 42 });
+      // The watcher records the failed attempt in the PR's budget...
+      workerState.setCiFixState("acme/widgets", 42, { consecutiveFailures: 1 });
+      // ...and the child was killed, so the parent settles the open run.
+      expect(
+        settleInProgressCiFixRun(store, "acme/widgets", 42, "CI fix attempt did not complete"),
+      ).toEqual([runId]);
+      expect(store.getRun(runId)?.status).toBe("failed");
+
+      // A restart reaps nothing, so the single failure is not counted twice.
+      expect(store.reapOrphanedRunIds({ maxRetries: 3 })).toEqual([]);
+      expect(workerState.getCiFixState("acme/widgets", 42).consecutiveFailures).toBe(1);
+      // Repeated settlement is a no-op.
+      expect(
+        settleInProgressCiFixRun(store, "acme/widgets", 42, "CI fix attempt did not complete"),
+      ).toEqual([]);
     } finally {
       workerState.close();
     }

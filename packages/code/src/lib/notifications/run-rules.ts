@@ -38,7 +38,7 @@ import type { Database } from "bun:sqlite";
 
 import { findInjectedTaskOutputParent, listRunOutputs } from "../state/run-outputs";
 import type { TrackerIssueOutput } from "../state/run-outputs";
-import { baseSyncExhaustedGroupKey } from "../state/orphaned-follow-ups";
+import { baseSyncExhaustedGroupKey } from "./base-sync";
 import { NotificationEmitter, safely } from "./emitter";
 import { hasTable } from "./store";
 import type { Notification, NotificationLink } from "./types";
