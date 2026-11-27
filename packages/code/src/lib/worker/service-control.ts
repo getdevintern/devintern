@@ -35,6 +35,7 @@ import type {
   ServiceInstallResult,
   WorkerServiceDeps,
 } from "./service";
+import type { MemoryBudgetPercentages } from "./memory-budget";
 
 const UNIT = "devintern-worker";
 
@@ -371,6 +372,8 @@ export async function installAndStartWorkerService(
     execPath: string;
     runtimePath?: string;
     environmentPath?: string;
+    /** Host-memory percentages written into the systemd unit (Linux only). */
+    memory?: MemoryBudgetPercentages;
     /** 0 skips the start check. */
     waitMs?: number;
     now?: () => number;
@@ -386,6 +389,7 @@ export async function installAndStartWorkerService(
       execPath: options.execPath,
       runtimePath: options.runtimePath,
       environmentPath: options.environmentPath,
+      ...(options.memory ? { memory: options.memory } : {}),
     },
     deps,
   );

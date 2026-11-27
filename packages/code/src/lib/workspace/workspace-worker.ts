@@ -69,6 +69,7 @@ import { EstimationAcquirer } from "../automation/estimation-acquirer";
 import { composeScheduledJobActions } from "../automation/scheduled-jobs";
 import { warnUninstalledHarnessPins } from "../agent/selection";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
+import { hostMemorySupervisorOptions } from "../worker/host-memory";
 import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
@@ -948,10 +949,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const notificationDelivery = startNotificationMaintenance(state.dbPath, () => config);
   await startLoggedWorkerFailover(state.queue);
   const repoManager = new RepoManager(workspaceDir);
-  const supervisor = createTaskSupervisor({
-    maxConcurrency: config.workspace.execution.maxConcurrency,
-    maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
-  });
+  const supervisor = createTaskSupervisor(
+    {
+      maxConcurrency: config.workspace.execution.maxConcurrency,
+      maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
+    },
+    hostMemorySupervisorOptions(),
+  );
   const orphanRecovery = await recoverOrphanedWorkspaceRuns({
     config,
     workspaceDir,
