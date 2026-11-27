@@ -12,11 +12,16 @@ import path from "path";
 
 import { LoginSkippedError } from "@devintern/auth";
 
-import { isPromptAbort, promptInterruptedError } from "../src/lib/cli/prompt-abort";
+import {
+  isPromptAbort,
+  isPromptAbortReported,
+  promptInterruptedError,
+} from "../src/lib/cli/prompt-abort";
 import {
   defaultEnsureTracker,
   describeCustomWorkerSettings,
   describeQueryFailure,
+  reportWorkerInitAbort,
   runWorkerInit,
 } from "../src/lib/init/worker-init";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
@@ -185,10 +190,25 @@ describe("worker init onboarding", () => {
         (caught: unknown) => caught,
       );
       expect(isPromptAbort(error)).toBe(true);
-      const all = logs.join("\n");
+      // The wizard marked it, so the CLI does not add a second "setup stopped" line.
+      expect(isPromptAbortReported(error)).toBe(true);
+      const cliLines: string[] = [];
+      expect(reportWorkerInitAbort(error, (line) => cliLines.push(line))).toBe(1);
+      const all = [...logs, ...cliLines].join("\n");
       expect(all).toContain("Setup paused. Your answers so far are saved in");
       expect(all).toContain(path.join(workspaceDir, "workspace.toml"));
       expect(all).toContain("run `devintern worker init` to continue");
+      expect(all).not.toContain("setup stopped");
+    });
+
+    test("an abort the wizard could not explain gets the generic closing line", () => {
+      const cliLines: string[] = [];
+      expect(reportWorkerInitAbort(promptInterruptedError(), (line) => cliLines.push(line))).toBe(
+        1,
+      );
+      const all = cliLines.join("\n");
+      expect(all).toContain("Interrupted (Ctrl+C); setup stopped. Re-run `devintern worker init`.");
+      expect(all).not.toContain("Setup paused");
     });
   });
 

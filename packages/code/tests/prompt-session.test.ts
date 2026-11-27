@@ -5,7 +5,9 @@ import { stdinClosedError } from "@devintern/auth";
 
 import {
   isPromptAbort,
+  isPromptAbortReported,
   isPromptInterrupt,
+  markPromptAbortReported,
   promptAbortReason,
   promptInterruptedError,
 } from "../src/lib/cli/prompt-abort";
@@ -33,6 +35,14 @@ describe("prompt abort reasons", () => {
     expect(isPromptAbort(closed)).toBe(true);
     expect(isPromptInterrupt(closed)).toBe(false);
     expect(promptAbortReason(closed)).toBe("Input closed (Ctrl+D)");
+  });
+
+  test("a reported abort is not explained twice by the caller", () => {
+    const interrupted = promptInterruptedError();
+    expect(isPromptAbortReported(interrupted)).toBe(false);
+    markPromptAbortReported(interrupted);
+    expect(isPromptAbortReported(interrupted)).toBe(true);
+    expect(isPromptAbortReported(promptInterruptedError())).toBe(false);
   });
 });
 
