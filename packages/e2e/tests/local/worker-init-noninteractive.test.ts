@@ -181,10 +181,12 @@ cliTest(
   async () => {
     await withFixture(async (fixture) => {
       // Missing flags, text mode: every missing flag and variable in one line.
+      // Jira has a default query (open tickets labeled `devintern`), so
+      // `--task-query` is not among them.
       expectInputError(
         fixture,
         await fixture.run(["worker", "init", "--non-interactive", "--tracker", "jira"]),
-        "missing: --task-query, JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN.",
+        "missing: JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN.",
       );
 
       // Missing flags, JSON mode: the error is in the document, stderr stays empty.
@@ -464,6 +466,30 @@ cliTest(
     });
   },
   240_000,
+);
+
+cliTest(
+  "worker init --non-interactive --start: with only sign-in left it records the intent and shrinks the next steps",
+  async () => {
+    await withFixture(async (fixture) => {
+      const result = await fixture.init(["--start", "--json"], {
+        env: { DEVINTERN_SKIP_LICENSE_CHECK: "0" },
+      });
+      expect(result.exitCode, result.stdout + result.stderr).toBe(2);
+      expectNoStackTrace(result);
+      const report = parseReport(result.stdout);
+      expect(report.result).toBe("action_required");
+      expect(report.start).toEqual({ result: "after_sign_in" });
+      // The completing `worker login` pairs the relay and starts the service,
+      // so neither is a separate step.
+      expect(report.nextSteps.map((step) => step.id)).toEqual(["sign-in"]);
+      const intentPath = join(fixture.workspaceDir, "state", "code", "start-after-sign-in.json");
+      expect(existsSync(intentPath)).toBe(true);
+      expect(JSON.parse(readFileSync(intentPath, "utf8"))).toMatchObject({ relay: true });
+      expect(fixture.workspaceFiles()).not.toContain("devintern-worker.service");
+    });
+  },
+  120_000,
 );
 
 cliTest(

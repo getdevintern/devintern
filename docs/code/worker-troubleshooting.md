@@ -162,6 +162,8 @@ In a multi-repo workspace, a task whose routing rules match no repository, or mo
 
 A run fails, and no PR is created, when it leaves nothing to publish (no changes and no new commits), fails pre-push validation, or cannot push its branch. Commits the agent made itself count as changes. The batch CLI's exit code is not a per-task result; check each run in the [dashboard](./dashboard.md). Its outcome class tells you whether the agent, your setup, or DevIntern itself stopped the run; see [Why a run did not succeed](./dashboard.md#why-a-run-did-not-succeed).
 
+If the remote refuses the push itself (the failure reads `Push of '<branch>' rejected by the remote`), DevIntern does not retry it with the hook-fix agent, because the rule lives on the server: branch protection, push protection for secrets, or the token's permissions. When the branch adds or changes a file under `.github/workflows/`, GitHub requires the push token to have the `workflow` scope (classic personal access token) or **Workflows** read and write permission (fine-grained token or GitHub App). Update the token, or keep the change out of `.github/workflows/`, then re-run the task. The unpushed work stays in the task's worktree.
+
 ## Reading logs and run data
 
 - The dashboard's **Logs** tab shows recent worker output ([details](./dashboard.md)).

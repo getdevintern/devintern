@@ -7,7 +7,7 @@
  * current repository, and tracker credentials (environment or a 0600
  * `--env-file`) are validated, saved atomically, and checked like
  * `devintern worker doctor`. Sign-in, relay pairing, and the background
- * service become next steps. This module parses the flags, finishes the
+ * service become next steps (`--start` installs the service). This module parses the flags, finishes the
  * report (rollback, next steps, result), and redacts secrets from it.
  */
 
@@ -41,6 +41,7 @@ import type {
   InitCheck,
   InitNextStep,
   InitResult,
+  InitStartResult,
   NonInteractiveInitArgs,
   NonInteractiveInitDeps,
   NonInteractiveInitReport,
@@ -62,6 +63,7 @@ export type {
   InitNextStep,
   InitRepo,
   InitResult,
+  InitStartResult,
   NonInteractiveInitArgs,
   NonInteractiveInitDeps,
   NonInteractiveInitReport,
@@ -82,6 +84,21 @@ export function initExitCode(result: InitResult): number {
 
 const USAGE_HINT = "Run `devintern worker init --help` for options.";
 
+/** Switches that set one boolean field of the parsed flags. */
+const BOOLEAN_FLAGS: Record<
+  string,
+  "repoFromCwd" | "json" | "yes" | "removeEnvFile" | "createLabel" | "start" | "noRelay"
+> = {
+  "--repo-from-cwd": "repoFromCwd",
+  "--json": "json",
+  "--yes": "yes",
+  "-y": "yes",
+  "--remove-env-file": "removeEnvFile",
+  "--create-label": "createLabel",
+  "--start": "start",
+  "--no-relay": "noRelay",
+};
+
 /** Parse result: flags, or one error message (`json` tells the caller how to print it). */
 export type ParseResult =
   | { ok: true; args: NonInteractiveInitArgs }
@@ -95,6 +112,7 @@ export type ParseResult =
 export function parseNonInteractiveInitArgs(argv: string[]): ParseResult {
   const args: NonInteractiveInitArgs = { repoFromCwd: false, json: false, yes: false };
   const json = argv.includes("--json");
+  let noService = false;
   const valueFlags: Record<string, "tracker" | "taskQuery" | "envFile"> = {
     "--tracker": "tracker",
     "--task-query": "taskQuery",
@@ -125,27 +143,17 @@ export function parseNonInteractiveInitArgs(argv: string[]): ParseResult {
     if (eq > 0) {
       return { ok: false, json, error: unknownOptionMessage(flag) };
     }
+    const booleanField = BOOLEAN_FLAGS[raw];
+    if (booleanField) {
+      args[booleanField] = true;
+      continue;
+    }
     switch (raw) {
       case "--non-interactive":
         break;
-      case "--repo-from-cwd":
-        args.repoFromCwd = true;
-        break;
-      case "--json":
-        args.json = true;
-        break;
-      case "--yes":
-      case "-y":
-        args.yes = true;
-        break;
-      case "--remove-env-file":
-        args.removeEnvFile = true;
-        break;
-      case "--create-label":
-        args.createLabel = true;
-        break;
       case "--no-service":
-        // Non-interactive init never installs the service; accepted for symmetry.
+        // Without --start non-interactive init never installs the service.
+        noService = true;
         break;
       case "--customize":
         return {
@@ -164,6 +172,9 @@ export function parseNonInteractiveInitArgs(argv: string[]): ParseResult {
             : `Unexpected argument: ${raw}. ${USAGE_HINT}`,
         };
     }
+  }
+  if (args.start && noService) {
+    return { ok: false, json, error: `--start and --no-service cannot be combined. ${USAGE_HINT}` };
   }
   if (args.removeEnvFile && !args.envFile) {
     return { ok: false, json, error: `--remove-env-file needs --env-file <path>. ${USAGE_HINT}` };
@@ -248,8 +259,8 @@ export function unexpectedFailureReport(
 }
 
 /**
- * Run non-interactive worker setup end to end. Never prompts, opens a
- * browser, installs a service, or starts the worker.
+ * Run non-interactive worker setup end to end. Never prompts or opens a
+ * browser; installs and starts the service only with `--start`.
  *
  * Re-running with the same flags changes nothing and reports `unchanged`. A
  * run whose tracker, query, or repository check fails restores what it
@@ -298,6 +309,7 @@ export async function runNonInteractiveWorkerInit(
 const INPUT_CHECKS = new Set([
   "tracker-auth",
   "credentials",
+  "github-token",
   "query",
   "repo",
   "workspace-config",
@@ -327,6 +339,8 @@ function finishReport(run: FlagsRun): void {
     signIn: report.signIn,
     checks: report.checks,
     relayConnected: run.outcome.relayConnected,
+    start: report.start?.result,
+    serviceSteps: report.service?.nextSteps ?? [],
     env: {
       ...run.processEnv,
       ...parseEnvFile(workspaceEnvPath(workspaceDir)),
@@ -350,6 +364,9 @@ function restoreWrites(run: FlagsRun): void {
   report.filesWritten = [];
   report.changed = false;
   report.persisted = problems.length > 0;
+  // The token went into the same rolled-back `.env`, so the report must not
+  // name a source for a token that is no longer saved.
+  delete report.tokenSource;
   report.warnings.push(
     problems.length === 0
       ? "Nothing was saved: the tracker or repository checks failed, so the files this run wrote were restored."
@@ -386,6 +403,10 @@ function nextStepsFor(options: {
   checks: readonly InitCheck[];
   /** The relay step found a pairing: no `connect` step. */
   relayConnected: boolean;
+  /** `--start` outcome: an installed (or deferred) service needs no `service` step. */
+  start?: InitStartResult;
+  /** Steps the `--start` install reported (e.g. check that the worker finished starting). */
+  serviceSteps: readonly InitNextStep[];
   /** Env the harness check resolved `AGENT_HARNESS` from. */
   env: Env;
   envFilePath?: string;
@@ -397,12 +418,19 @@ function nextStepsFor(options: {
   const failed = options.checks.some((check) => check.status === "fail");
   const rerun = initRerunCommand(args, ctx);
   const steps: InitNextStep[] = [];
+  // Completing the sign-in pairs the relay (unless --no-relay) and, with
+  // --start, installs and starts the service.
+  const afterSignIn = [
+    ...(args.noRelay ? [] : ["pairs the relay"]),
+    ...(options.start === "after_sign_in" ? ["installs and starts the worker service"] : []),
+  ];
   if (options.signIn) {
     steps.push({
       id: "complete-sign-in",
       message:
         "A person opens the sign-in url in any browser and signs in. The browser then lands on a " +
-        "127.0.0.1 page that does not load: pass that page's full address to this command on this host",
+        "127.0.0.1 page that does not load: pass that page's full address to this command on this host" +
+        (afterSignIn.length > 0 ? `. It also ${afterSignIn.join(" and ")}` : ""),
       command: options.signIn.complete,
       ...(options.signIn.url ? { url: options.signIn.url } : {}),
     });
@@ -419,6 +447,7 @@ function nextStepsFor(options: {
       env: options.env,
       home,
       which: options.which,
+      noRelay: args.noRelay,
       fixes: {
         credentials: initRerunCommand(args, ctx, {
           envFile: options.envFilePath ?? "<path>",
@@ -429,6 +458,20 @@ function nextStepsFor(options: {
       },
     }),
   );
+  // A non-GitHub tracker still runs without the optional PR token, so the
+  // warning comes with the same fix step a required credential failure uses.
+  if (
+    !failed &&
+    options.checks.some((check) => check.name === "github-token" && check.status === "warn")
+  ) {
+    steps.push({
+      id: "fix-credentials",
+      message:
+        "Optional: the GitHub CLI token was not saved. Add a GITHUB_TOKEN that can open pull " +
+        "requests to the workspace .env, or pass one with --env-file",
+      command: initRerunCommand(args, ctx, { envFile: options.envFilePath ?? "<path>" }),
+    });
+  }
   // Warn-only, so not a blocker above: a label the query names is missing.
   const missingLabel = options.checks.find(
     (check) => check.name === QUERY_LABELS_CHECK && check.status === "warn",
@@ -461,8 +504,17 @@ function nextStepsFor(options: {
     }
     return steps;
   }
-  steps.push(serviceStep(workspaceDir, home));
-  if (!options.relayConnected) steps.push(connectStep(workspaceDir, home));
+  if (options.start === "installed") steps.push(...options.serviceSteps);
+  else if (options.start !== "after_sign_in") steps.push(serviceStep(workspaceDir, home));
+  // A pending sign-in pairs the relay when it completes; --no-relay leaves it
+  // out. That holds whether this run started the sign-in or only reported it
+  // as the remaining step, because `worker login` always pairs after sign-in.
+  const signInPending =
+    options.signIn !== undefined ||
+    options.checks.some((check) => check.name === "entitlement" && check.status === "action");
+  if (!options.relayConnected && !signInPending && !args.noRelay) {
+    steps.push(connectStep(workspaceDir, home));
+  }
   return steps;
 }
 

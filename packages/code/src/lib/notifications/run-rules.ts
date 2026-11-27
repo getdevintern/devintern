@@ -38,6 +38,7 @@ import type { Database } from "bun:sqlite";
 
 import { findInjectedTaskOutputParent, listRunOutputs } from "../state/run-outputs";
 import type { TrackerIssueOutput } from "../state/run-outputs";
+import { baseSyncExhaustedGroupKey } from "./base-sync";
 import { NotificationEmitter, safely } from "./emitter";
 import { hasTable } from "./store";
 import type { Notification, NotificationLink } from "./types";
@@ -455,6 +456,15 @@ function resolveOnSuccess(emitter: NotificationEmitter, db: Database, run: RunFa
   // by what they rolled up, for every origin (a self-retrying origin's own
   // success is what proves its DevIntern problem went away).
   resolveRecoveredDevInternRows(emitter, db, run);
+  // A successful conflict resolution proves a worker-restart exhaustion
+  // notification for the same PR recovered, even though that origin is not a
+  // "completing" one (it must not clear task-level notifications).
+  if (run.origin === "conflict_resolution" && run.repo && run.prNumber !== undefined) {
+    emitter.resolve({
+      kinds: ["escalated"],
+      groupKey: baseSyncExhaustedGroupKey(run.repo, run.prNumber),
+    });
+  }
   if (!COMPLETING_ORIGINS.has(run.origin)) return;
   emitter.resolve({
     kinds: ["escalated", "retries_exhausted", "automation_broke"],

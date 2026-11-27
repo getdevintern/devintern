@@ -14,6 +14,7 @@
 import { join } from "node:path";
 import {
   PROBE_TIMEOUT_MS,
+  PromptAttemptsExceededError,
   defaultProbe,
   extractExistingTrackerConfig,
   promptForTracker,
@@ -184,8 +185,12 @@ export async function writePmProjectConfig(
   return { envPath };
 }
 
-/** Run the interactive `devpm init` wizard end to end. */
-export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void> {
+/**
+ * Run the interactive `devpm init` wizard end to end.
+ *
+ * @returns Process exit code (1 when a prompt kept getting unusable input)
+ */
+export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<number> {
   const cwd = deps.cwd ?? process.cwd();
   const log = deps.log ?? console.log;
   const probe = deps.probe ?? defaultProbe;
@@ -208,7 +213,7 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
       const answer = (await prompt("Overwrite it? (y/N): ")).trim().toLowerCase();
       if (answer !== "y" && answer !== "yes") {
         log("❌ Initialization cancelled");
-        return;
+        return 0;
       }
     }
 
@@ -270,6 +275,15 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
     if (docs) {
       log(`   2. Read the setup guide if anything is unclear: ${docs}`);
     }
+    return 0;
+  } catch (error) {
+    // A user who keeps giving unusable answers is a stopped setup, not a
+    // crash: report it without Sentry and let the CLI exit non-zero.
+    if (error instanceof PromptAttemptsExceededError) {
+      log(`\n❌ ${error.message}; setup stopped. Re-run \`devpm init\`.`);
+      return 1;
+    }
+    throw error;
   } finally {
     rl?.close();
   }

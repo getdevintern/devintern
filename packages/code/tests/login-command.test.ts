@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -35,6 +35,16 @@ describe("parseLoginArgs", () => {
     expect(parseLoginArgs([], CMD)).toEqual({
       ok: true,
       args: { noWait: false, json: false, help: false },
+    });
+  });
+
+  test("--no-relay is a worker login option only", () => {
+    expect(parseLoginArgs(["--complete", "code=abc", "--no-relay"], CMD)).toMatchObject({
+      ok: true,
+      args: { complete: "code=abc", noRelay: true },
+    });
+    expect(parseLoginArgs(["github", "--no-relay"], "devintern login")).toMatchObject({
+      ok: false,
     });
   });
 
@@ -166,6 +176,23 @@ describe("executeLogin", () => {
     });
   });
 
+  test("--no-wait --no-relay carries --no-relay into the --complete command", async () => {
+    const code = await executeLogin(
+      { method: "github", noWait: true, json: true, noRelay: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        startPendingLogin: async () => started,
+        currentUser: async () => null,
+      },
+    );
+    expect(code).toBe(0);
+    const doc = JSON.parse(stdout.join(""));
+    expect(doc.complete).toBe(`${CMD} --complete '<address>' --no-relay`);
+    expect(doc.relay).toBeUndefined();
+  });
+
   test("--no-wait text names the URL and the complete command", async () => {
     const code = await executeLogin(
       { method: "github", noWait: true, json: false, help: false },
@@ -218,6 +245,130 @@ describe("executeLogin", () => {
     );
     expect(logs.join("\n")).toContain("✅ Signed in as me@acme.test");
     expect(logs.join("\n")).toContain("14-day free Worker Pilot, no card required");
+  });
+
+  test("worker login: --complete runs the follow-up and adds its fields to the JSON", async () => {
+    const contexts: unknown[] = [];
+    const code = await executeLogin(
+      { complete: "code=abc", noWait: false, json: true, noRelay: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        completePendingLogin: async () => user,
+        afterSignIn: async (ctx) => {
+          contexts.push(ctx);
+          return { relay: { result: "skipped", code: "no_relay" } };
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(contexts).toEqual([{ json: true, noRelay: true, signedIn: true }]);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      result: "signed_in",
+      user: { id: "user-1" },
+      relay: { result: "skipped", code: "no_relay" },
+    });
+  });
+
+  test("worker login: --complete tells the follow-up when the pending sign-in began", async () => {
+    writeFileSync(
+      join(dir, ".auth-pending.json"),
+      JSON.stringify({
+        version: 1,
+        method: "github",
+        redirectTo: "http://127.0.0.1:17865/auth/callback",
+        url: "https://x.supabase.co/auth/v1/authorize?provider=github",
+        codeVerifier: "verifier",
+        createdAt: "2026-11-26T12:00:00.000Z",
+        expiresAt: "2026-11-26T12:30:00.000Z",
+      }),
+    );
+    const contexts: unknown[] = [];
+    const code = await executeLogin(
+      { complete: "code=abc", noWait: false, json: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        completePendingLogin: async () => user,
+        afterSignIn: async (ctx) => {
+          contexts.push(ctx);
+          return {};
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(contexts).toEqual([
+      {
+        json: true,
+        noRelay: false,
+        signedIn: true,
+        pendingSignInStartedAt: "2026-11-26T12:00:00.000Z",
+      },
+    ]);
+  });
+
+  test("worker login: a failing follow-up never fails the sign-in", async () => {
+    const code = await executeLogin(
+      { complete: "code=abc", noWait: false, json: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        completePendingLogin: async () => user,
+        afterSignIn: async () => {
+          throw new Error("relay down");
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      result: "signed_in",
+      followUpError: "relay down",
+    });
+  });
+
+  test("worker login --no-wait: an existing session pairs the relay, the new sign-in still starts", async () => {
+    const contexts: unknown[] = [];
+    const code = await executeLogin(
+      { method: "github", noWait: true, json: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        startPendingLogin: async () => started,
+        currentUser: async () => user,
+        afterSignIn: async (ctx) => {
+          contexts.push(ctx);
+          return { relay: { result: "connected" } };
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(contexts).toEqual([{ json: true, noRelay: false, signedIn: false }]);
+    const doc = JSON.parse(stdout.join(""));
+    expect(doc).toMatchObject({
+      result: "pending",
+      url: started.url,
+      signedInAs: { id: "user-1", email: "me@acme.test" },
+      relay: { result: "connected" },
+    });
+  });
+
+  test("worker login --no-wait without a session does not run the follow-up", async () => {
+    let ran = false;
+    await executeLogin({ method: "github", noWait: true, json: true, help: false }, config, CMD, {
+      writeStdout,
+      startPendingLogin: async () => started,
+      currentUser: async () => null,
+      afterSignIn: async () => {
+        ran = true;
+        return {};
+      },
+    });
+    expect(ran).toBe(false);
+    expect(JSON.parse(stdout.join("")).relay).toBeUndefined();
   });
 
   test("a pending-login error becomes a JSON failure with its code, exit 1", async () => {
@@ -290,5 +441,10 @@ describe("worker-pilot helpers", () => {
       expiresAt: "e",
       complete: `${CMD} --complete '<address>'`,
     });
+    expect(
+      pendingSignInSummary({ method: "github", url: "u", redirectTo: "r", expiresAt: "e" }, CMD, {
+        noRelay: true,
+      }).complete,
+    ).toBe(`${CMD} --complete '<address>' --no-relay`);
   });
 });

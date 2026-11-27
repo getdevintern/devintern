@@ -6,6 +6,8 @@
 
 import type { LoginMethod, ResolvedLogin } from "@devintern/auth";
 
+import { WORKER_LOGIN_COMMAND } from "./worker-pilot";
+
 /** Parsed `login` arguments. */
 export interface LoginArgs {
   /** Sign-in method; prompts when omitted (terminal only). */
@@ -18,6 +20,8 @@ export interface LoginArgs {
   complete?: string;
   /** Print one JSON document on stdout. */
   json: boolean;
+  /** `worker login` only: do not pair the relay after signing in. */
+  noRelay?: boolean;
   help: boolean;
 }
 
@@ -66,7 +70,9 @@ function readFlags(
     if (flag === "-h" || flag === "--help") args.help = true;
     else if (flag === "--json") args.json = true;
     else if (flag === "--no-wait") args.noWait = true;
-    else if (flag === "--complete") {
+    else if (flag === "--no-relay" && commandName.startsWith(WORKER_LOGIN_COMMAND)) {
+      args.noRelay = true;
+    } else if (flag === "--complete") {
       const value = takeValue()?.trim();
       if (!value) {
         return {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "child_process";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -179,6 +179,93 @@ describe("verifyPushHookFix", () => {
     expect(git(repoDir, "rev-parse HEAD")).toBe(head);
   });
 
+  test("verifies a hook fix with the lease after the agent rewrote the resumed branch", async () => {
+    // The run resumed an already-published branch and the agent amended it, so
+    // HEAD no longer contains the published commit. Publish rewrites that
+    // branch under an explicit lease; the verification dry-run must probe the
+    // same way instead of being rejected as non-fast-forward.
+    const publishedSha = git(repoDir, "rev-parse HEAD");
+    git(repoDir, "commit --amend -m 'amended by the resumed run'");
+
+    const result = await verifyPushHookFix({
+      cwd: repoDir,
+      expectedBranch: "feature/dev-74",
+      lease: { branch: "feature/dev-74", sha: publishedSha },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.alreadyOnRemote).toBe(false);
+    // A dry-run never updates origin.
+    expect(git(remoteDir, "rev-parse feature/dev-74")).toBe(publishedSha);
+  });
+
+  test("retries a one-time hook failure on a rewritten resumed branch", async () => {
+    // Integration-style flow: the resumed run amended the published branch and
+    // its push hit a pre-push hook that fails once. The agent then only amends
+    // the commit; the retried verification must accept the rewritten branch
+    // under the recorded lease.
+    const publishedSha = git(repoDir, "rev-parse HEAD");
+    git(repoDir, "commit --amend -m 'amended by the resumed run'");
+
+    const sentinel = join(testDir, "hook-failed-once");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      [
+        "#!/bin/sh",
+        `if [ ! -f '${sentinel}' ]; then`,
+        `  : > '${sentinel}'`,
+        "  echo 'pre-push hook declined (first attempt)'",
+        "  exit 1",
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(hookPath, 0o755);
+
+    const lease = { branch: "feature/dev-74", sha: publishedSha };
+    const push = await Utils.pushCurrentBranch({
+      cwd: repoDir,
+      expectedBranch: "feature/dev-74",
+      lease,
+    });
+    expect(push.success).toBe(false);
+    expect(push.hookError).toContain("pre-push hook declined");
+
+    // The hook-fixer agent only amends the existing commit.
+    git(repoDir, "commit --amend -m 'amended by the hook fixer'");
+
+    const second = await verifyPushHookFix({
+      cwd: repoDir,
+      expectedBranch: "feature/dev-74",
+      lease,
+    });
+    expect(second.success).toBe(true);
+    expect(git(remoteDir, "rev-parse feature/dev-74")).toBe(publishedSha);
+  });
+
+  test("refuses a lease dry-run that would only delete published commits", async () => {
+    const baseSha = git(repoDir, "rev-parse HEAD");
+    git(repoDir, "commit --allow-empty -m 'published commit'");
+    git(repoDir, "push origin feature/dev-74");
+    const publishedSha = git(repoDir, "rev-parse HEAD");
+    git(repoDir, `reset --hard ${baseSha}`);
+
+    // The agent rewound HEAD to an earlier commit; a force-with-lease dry-run
+    // would succeed and green-light deleting the published commit.
+    const result = await verifyPushHookFix({
+      cwd: repoDir,
+      expectedBranch: "feature/dev-74",
+      lease: { branch: "feature/dev-74", sha: publishedSha },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain(publishedSha.slice(0, 7));
+    expect(git(remoteDir, "rev-parse feature/dev-74")).toBe(publishedSha);
+  });
+
   test("pushCurrentBranch skips git push when origin already has HEAD", async () => {
     installFailingPrePushHook(repoDir);
 
@@ -246,6 +333,98 @@ describe("verifyPushHookFix", () => {
     expect(result.hookError).toBeUndefined();
   });
 
+  function stubPushOutput(stderr: string) {
+    const executeGitCommand = Utils.executeGitCommand;
+    return spyOn(Utils, "executeGitCommand").mockImplementation((args, options) => {
+      if (args[0] === "push") {
+        return Promise.resolve({ success: false, output: "", error: stderr });
+      }
+      return executeGitCommand(args, options);
+    });
+  }
+
+  test("pushCurrentBranch does not send GitHub's workflow scope rejection to the hook fixer", async () => {
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    const gitCommands = stubPushOutput(
+      [
+        "To https://github.com/getdevintern/devintern",
+        " ! [remote rejected] HEAD -> feature/dev-74 (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/onboarding-golden-path.yml` without `workflow` scope)",
+        "error: failed to push some refs to 'https://github.com/getdevintern/devintern'",
+      ].join("\n"),
+    );
+    try {
+      const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+      expect(result.success).toBe(false);
+      expect(result.hookError).toBeUndefined();
+      expect(result.remoteRejection?.workflowFile).toBe(
+        ".github/workflows/onboarding-golden-path.yml",
+      );
+      expect(result.message).toContain("`workflow` scope");
+      expect(result.message).toContain("Workflows read and write");
+      expect(result.message).toContain(".github/workflows/onboarding-golden-path.yml");
+      expect(result.message).not.toMatch(/^[^:]*: To https/);
+      expect(result.message.startsWith("Push of 'feature/dev-74' rejected by the remote")).toBe(
+        true,
+      );
+    } finally {
+      gitCommands.mockRestore();
+    }
+  });
+
+  test.each([
+    "protected branch hook declined",
+    "GH006: Protected branch update failed for refs/heads/feature/dev-74.",
+    "push declined due to repository rule violations",
+    "GH013: Repository rule violations found for refs/heads/feature/dev-74.",
+  ])("pushCurrentBranch does not send server rejection %p to the hook fixer", async (reason) => {
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    const gitCommands = stubPushOutput(
+      `To https://github.com/acme/repo\n ! [remote rejected] feature/dev-74 -> feature/dev-74 (${reason})\nerror: failed to push some refs to 'https://github.com/acme/repo'`,
+    );
+    try {
+      const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+      expect(result.success).toBe(false);
+      expect(result.hookError).toBeUndefined();
+      expect(result.remoteRejection?.reason).toBe(reason);
+      expect(result.message).toContain(reason);
+    } finally {
+      gitCommands.mockRestore();
+    }
+  });
+
+  test("pushCurrentBranch does not send a real server pre-receive refusal to the hook fixer", async () => {
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    const hookPath = join(remoteDir, "hooks", "pre-receive");
+    writeFileSync(hookPath, "#!/bin/sh\necho 'server policy says no' >&2\nexit 1\n", "utf8");
+    chmodSync(hookPath, 0o755);
+
+    const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+    expect(result.success).toBe(false);
+    expect(result.hookError).toBeUndefined();
+    expect(result.remoteRejection?.reason).toBe("pre-receive hook declined");
+    expect(result.message).toContain("pre-receive hook declined");
+  });
+
+  test("pushCurrentBranch still sends a local hook's echoed rejection text for another ref to the hook fixer", async () => {
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      "#!/bin/sh\necho ' ! [remote rejected] main -> main (fixture output from a git test)'\nexit 1\n",
+      "utf8",
+    );
+    chmodSync(hookPath, 0o755);
+
+    const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+    expect(result.success).toBe(false);
+    expect(result.hookError).toContain("fixture output from a git test");
+    expect(result.remoteRejection).toBeUndefined();
+  });
+
   test("remoteTrackingRefMatchesHead is false after a local-only commit", async () => {
     expect(await Utils.remoteTrackingRefMatchesHead("feature/dev-74", { cwd: repoDir })).toBe(true);
 
@@ -284,5 +463,23 @@ describe("buildGitHookFixPrompt", () => {
     expect(prompt).toContain("git push origin HEAD");
     expect(prompt).toContain("git commit --amend --no-edit");
     expect(prompt).toContain("**Verify the fix**");
+  });
+
+  test("lease push prompt verifies under the lease and forbids a plain push", () => {
+    const prompt = buildGitHookFixPrompt("push", "/out/*/git-hook-errors.log", {
+      branch: "feature/dev-74",
+      sha: "abc123",
+    });
+
+    const leasedPush =
+      "git push --force-with-lease=refs/heads/feature/dev-74:abc123 origin HEAD:refs/heads/feature/dev-74 --dry-run";
+    expect(prompt).toContain(leasedPush);
+    expect(prompt).not.toContain("git push origin HEAD");
+    expect(prompt).not.toContain("git push --force ");
+    expect(prompt).toContain("**Verify the fix** with the lease (dry run — do not publish)");
+    expect(prompt).toContain("Do not run `git push --force` or a plain `git push`");
+    expect(prompt).toContain(
+      "- Do not push: the runner publishes this rewritten branch under `--force-with-lease` after verification",
+    );
   });
 });

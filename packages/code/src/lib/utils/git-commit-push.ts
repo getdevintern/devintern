@@ -1,7 +1,10 @@
 import { executeGitCommandWithConfigLockRetry, hasConfigLockError } from "./git-exec";
 import { hasUncommittedWork, stageWorkTreeChanges } from "./git-stage";
 import { classifyCommitConfigError } from "./git-identity";
+import { describeRemotePushRejection, findRemotePushRejection } from "./git-push-rejection";
+import type { RemotePushRejection } from "./git-push-rejection";
 import { Utils } from "./registry";
+import type { GitCommandResult } from "./types";
 
 /**
  * Park uncommitted work (including untracked files) in a labelled stash
@@ -377,24 +380,241 @@ export async function commitChanges(
 }
 
 /**
+ * Whether a failed push was refused by the server rather than by a local hook.
+ *
+ * Branch protection, a pre-receive hook, or a token without the required scope
+ * makes Git print `[remote rejected]`; GitHub also names the reason (`GH006`).
+ * Retrying (or asking the hook-fixer agent) cannot change the server's answer,
+ * so the caller must not treat this as a fixable hook error.
+ *
+ * @param output - Combined push stdout and stderr
+ * @returns `true` when the remote refused the update
+ */
+function isRemotePushRejection(output: string): boolean {
+  return /\[remote rejected\]|GH006|protected branch|pre-receive hook declined/i.test(output);
+}
+
+/** Outcome of {@link rewritePublishedBranchWithLease}. */
+type LeaseRewrite =
+  | { kind: "not-applicable" }
+  | { kind: "done"; result: { success: boolean; message: string; hookError?: string } }
+  | { kind: "origin-moved"; pushResult: GitCommandResult };
+
+/**
+ * Pick the commit for exactly `ref` out of `git ls-remote` output.
+ *
+ * `git ls-remote --heads origin <ref>` patterns match ref tails, so a longer
+ * ref such as `aaa/refs/heads/<ref>` can supply an earlier line and shadow the
+ * real branch. Keep only the line whose ref field equals the ref that was
+ * queried.
+ *
+ * @param output - Combined stdout of `git ls-remote`
+ * @param ref - Full ref name, such as `refs/heads/feature/x`
+ * @returns The commit SHA for that exact ref, or `undefined` when absent
+ */
+export function findRemoteRefSha(output: string, ref: string): string | undefined {
+  for (const line of output.split("\n")) {
+    const [sha, name] = line.trim().split(/\s+/);
+    if (name === ref) return sha;
+  }
+  return undefined;
+}
+
+/**
+ * Read the commit `origin` has for exactly `refs/heads/<branch>`.
+ *
+ * Query the full ref and keep only the line whose ref field is that exact ref,
+ * because `git ls-remote --heads origin <branch>` also matches longer refs
+ * such as `aaa/refs/heads/<branch>`.
+ *
+ * @param branch - Branch name without the `refs/heads/` prefix
+ * @param options - Optional verbosity and git working directory
+ * @returns The remote commit SHA, or `undefined` when origin has no such branch
+ */
+async function readRemoteBranchTip(
+  branch: string,
+  options?: { verbose?: boolean; cwd?: string },
+): Promise<string | undefined> {
+  const ref = `refs/heads/${branch}`;
+  const result = await Utils.executeGitCommand(["ls-remote", "--heads", "origin", ref], {
+    verbose: options?.verbose,
+    cwd: options?.cwd,
+  });
+  if (!result.success) return undefined;
+  return findRemoteRefSha(result.output, ref);
+}
+
+/**
+ * Whether publishing HEAD under a lease would only delete published commits.
+ *
+ * A legitimate amend/rebase leaves HEAD as a rewritten sibling of the
+ * published commit. A reset back to an earlier commit makes HEAD a strict
+ * ancestor of it: force-pushing that state would remove commits origin already
+ * has, which is exactly the non-fast-forward update the lease must not allow.
+ *
+ * @param publishedSha - Commit origin currently has for the branch
+ * @param cwd - Optional git working directory
+ * @returns `true` when HEAD is behind (a strict ancestor of) `publishedSha`
+ */
+export async function headOnlyRemovesPublishedCommit(
+  publishedSha: string,
+  cwd?: string,
+): Promise<boolean> {
+  const head = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd });
+  if (!head.success || head.output.trim() === publishedSha) return false;
+
+  const ancestor = await Utils.executeGitCommand(
+    ["merge-base", "--is-ancestor", "HEAD", publishedSha],
+    { cwd },
+  );
+  return ancestor.success;
+}
+
+/**
+ * Rewrite `origin/<branch>` with a lease when the run started at exactly the
+ * commit origin still has and its rewritten HEAD no longer contains it.
+ *
+ * The lease names both the branch and the commit: only the branch the run
+ * started on may be rewritten, so a stray `feature/` branch that happens to
+ * point at the same commit is never touched.
+ *
+ * This is allowed even when the branch has an open PR: auto-review already
+ * rewrites PR branches with `--force-with-lease` after an amend, and this
+ * lease is stricter because the old value must be the exact commit the run
+ * started from. A commit origin gained after that point is never overwritten.
+ *
+ * @param input - Branch, recorded lease (branch and origin SHA), remote tip,
+ *   and git options
+ */
+async function rewritePublishedBranchWithLease(input: {
+  branch: string;
+  lease: { branch: string; sha: string } | undefined;
+  remoteTip: string | undefined;
+  verbose: boolean;
+  cwd?: string;
+}): Promise<LeaseRewrite> {
+  const { branch, lease, remoteTip, verbose, cwd } = input;
+  if (
+    !lease ||
+    remoteTip !== lease.sha ||
+    branch !== lease.branch ||
+    !branch.startsWith("feature/")
+  ) {
+    return { kind: "not-applicable" };
+  }
+  const leaseRemoteSha = lease.sha;
+
+  const ancestor = await Utils.executeGitCommand(
+    ["merge-base", "--is-ancestor", leaseRemoteSha, "HEAD"],
+    { cwd },
+  );
+  if (ancestor.success) return { kind: "not-applicable" };
+
+  // An amend/rebase produces a sibling of the published commit; a reset back
+  // to an earlier commit makes HEAD its strict ancestor. Only the latter would
+  // delete published commits, so refuse it instead of force-pushing. This
+  // replaces the non-fast-forward rejection that guarded this state before the
+  // lease existed.
+  if (await headOnlyRemovesPublishedCommit(leaseRemoteSha, cwd)) {
+    const oldSha = leaseRemoteSha.slice(0, 7);
+    return {
+      kind: "done",
+      result: {
+        success: false,
+        message: `Push rejected - branch diverged from remote (HEAD is behind the published commit ${oldSha} and rewriting would delete commits origin already has). Push a new commit on top of origin/${branch} instead.`,
+      },
+    };
+  }
+
+  // The agent rewrote the branch (rebase/amend), so HEAD no longer contains
+  // the published commit. Rewrite origin only while it still points at exactly
+  // the recorded commit: a commit the run did not start from is never
+  // overwritten. `remoteTip` came from the same `ls-remote`, and the explicit
+  // lease value makes Git reject a concurrent update between the two calls.
+  const head = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd });
+  const newSha = head.success ? head.output.trim() : "";
+  const pushResult = await Utils.executeGitCommand(
+    [
+      "push",
+      `--force-with-lease=refs/heads/${branch}:${leaseRemoteSha}`,
+      "origin",
+      `HEAD:refs/heads/${branch}`,
+    ],
+    { verbose, cwd },
+  );
+  if (pushResult.success) {
+    const oldSha = leaseRemoteSha.slice(0, 7);
+    const shortNew = newSha.slice(0, 7);
+    console.log(
+      `📤 Updated origin/${branch} to the rewritten branch (lease ${oldSha} -> ${shortNew})`,
+    );
+    return {
+      kind: "done",
+      result: {
+        success: true,
+        message: `Rewrote '${branch}' on remote with a lease (${oldSha} -> ${shortNew})`,
+      },
+    };
+  }
+
+  // A hook or network failure while origin is still at the recorded commit is
+  // fixable/retryable, not divergence: HEAD only looks rewritten because the
+  // run's own rebase/amend is still unpushed. A refusal by the server itself
+  // (branch protection, a pre-receive hook) is not fixable: origin stays at the
+  // lease SHA and the hook-fixer's `--dry-run` never invokes the server, so
+  // retrying would spawn the agent for an error it cannot change.
+  const afterFailureSha = await readRemoteBranchTip(branch, { cwd });
+  if (afterFailureSha === leaseRemoteSha) {
+    const fullError = [pushResult.error, pushResult.output].filter(Boolean).join("\n").trim();
+    if (isRemotePushRejection(fullError)) {
+      return {
+        kind: "done",
+        result: {
+          success: false,
+          message: `Push rejected by the remote: ${fullError || pushResult.error}`,
+        },
+      };
+    }
+    return {
+      kind: "done",
+      result: {
+        success: false,
+        message: `Failed to push branch: ${fullError || pushResult.error}`,
+        hookError: fullError || pushResult.error,
+      },
+    };
+  }
+  // Origin moved past the recorded commit; the caller's divergence check
+  // reports it instead of overwriting someone's work.
+  return { kind: "origin-moved", pushResult };
+}
+
+/**
  * Push the current branch to `origin`, setting upstream on first push.
  *
- * @param options - Push safety, verbose logging, and working directory
+ * @param options - Push safety, verbose logging, and working directory.
+ *   `lease` names the branch and commit this run started from; a task run may
+ *   rewrite that branch when origin still points at exactly that commit and
+ *   HEAD no longer contains it.
  */
 export async function pushCurrentBranch(options?: {
   verbose?: boolean;
   cwd?: string;
   expectedBranch?: string;
   expectedRemoteSha?: string;
+  lease?: { branch: string; sha: string };
 }): Promise<{
   success: boolean;
   message: string;
   hookError?: string;
+  /** Set when the remote itself refused the update; callers class it `environment`. */
+  remoteRejection?: RemotePushRejection;
 }> {
   const verbose = options?.verbose ?? false;
   const cwd = options?.cwd;
   const expectedBranch = options?.expectedBranch;
   const expectedRemoteSha = options?.expectedRemoteSha;
+  const lease = options?.lease;
 
   try {
     // Get current branch name (from the specified working directory)
@@ -461,17 +681,27 @@ export async function pushCurrentBranch(options?: {
     }
 
     // Check if remote branch exists
-    const remoteBranchExists = await Utils.executeGitCommand(
-      ["ls-remote", "--heads", "origin", currentBranch],
-      { verbose, cwd },
-    );
+    const remoteTip = await readRemoteBranchTip(currentBranch, { verbose, cwd });
+
+    const leaseRewrite = await rewritePublishedBranchWithLease({
+      branch: currentBranch,
+      lease,
+      remoteTip,
+      verbose,
+      cwd,
+    });
+    if (leaseRewrite.kind === "done") {
+      return leaseRewrite.result;
+    }
 
     let pushResult;
-    if (expectedRemoteSha || (remoteBranchExists.success && remoteBranchExists.output.trim())) {
+    if (leaseRewrite.kind === "origin-moved") {
+      pushResult = leaseRewrite.pushResult;
+    } else if (expectedRemoteSha || remoteTip) {
       // The ancestry check above guarantees this update is a fast-forward.
-      // Use a normal push so no conflict-resolution path can overwrite
-      // remote history, even with a lease. A concurrent update is rejected
-      // by Git and handled as divergence below.
+      // Conflict-resolution and review paths do not pass `lease`, so
+      // a normal push keeps their remote history untouched. A concurrent
+      // update is rejected by Git and handled as divergence below.
       pushResult = await Utils.executeGitCommand(["push", "origin", currentBranch], {
         verbose,
         cwd,
@@ -514,13 +744,7 @@ export async function pushCurrentBranch(options?: {
     // Git-related tests. Establish divergence from repository state after
     // every failed push instead of trusting any output string. This also
     // catches races whose server-side rejection omits the usual markers.
-    const latestRemote = await Utils.executeGitCommand(
-      ["ls-remote", "--heads", "origin", currentBranch],
-      { verbose: false, cwd },
-    );
-    const remoteSha = latestRemote.success
-      ? latestRemote.output.trim().split(/\s+/, 1)[0]
-      : undefined;
+    const remoteSha = await readRemoteBranchTip(currentBranch, { cwd });
     let remoteDiverged = false;
 
     if (remoteSha) {
@@ -538,6 +762,18 @@ export async function pushCurrentBranch(options?: {
         success: false,
         message: `Push rejected - branch diverged from remote. Run 'git pull --rebase' or 'git push --force' (dangerous): ${pushResult.error}`,
         // Don't mark as hookError since this is not fixable by @devintern/code
+      };
+    }
+
+    // The remote refused the update itself (GitHub `workflow` scope, branch
+    // protection, push protection, a server pre-receive hook). No worktree
+    // edit can satisfy that, so do not hand it to the hook-fix agent.
+    const rejection = findRemotePushRejection(fullError, currentBranch);
+    if (rejection) {
+      return {
+        success: false,
+        message: describeRemotePushRejection(rejection, currentBranch),
+        remoteRejection: rejection,
       };
     }
 

@@ -11,10 +11,17 @@
  * whose body names the method and path, and the request is recorded so a test
  * can fail loudly even if the product ignores the error response.
  *
- * The server binds `127.0.0.1:0`, accepts any Basic-auth credentials without
- * logging or echoing them, and never makes outbound requests.
+ * The server binds `127.0.0.1:0`, accepts any Basic-auth credentials unless
+ * `pat` is set, never logs or echoes them, and never makes outbound requests.
  */
 
+import {
+  SearchRejections,
+  azureDevOpsQueryError,
+  basicPatAuthorization,
+  rejectWrongPat,
+} from "./fake-auth";
+import { markdownToHtml } from "./fake-azure-devops-html";
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
 import {
   RELATION_NAMES,
@@ -76,6 +83,8 @@ export interface FakeAzureDevOpsOptions {
    * on the real calendar day for a change to be visible.
    */
   realClock?: boolean;
+  /** Caller-chosen PAT; any other `Authorization` than `Basic base64(":PAT")` gets 401. */
+  pat?: string;
 }
 
 /** One WIQL request the fake received, with the ids it returned. */
@@ -100,48 +109,6 @@ export const AZURE_DEVOPS_STORY_POINTS_FIELD = "Microsoft.VSTS.Scheduling.StoryP
  * rejects them too (e.g. `7.1-preview.3` passes, `7.0` does not).
  */
 const COMMENTS_API_VERSION_PATTERN = /^\d+\.\d+-preview(?:\.\d+)?$/;
-
-/** Escape HTML characters so seeded markdown text cannot inject markup. */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/**
- * Render a small markdown subset (headings, blank-line paragraphs, line
- * breaks) as the HTML Azure DevOps stores in `System.Description` and comments.
- */
-function markdownToHtml(markdown: string): string {
-  const blocks: string[] = [];
-  let paragraph: string[] = [];
-
-  const flushParagraph = () => {
-    if (paragraph.length === 0) return;
-    blocks.push(`<p>${paragraph.map(escapeHtml).join("<br>")}</p>`);
-    paragraph = [];
-  };
-
-  for (const line of markdown.split("\n")) {
-    const heading = line.match(/^(#{1,6})\s+(.*)$/);
-    if (heading?.[1] && heading[2] !== undefined) {
-      flushParagraph();
-      const level = heading[1].length;
-      blocks.push(`<h${level}>${escapeHtml(heading[2].trim())}</h${level}>`);
-      continue;
-    }
-    if (line.trim() === "") {
-      flushParagraph();
-      continue;
-    }
-    paragraph.push(line);
-  }
-  flushParagraph();
-  return blocks.join("\n") || "<p> </p>";
-}
 
 /**
  * Convert stored comment/description HTML to readable plain text.
@@ -344,8 +311,14 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
   /** Requests the fake could not route, for an explicit end-of-test assertion. */
   readonly unexpectedRequests: string[] = [];
 
+  /** Requests answered with a bare 401 because the PAT was wrong or missing. */
+  unauthorizedRequests = 0;
+
   /** Every WIQL request received, in arrival order (CLI, worker, and fixture). */
   readonly wiqlRequests: FakeAzureDevOpsWiqlRequest[] = [];
+
+  /** Number of `GET /_apis/projects` requests (the credential probe). */
+  projectListRequests = 0;
 
   /** Every relations / predecessor-batch read, in arrival order. */
   readonly blockerRequests: FakeAzureDevOpsBlockerRequest[] = [];
@@ -355,12 +328,14 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
   /** Work items an `errorPolicy=omit` batch read returns as `null`. */
   private readonly unreadableWorkItems = new Set<number>();
 
+  private readonly wiqlRejections = new SearchRejections();
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly workItems = new Map<number, FakeAzureDevOpsWorkItem>();
   private nextWorkItemId = 100;
   private nextCommentId = 10_000;
   private now = Date.parse("2026-01-01T00:00:00.000Z");
   private readonly realClock: boolean;
+  private readonly pat: string | undefined;
 
   constructor(options: FakeAzureDevOpsOptions = {}) {
     this.organization = options.organization ?? "fakeorg";
@@ -368,11 +343,14 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     this.statuses = { ...FAKE_AZURE_DEVOPS_STATUSES, ...options.statuses };
     this.openState = this.statuses.todo;
     this.realClock = options.realClock ?? false;
+    this.pat = options.pat;
 
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch: (request) => this.handle(request),
+      fetch: (request) =>
+        rejectWrongPat(request, this.pat, () => this.unauthorizedRequests++) ??
+        this.handle(request),
     });
     this.baseUrl = `http://127.0.0.1:${this.server.port}/${this.organization}`;
   }
@@ -387,7 +365,7 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     return {
       TASK_TRACKER: this.type,
       AZURE_DEVOPS_ORG: this.organization,
-      AZURE_DEVOPS_PAT: FAKE_PAT,
+      AZURE_DEVOPS_PAT: this.pat ?? FAKE_PAT,
       AZURE_DEVOPS_PROJECT: this.project,
       AZURE_DEVOPS_BASE_URL: this.baseUrl,
       DEVINTERN_E2E_FAKE_AZURE_DEVOPS: "1",
@@ -601,7 +579,7 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       {
         method: "POST",
         headers: {
-          Authorization: `Basic ${Buffer.from(`:${FAKE_PAT}`).toString("base64")}`,
+          Authorization: basicPatAuthorization(this.pat ?? FAKE_PAT),
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ query }),
@@ -622,6 +600,11 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
   /** Stop the HTTP server and release the ephemeral port. */
   async cleanup(): Promise<void> {
     this.server.stop(true);
+  }
+
+  /** Answer later WIQL whose text contains `needle` with Azure DevOps' 400 query error. */
+  rejectWiqlContaining(needle: string, message: string): void {
+    this.wiqlRejections.add(needle, message);
   }
 
   /** Stop the server when a test cannot reach the normal cleanup path. */
@@ -645,9 +628,8 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       return this.queryWorkItems(wiqlMatch[1], request);
     }
 
-    if (method === "GET" && /^\/_apis\/wit\/workitems$/i.test(scopedPath)) {
-      return this.getWorkItems(url);
-    }
+    const listed = method === "GET" ? this.getList(scopedPath, url) : undefined;
+    if (listed) return listed;
 
     const statesProject = workItemTypeStatesProject(method, scopedPath);
     if (statesProject !== undefined) {
@@ -690,6 +672,16 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     return this.unmatched(method, path);
   }
 
+  /** Organization-level list endpoints: projects (the credential probe) and work-item batches. */
+  private getList(scopedPath: string, url: URL): Response | undefined {
+    if (/^\/_apis\/projects$/i.test(scopedPath)) {
+      this.projectListRequests++;
+      return json({ count: 1, value: [{ id: "fake-project-id", name: this.project }] });
+    }
+    if (/^\/_apis\/wit\/workitems$/i.test(scopedPath)) return this.getWorkItems(url);
+    return undefined;
+  }
+
   private unmatched(method: string, path: string): Response {
     const diagnostic = `Unmatched fake Azure DevOps request: ${method} ${path}`;
     this.unexpectedRequests.push(diagnostic);
@@ -716,6 +708,11 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       const diagnostic = "Fake Azure DevOps WIQL request is missing a string `query`";
       this.unexpectedRequests.push(diagnostic);
       return json({ message: diagnostic }, 400);
+    }
+    const rejection = this.wiqlRejections.find(query);
+    if (rejection) {
+      this.wiqlRequests.push({ query, ids: [], at: Date.now() });
+      return azureDevOpsQueryError(rejection);
     }
     const { matches, error } = matchWorkItems(query, [...this.workItems.values()]);
     this.wiqlRequests.push({

@@ -50,6 +50,10 @@ export function workspaceEnvPrefixFor(workspaceDir: string, home: string = homed
 /** What signing in gets you. */
 export const WORKER_PILOT_OFFER = "14-day free Worker Pilot, no card required";
 
+/** The wizard's one sign-in step (Worker Pilot, relay pairing, and the GitHub App). */
+export const WORKER_SIGN_IN_STEP =
+  "Sign in with GitHub to start your 14-day Worker Pilot (also connects instant events)";
+
 /** Entitlement row and next-step text when nobody is signed in yet. */
 export const WORKER_PILOT_NOT_STARTED = `Not started: sign in to begin your ${WORKER_PILOT_OFFER}`;
 

@@ -896,6 +896,8 @@ export class ReviewPollingAcquirer implements Acquirer {
           : Promise.resolve({ data: [], notModified: false }),
       fetchPr: (repo, prNumber, etag) => github.fetchPr(repo, prNumber, etag),
       syncBase: (repo, prNumber, pr) => this.maybeSyncBase(repo, prNumber, pr, { external: true }),
+      resolveBaseSync: (repo, prNumber) =>
+        this.options.queue.resolveBaseSyncExhausted(repo, prNumber),
       onSuccess: (repo, stage) => recordStages(stages.succeeded, repo, [stage]),
       onFailure: (repo, prNumber, error, stage) =>
         this.handlePollFailure(stages, repo, prNumber, error, stage),
@@ -970,6 +972,9 @@ export class ReviewPollingAcquirer implements Acquirer {
       this.deferCounts.delete(externalId);
       this.capacityRetryAt.delete(externalId);
       queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+      // A human (or GitHub's own merge) may have resolved the conflict while
+      // this event waited; the exhaustion row is no longer true.
+      queue.resolveBaseSyncExhausted(repo, prNumber);
       return { kind: "stop" };
     }
     return { kind: "go", headSha: fresh.head.sha, baseSha: fresh.base.sha, branch: fresh.head.ref };
@@ -1193,6 +1198,22 @@ export class ReviewPollingAcquirer implements Acquirer {
     return tip;
   }
 
+  /**
+   * Clear a restart-exhaustion row only for a definitive non-conflicting
+   * mergeability verdict. `unknown` (GitHub recomputing after a push) and a
+   * missing value prove nothing: the PR may still conflict, so the row must
+   * survive until a later tick resolves the verdict.
+   */
+  private clearBaseSyncExhaustionIfClean(
+    repo: string,
+    prNumber: number,
+    mergeableState: string | undefined,
+  ): void {
+    if (mergeableState && mergeableState !== "unknown") {
+      this.options.queue.resolveBaseSyncExhausted(repo, prNumber);
+    }
+  }
+
   private async maybeSyncBase(
     repo: string,
     prNumber: number,
@@ -1231,7 +1252,16 @@ export class ReviewPollingAcquirer implements Acquirer {
     // usable here — the field can lag the real branch tip for days, which
     // makes branches cut from newer main look "already included" and skips
     // them forever. "unknown" just means GitHub is recomputing after a push.
-    if (pr.mergeable_state !== "dirty" && pr.mergeable_state !== "behind") return;
+    if (pr.mergeable_state !== "dirty" && pr.mergeable_state !== "behind") {
+      // A definitive non-conflicting verdict means the conflict is gone
+      // without a worker run (a human pushed, or merged the base): clear any
+      // exhaustion row from an earlier restart loop. An exhausted event never
+      // reaches the execution path below, so this is the only place a clean
+      // PR clears it. "unknown"/missing must only wait: the PR may still
+      // conflict, and the event stays paused until GitHub recomputes.
+      this.clearBaseSyncExhaustionIfClean(repo, prNumber, pr.mergeable_state);
+      return;
+    }
 
     if (!(await this.baseSyncEventOpen(repo, prNumber, pr.base.ref, externalId))) return;
     const now = this.options.now?.() ?? Date.now();

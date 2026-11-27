@@ -80,7 +80,21 @@ let currentBranch: string;
 let protectedBranch: boolean;
 let headReads: number;
 let headMovedDuringRun: boolean;
+let lsRemoteFails: boolean;
 let pushResult: { success: boolean; message: string; hookError?: string };
+let pushResults: Array<typeof pushResult>;
+let pushCallOptions: Array<{
+  expectedBranch?: string;
+  lease?: { branch: string; sha: string };
+}>;
+let hookFixerResult: boolean;
+let hookFixerCalls: number;
+let hookFixerArgs: Array<{
+  hookType: "commit" | "push";
+  cwd?: string;
+  expectedBranch?: string;
+  lease?: { branch: string; sha: string };
+}>;
 let hookResult: { success: boolean; message: string; hookError?: string };
 let hookCalls: number;
 let autoReviewCalls: number;
@@ -151,9 +165,13 @@ mock.module("../src/lib/utils", () => ({
       hookCalls++;
       return hookResult;
     },
-    pushCurrentBranch: async () => {
+    pushCurrentBranch: async (options?: {
+      expectedBranch?: string;
+      lease?: { branch: string; sha: string };
+    }) => {
       deliveryEvents.push("push");
-      return pushResult;
+      pushCallOptions.push({ expectedBranch: options?.expectedBranch, lease: options?.lease });
+      return pushResults.shift() ?? pushResult;
     },
     commitChanges: async () => {
       commitCalls++;
@@ -170,6 +188,17 @@ mock.module("../src/lib/utils", () => ({
         return {
           success: true,
           output: headReads === 1 || !headMovedDuringRun ? HEAD_BEFORE : HEAD_AFTER,
+        };
+      }
+      if (args[0] === "ls-remote") {
+        if (lsRemoteFails) {
+          return { success: false, output: "", error: "connection timed out" };
+        }
+        // Real output is `<sha>\t<ref>`; readPublishedBranch keeps only the
+        // exact ref because ls-remote also matches longer ref names.
+        return {
+          success: true,
+          output: `${inheritedCommitCount}\trefs/heads/${currentBranch}`,
         };
       }
       return { success: true, output: String(inheritedCommitCount) };
@@ -284,7 +313,26 @@ mock.module("../src/lib/task/implementation-comment", () => ({
 }));
 mock.module("../src/lib/agent/git-hook-fixer", () => ({
   isCommitAlreadyComplete: async () => false,
-  runAgentHarnessToFixGitHook: async () => false,
+  runAgentHarnessToFixGitHook: async (
+    hookType: "commit" | "push",
+    _harness: unknown,
+    _executablePath: string,
+    _maxTurns: number,
+    options?: {
+      cwd?: string;
+      expectedBranch?: string;
+      lease?: { branch: string; sha: string };
+    },
+  ) => {
+    hookFixerCalls++;
+    hookFixerArgs.push({
+      hookType,
+      cwd: options?.cwd,
+      expectedBranch: options?.expectedBranch,
+      lease: options?.lease,
+    });
+    return hookFixerResult;
+  },
 }));
 mock.module("../src/lib/agent/model", () => ({
   resolveAgentEffort: () => undefined,
@@ -327,11 +375,17 @@ beforeEach(() => {
   protectedBranch = false;
   headReads = 0;
   headMovedDuringRun = false;
+  lsRemoteFails = false;
   scenario = {};
   commitResult = { success: true, message: "committed" };
   commitResults = [];
   commitCalls = 0;
   pushResult = { success: true, message: "pushed" };
+  pushResults = [];
+  pushCallOptions = [];
+  hookFixerResult = false;
+  hookFixerCalls = 0;
+  hookFixerArgs = [];
   hookResult = { success: true, message: "hook ok" };
   hookCalls = 0;
   autoReviewCalls = 0;
@@ -544,6 +598,80 @@ describe("runAgentHarness git delivery", () => {
     expect(deliveryEvents).toEqual(["commit", "verify", "push"]);
     expect(commitCalls).toBe(1);
     expect(hookCalls).toBeGreaterThan(0);
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("passes the started branch and published lease to publish", async () => {
+    scenario.stdout = "The inherited implementation is complete.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+
+    await runAgentHarness({
+      ...baseInput(),
+      createPr: true,
+      resumeBranch: "feature/task-1",
+    });
+
+    expect(pushCallOptions).toEqual([
+      {
+        expectedBranch: "feature/task-1",
+        lease: { branch: "feature/task-1", sha: "2" },
+      },
+    ]);
+  });
+
+  test("keeps the publish guard when the remote probe fails", async () => {
+    scenario.stdout = "The inherited implementation is complete.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+    // `readPublishedBranch` returns undefined when `ls-remote` fails, so the
+    // lease is unknown. The stray-branch guard must still name the branch the
+    // run started on.
+    lsRemoteFails = true;
+
+    await runAgentHarness({
+      ...baseInput(),
+      createPr: true,
+      resumeBranch: "feature/task-1",
+    });
+
+    expect(pushCallOptions).toEqual([{ expectedBranch: "feature/task-1", lease: undefined }]);
+  });
+
+  test("keeps the started branch and lease across a hook-fixer amend retry", async () => {
+    scenario.stdout = "The inherited implementation is complete.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+    // The first push fails in the pre-push hook, the fixer amends the commit,
+    // and the retry must still name the branch and lease the run started from.
+    hookFixerResult = true;
+    pushResults = [
+      { success: false, message: "hook failed", hookError: "pre-push tests failed" },
+      { success: true, message: "pushed after amend" },
+    ];
+
+    await runAgentHarness({
+      ...baseInput(),
+      createPr: true,
+      resumeBranch: "feature/task-1",
+    });
+
+    expect(hookFixerCalls).toBe(1);
+    // The real verification dry-run must see the same lease publish uses, or a
+    // rewritten resumed branch is rejected as non-fast-forward.
+    expect(hookFixerArgs).toEqual([
+      {
+        hookType: "push",
+        cwd: undefined,
+        expectedBranch: "feature/task-1",
+        lease: { branch: "feature/task-1", sha: "2" },
+      },
+    ]);
+    expect(deliveryEvents).toEqual(["commit", "push", "push"]);
+    expect(pushCallOptions).toEqual([
+      { expectedBranch: "feature/task-1", lease: { branch: "feature/task-1", sha: "2" } },
+      { expectedBranch: "feature/task-1", lease: { branch: "feature/task-1", sha: "2" } },
+    ]);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
   });
 

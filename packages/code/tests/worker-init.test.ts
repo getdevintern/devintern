@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -12,10 +13,14 @@ import { tmpdir, userInfo } from "os";
 import path from "path";
 
 import { stdinClosedError } from "@devintern/auth";
+import { PromptAttemptsExceededError } from "@devintern/task-trackers";
 
 import { isPromptAbort } from "../src/lib/cli/prompt-abort";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { loadWorkerStartIntent, saveWorkerStartIntent } from "../src/lib/worker/start-intent";
+import { parseEnvFileContent } from "../src/lib/workspace/env";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/code-host/github/app-setup";
+import { readGitHubCliToken } from "../src/lib/init/github-cli-token";
 import {
   ANALYTICS_CONFIG_DIR_ENV,
   setAnalyticsCaptureForTests,
@@ -32,6 +37,7 @@ import {
   workerAuthSessionPath,
   workspaceGitHubRepos,
 } from "../src/lib/init/worker-init";
+import { runNonInteractiveWorkerInit } from "../src/lib/init/worker-init-noninteractive";
 
 /** Start of the one-question worker-settings prompt. */
 const RECOMMENDED_QUESTION = "Use the recommended worker settings";
@@ -198,6 +204,7 @@ describe("runWorkerInit", () => {
       ensureTracker: async () => "markdown",
       bootstrapWorkspace: async () => ({ workspaceDir }),
       configureOperatingPolicy: async () => {},
+      githubCliToken: () => null,
       // Detection is real otherwise: PRManager inspects the *runner's* cwd.
       detectGithubRepo: async () => null,
       // Hermetic service step: detection stays in the temp home and never
@@ -231,7 +238,7 @@ describe("runWorkerInit", () => {
   });
 
   test("writes task_query to workspace.toml, not WORKER_TASK_QUERY", async () => {
-    const result = await runWorkerInit(deps(["status=todo"], { dryRunQuery: async () => 3 }));
+    const result = await runWorkerInit(deps(["", "status=todo"], { dryRunQuery: async () => 3 }));
     expect(result.ok).toBe(true);
     const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
     expect(config.defaults.taskQuery).toBe("status=todo");
@@ -240,6 +247,197 @@ describe("runWorkerInit", () => {
     expect(env).not.toContain("WORKER_TASK_QUERY");
     expect(logs.join("\n")).toContain("3 task(s) match");
     expect(logs.join("\n")).not.toContain("webhook listener");
+  });
+
+  describe("GitHub PR token fallback for a GitHub remote", () => {
+    const savedGithubToken = process.env.GITHUB_TOKEN;
+    const savedGithubRepo = process.env.GITHUB_REPO;
+
+    beforeEach(() => {
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITHUB_REPO;
+    });
+
+    afterEach(() => {
+      if (savedGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedGithubToken;
+      if (savedGithubRepo === undefined) delete process.env.GITHUB_REPO;
+      else process.env.GITHUB_REPO = savedGithubRepo;
+    });
+
+    /** Answer the token question and the rest of the wizard. */
+    function scriptedPrompt(questions: string[], token: string) {
+      return async (question: string): Promise<string> => {
+        questions.push(question);
+        if (question.startsWith("GitHub token for creating")) return token;
+        if (question.startsWith("Ready-tasks")) return "status=todo";
+        return "n";
+      };
+    }
+
+    test("asks for the token when gh is absent", async () => {
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => null,
+          prompt: scriptedPrompt(questions, "ghp_from_prompt"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        true,
+      );
+      expect(logs.join("\n")).toContain("DevIntern opens pull requests on GitHub");
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=ghp_from_prompt",
+      );
+    });
+
+    test("asks for the token when the remote is not GitHub", async () => {
+      writeFileSync(
+        path.join(workspaceDir, "workspace.toml"),
+        '[defaults]\ntracker = "markdown"\n\n[[repos]]\nname = "mirror"\nremote = "https://git.example.com/acme/api.git"\n',
+      );
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => null,
+          prompt: scriptedPrompt(questions, "ghp_from_mirror"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        true,
+      );
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=ghp_from_mirror",
+      );
+    });
+
+    test("persists a shell GITHUB_TOKEN to the workspace .env without prompting", async () => {
+      process.env.GITHUB_TOKEN = "ghp_from_shell";
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => ({ token: "gho_should_not_be_read" }),
+          prompt: scriptedPrompt(questions, "ghp_from_prompt"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        false,
+      );
+      const env = readFileSync(path.join(workspaceDir, ".env"), "utf8");
+      expect(env).toContain("GITHUB_TOKEN=ghp_from_shell");
+      expect(env).not.toContain("gho_should_not_be_read");
+    });
+
+    test("asks for the token when gh is signed out", async () => {
+      const ghDir = mkdtempSync(path.join(tempDir, "gh-signed-out-"));
+      writeFileSync(
+        path.join(ghDir, "gh"),
+        "#!/bin/sh\necho 'You are not logged into any GitHub hosts.' >&2\nexit 1\n",
+      );
+      chmodSync(path.join(ghDir, "gh"), 0o755);
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () =>
+            readGitHubCliToken({ env: { ...process.env, PATH: `${ghDir}:/usr/bin:/bin` } }),
+          prompt: scriptedPrompt(questions, "ghp_signed_out"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        true,
+      );
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=ghp_signed_out",
+      );
+    });
+
+    test("asks for another token when gh's token is rejected", async () => {
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => ({ token: "gho_rejected", account: "octocat" }),
+          githubTokenProbe: async () => {
+            throw new Error("GitHub API error (401): Bad credentials");
+          },
+          prompt: scriptedPrompt(questions, "ghp_replacement"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        true,
+      );
+      const env = readFileSync(path.join(workspaceDir, ".env"), "utf8");
+      expect(env).toContain("GITHUB_TOKEN=ghp_replacement");
+      expect(env).not.toContain("gho_rejected");
+    });
+
+    test("a wizard-saved token can be rotated with --env-file", async () => {
+      // The legacy `.env` template carries a commented token placeholder, which
+      // the parser ignores. Saving must leave exactly one assignment, or the
+      // rotation rewrites that line while an older appended value still wins.
+      writeFileSync(
+        path.join(workspaceDir, ".env"),
+        "# GITHUB_TOKEN=your-github-token-here\nMARKDOWN_TASKS_DIR=tasks\n",
+        { mode: 0o600 },
+      );
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => ({ token: "gho_old", account: "octocat" }),
+          githubTokenProbe: async () => {},
+          prompt: async (question: string) => {
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            if (question.startsWith("Use your GitHub CLI")) return "";
+            return "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const saved = readFileSync(path.join(workspaceDir, ".env"), "utf8");
+      expect(saved.match(/^GITHUB_TOKEN=/gm)).toHaveLength(1);
+      expect(parseEnvFileContent(saved).GITHUB_TOKEN).toBe("gho_old");
+
+      const envFile = path.join(tempDir, "rotate.env");
+      writeFileSync(envFile, "GITHUB_TOKEN=ghp_rotated\nMARKDOWN_TASKS_DIR=tasks\n", {
+        mode: 0o600,
+      });
+      const rotated = await runNonInteractiveWorkerInit(
+        {
+          tracker: "markdown",
+          taskQuery: "status=todo",
+          envFile,
+          json: true,
+          yes: true,
+          repoFromCwd: false,
+        },
+        {
+          cwd: tempDir,
+          workspaceDir,
+          processEnv: {},
+          probe: async () => {},
+          probeTimeoutMs: 2_000,
+          githubCliToken: () => null,
+          doctor: {
+            dryRunQuery: async () => 1,
+            checkRepoAccess: async () => ({ ok: true, detail: "readable" }),
+            checkEntitlement: async () => ({ valid: true, source: "license-key", message: "ok" }),
+            checkHarness: async () => ({ id: "harness", label: "Agent harness", status: "ok" }),
+            checkSandbox: async () => ({ id: "sandbox", label: "Agent sandbox", status: "ok" }),
+            checkGitIdentity: async () => ({ id: "git-identity", label: "Git", status: "ok" }),
+            isPortInUse: async () => false,
+            workerStatus: () => ({ status: "stopped" }),
+          },
+        },
+      );
+      expect(rotated.result).toBe("success");
+      const finalEnv = readFileSync(path.join(workspaceDir, ".env"), "utf8");
+      expect(finalEnv.match(/^GITHUB_TOKEN=/gm)).toHaveLength(1);
+      expect(parseEnvFileContent(finalEnv).GITHUB_TOKEN).toBe("ghp_rotated");
+    });
   });
 
   describe("default devintern-label query", () => {
@@ -264,8 +462,10 @@ describe("runWorkerInit", () => {
     test("Enter picks the tracker's default query, dry-run validated", async () => {
       const queries: string[] = [];
       const result = await runWorkerInit(
-        deps([""], {
+        // The GitHub tracker asks for its token before the query.
+        deps(["ghp_test", ""], {
           ensureTracker: async () => "github",
+          githubTokenProbe: async () => {},
           dryRunQuery: async (q) => {
             queries.push(q);
             return 0;
@@ -441,6 +641,80 @@ describe("runWorkerInit", () => {
       expect(logs.join("\n")).toContain("0 matches is fine");
     });
 
+    test("three deliberate fixes do not exhaust the query budget", async () => {
+      const labels = repoLabels(["ready"]);
+      const questions: string[] = [];
+      const queries: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async (q) => {
+            queries.push(q);
+            return 0;
+          },
+          devinternLabelOps: labels.factory,
+          prompt: scripted(
+            [
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:ready",
+            ],
+            questions,
+          ),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(queries).toHaveLength(4);
+      expect(queries.at(-1)).toBe("is:open label:ready");
+      expect(labels.calls.create).toEqual([]);
+      const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+      expect(config.defaults.taskQuery).toBe("is:open label:ready");
+    });
+
+    test("the fifth fix exhausts the query budget and stops setup", async () => {
+      const labels = repoLabels(["ready"]);
+      const questions: string[] = [];
+      const run = runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => 0,
+          devinternLabelOps: labels.factory,
+          prompt: scripted(
+            [
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              "is:open label:redy",
+              "f",
+              // Would answer the extra "Edit the query?" prompt if the budget
+              // error were misread as a failed dry run.
+              "n",
+            ],
+            questions,
+          ),
+        }),
+      );
+      const error = await run.then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+      expect((error as Error).message).toContain("after 5 corrections");
+      // The budget error stops setup instead of being read as a failed query.
+      expect(questions.filter((q) => q.startsWith("Edit the query and try again?"))).toEqual([]);
+      const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+      expect(config.defaults.taskQuery).not.toBe("is:open label:redy");
+    });
+
     test("c creates the missing labels and keeps the query", async () => {
       const labels = repoLabels([]);
       const result = await runWorkerInit(
@@ -473,6 +747,29 @@ describe("runWorkerInit", () => {
       expect(logs.join("\n")).toContain("Keeping the query");
       const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
       expect(config.defaults.taskQuery).toBe("is:open label:redy");
+    });
+
+    test("three invalid label choices stop setup without writing the query", async () => {
+      const labels = repoLabels([]);
+      const questions: string[] = [];
+      const run = runWorkerInit(
+        deps([], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => 0,
+          devinternLabelOps: labels.factory,
+          prompt: scripted(["is:open label:redy", "z", "z", "z"], questions),
+        }),
+      );
+      const error = await run.then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+      expect((error as Error).message).toContain("No valid label choice after 3 attempts");
+      expect(questions.filter((q) => q.includes("[f/c/k]"))).toHaveLength(3);
+      expect(labels.calls.create).toEqual([]);
+      const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+      expect(config.defaults.taskQuery).not.toBe("is:open label:redy");
     });
 
     test("no lookup without a label term, and none for existing labels or -label:", async () => {
@@ -532,10 +829,102 @@ describe("runWorkerInit", () => {
     expect(config.worker.schedule?.timezone).toBe("Asia/Ho_Chi_Minh");
   });
 
+  test("three invalid conflict-handling answers stop before writing the policy", async () => {
+    const configPath = path.join(workspaceDir, "workspace.toml");
+    const before = readFileSync(configPath, "utf8");
+    const answers = ["n", "bogus", "bogus", "bogus"];
+    const questions: string[] = [];
+    const run = configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async (question) => {
+        questions.push(question);
+        return answers.shift() ?? "";
+      },
+      log: (message) => logs.push(message),
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid conflict handling after 3 attempts");
+    expect(questions.filter((q) => q.startsWith("Conflict handling"))).toHaveLength(3);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  test("three invalid conflict schedules stop before writing the policy", async () => {
+    const configPath = path.join(workspaceDir, "workspace.toml");
+    const before = readFileSync(configPath, "utf8");
+    const answers = ["n", "scheduled", "bogus", "bogus", "bogus"];
+    const questions: string[] = [];
+    const run = configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async (question) => {
+        questions.push(question);
+        return answers.shift() ?? "";
+      },
+      log: (message) => logs.push(message),
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid conflict schedule after 3 attempts");
+    expect(questions.filter((q) => q.startsWith("Conflict-resolution schedule"))).toHaveLength(3);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  test("three invalid active-window answers stop before writing the policy", async () => {
+    const configPath = path.join(workspaceDir, "workspace.toml");
+    const before = readFileSync(configPath, "utf8");
+    const answers = ["n", "auto", "y", "bogus", "bogus", "bogus"];
+    const questions: string[] = [];
+    const run = configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async (question) => {
+        questions.push(question);
+        return answers.shift() ?? "";
+      },
+      log: (message) => logs.push(message),
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid active windows after 3 attempts");
+    expect(questions.filter((q) => q.startsWith("Active windows"))).toHaveLength(3);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  test("three invalid timezones stop before writing the policy", async () => {
+    const configPath = path.join(workspaceDir, "workspace.toml");
+    const before = readFileSync(configPath, "utf8");
+    const answers = ["n", "auto", "y", "09:00-17:00", "Not/AZone", "Not/AZone", "Not/AZone"];
+    const questions: string[] = [];
+    const run = configureWorkerOperatingPolicy({
+      workspaceDir,
+      prompt: async (question) => {
+        questions.push(question);
+        return answers.shift() ?? "";
+      },
+      log: (message) => logs.push(message),
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid timezone after 3 attempts");
+    expect(questions.filter((q) => q.startsWith("Timezone"))).toHaveLength(3);
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
   test("failing dry run offers a retry then accepts the corrected query", async () => {
     let calls = 0;
     const result = await runWorkerInit(
-      deps(["bad query", "y", "status=todo"], {
+      deps(["", "bad query", "y", "status=todo"], {
         dryRunQuery: async (q) => {
           calls++;
           if (q === "bad query") throw new Error("syntax error");
@@ -547,6 +936,36 @@ describe("runWorkerInit", () => {
     expect(calls).toBe(2);
     const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
     expect(config.defaults.taskQuery).toBe("status=todo");
+  });
+
+  test("the fifth failing dry-run correction stops setup instead of keeping the query", async () => {
+    const questions: string[] = [];
+    let dryRuns = 0;
+    const run = runWorkerInit(
+      deps([], {
+        dryRunQuery: async () => {
+          dryRuns += 1;
+          throw new Error("syntax error");
+        },
+        prompt: async (question: string) => {
+          questions.push(question);
+          if (question.startsWith(RECOMMENDED_QUESTION)) throw new Error(`asked: ${question}`);
+          if (question.startsWith("Ready-tasks")) return `bad-${dryRuns + 1}`;
+          // "Edit the query and try again?" — keep correcting until the bound.
+          return "y";
+        },
+      }),
+    );
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("after 5 corrections");
+    expect(dryRuns).toBe(5);
+    expect(questions.filter((q) => q.startsWith("Edit the query and try again?"))).toHaveLength(5);
+    const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
+    expect(config.defaults.taskQuery ?? "").not.toContain("bad-");
   });
 
   test("license failure is reported but does not abort setup", async () => {
@@ -655,6 +1074,32 @@ describe("runWorkerInit", () => {
     expect(logs.join("\n")).not.toContain("License check errored");
   });
 
+  test("three invalid license sign-in answers stop setup", async () => {
+    const questions: string[] = [];
+    const run = runWorkerInit(
+      deps([], {
+        customize: false,
+        checkAutomationLicense: async () => "No automation license found.",
+        getUser: async () => null,
+        prompt: async (question: string) => {
+          questions.push(question);
+          if (question.startsWith("Ready-tasks")) return "status=todo";
+          if (question.includes("Worker Pilot")) return "maybe";
+          throw new Error(`unexpected prompt: ${question}`);
+        },
+      }),
+    );
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid yes/no answer after 3 attempts");
+    expect(questions.filter((q) => q.includes("Worker Pilot"))).toHaveLength(3);
+    // The license step must not swallow the bound and report success.
+    expect(logs.join("\n")).not.toContain("License check errored");
+  });
+
   test("Ctrl+D during relay sign-in stops setup instead of continuing", async () => {
     const run = runWorkerInit(
       deps(["status=todo", "n", "", ""], {
@@ -673,6 +1118,324 @@ describe("runWorkerInit", () => {
     );
     expect(isPromptAbort(error)).toBe(true);
     expect(logs.join("\n")).not.toContain("Sign-in failed");
+  });
+
+  describe("one sign-in step (Worker Pilot, relay, GitHub App)", () => {
+    const pairing = {
+      id: "pair-1",
+      installUrl: "https://github.com/apps/devintern-ai/installations/new?state=pair-1",
+      pairingStatusUrl: "https://relay.devintern.test/v1/github/pairings/pair-1",
+      expiresAt: Date.now() + 10 * 60_000,
+      repos: ["acme/app"],
+      relayUrl: "https://relay.devintern.test",
+    };
+    /** Relay connect stub: GitHub starts a pairing that waits for the App install. */
+    const pendingGitHub = async (
+      target: string,
+      connectDeps: { noWait?: boolean; onOutcome?: (outcome: never) => void },
+    ) => {
+      if (target === "github") {
+        expect(connectDeps.noWait).toBe(true);
+        connectDeps.onOutcome?.({ kind: "pending", target: "github", pairing } as never);
+      }
+      return 0;
+    };
+    /** A complete-poll state whose verified GitHub repositories are `repos`. */
+    const verifiedState = (repos: string[]) => ({
+      relayUrl: pairing.relayUrl,
+      customerId: "cust-1",
+      connectedAt: new Date().toISOString(),
+      registrations: [],
+      githubRepositories: repos.map((repo, index) => ({
+        repo,
+        installationId: 1,
+        repositoryId: index + 1,
+      })),
+    });
+    const signInQuestions = (questions: string[]) =>
+      questions.filter((question) => /sign in|relay/i.test(question));
+
+    test("asks one sign-in question, then pairs the relay without asking", async () => {
+      const questions: string[] = [];
+      const paired: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          checkAutomationLicense: async () => (paired.length > 0 ? null : "No license."),
+          getUser: async () => null,
+          signIn: async () => ({ id: "u1", email: "pilot@example.com" }),
+          connectRelay: async ({ workspaceDir: dir }) => {
+            paired.push(dir);
+            return true;
+          },
+          prompt: async (question) => {
+            questions.push(question);
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            if (question.startsWith("Sign in with GitHub")) return "";
+            return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(signInQuestions(questions)).toEqual([
+        "Sign in with GitHub now to start the Worker Pilot? [Y/n]: ",
+      ]);
+      expect(paired).toEqual([workspaceDir]);
+      const all = logs.join("\n");
+      expect(all).toContain(
+        "5️⃣  Sign in with GitHub to start your 14-day Worker Pilot (also connects instant events)",
+      );
+      expect(all).toContain("Relay pairing stored");
+      expect(all).not.toContain("7️⃣");
+    });
+
+    test("signed-in and LICENSE_KEY users are not asked to sign in", async () => {
+      for (const setup of ["signed-in", "license-key"] as const) {
+        logs = [];
+        const questions: string[] = [];
+        if (setup === "license-key") process.env.LICENSE_KEY = "lic_test";
+        else delete process.env.LICENSE_KEY;
+        const result = await runWorkerInit(
+          deps([], {
+            checkAutomationLicense: async () => null,
+            getUser: async () => (setup === "signed-in" ? { id: "u1", email: "me@x.test" } : null),
+            connectRelay: async () => true,
+            prompt: async (question) => {
+              questions.push(question);
+              if (question.startsWith("Ready-tasks")) return "status=todo";
+              return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+            },
+          }),
+        );
+        expect(result.ok).toBe(true);
+        expect(signInQuestions(questions)).toEqual([]);
+        expect(logs.join("\n")).toContain(
+          setup === "signed-in" ? "Relay pairing stored" : "Relay needs sign-in; skipped",
+        );
+      }
+    });
+
+    test("a license that is already OK is not followed by a Pilot sign-in question", async () => {
+      const questions: string[] = [];
+      let signIns = 0;
+      const result = await runWorkerInit(
+        deps([], {
+          checkAutomationLicense: async () => null,
+          getUser: async () => null,
+          signIn: async () => {
+            signIns += 1;
+            return { id: "u1", email: "me@x.test" };
+          },
+          connectRelay: async () => true,
+          prompt: async (question) => {
+            questions.push(question);
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(signInQuestions(questions)).toEqual([]);
+      expect(signIns).toBe(0);
+      expect(logs.join("\n")).toContain("✅ Automation license OK.");
+    });
+
+    test("the wizard forgets an earlier `worker init --start` request", async () => {
+      saveWorkerStartIntent(workspaceDir, { requestedAt: new Date().toISOString(), relay: true });
+      const result = await runWorkerInit(
+        deps([], {
+          checkAutomationLicense: async () => null,
+          getUser: async () => null,
+          connectRelay: async () => true,
+          prompt: async (question) => {
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(loadWorkerStartIntent(workspaceDir)).toBeNull();
+    });
+
+    test("--no-relay keeps the sign-in but does not pair", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          noRelay: true,
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          connectRelay: async () => {
+            throw new Error("connectRelay must not run with --no-relay");
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("Instant events skipped (--no-relay)");
+    });
+
+    test("waits for the GitHub App installation and continues once it is verified", async () => {
+      const opened: string[] = [];
+      let polls = 0;
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          githubAppWait: {
+            openUrl: async (url) => {
+              opened.push(url);
+            },
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => {
+              polls += 1;
+              return polls < 2
+                ? { kind: "pending" }
+                : { kind: "complete", state: verifiedState(["acme/app"]) as never };
+            },
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(opened).toEqual([pairing.installUrl]);
+      expect(polls).toBe(2);
+      const all = logs.join("\n");
+      expect(all).toContain("Press Enter to skip");
+      expect(all).toContain("DevIntern GitHub App installed and verified");
+      expect(all).toContain("Relay pairing stored");
+    });
+
+    test("a poll that throws is retried until the App is installed", async () => {
+      let polls = 0;
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => {
+              polls += 1;
+              if (polls === 1) throw new Error("fetch failed");
+              return { kind: "complete", state: verifiedState(["acme/app"]) as never };
+            },
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(polls).toBe(2);
+      const all = logs.join("\n");
+      expect(all).toContain("Could not check the pairing (fetch failed); retrying");
+      expect(all).toContain("DevIntern GitHub App installed and verified");
+      expect(all).not.toContain("Relay setup failed");
+    });
+
+    test("a complete pairing that granted another repository is not reported as installed", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => ({ kind: "complete", state: verifiedState(["acme/other"]) as never }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).not.toContain("installed and verified");
+      expect(all).not.toContain("Relay pairing stored");
+      expect(all).toContain("The App installation did not grant: acme/app");
+      expect(all).toContain(
+        "Add them to the App installation, then run `devintern worker connect github` again.",
+      );
+    });
+
+    test("after a skipped App wait the other GitHub repositories are not paired", async () => {
+      writeFileSync(
+        path.join(workspaceDir, "workspace.toml"),
+        '[defaults]\ntracker = "markdown"\n\n[[repos]]\nname = "other"\nremote = "git@github.com:acme/other.git"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n',
+      );
+      const githubConnects: string[] = [];
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          bootstrapWorkspace: async () => ({ workspaceDir, repoName: "app" }),
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: (async (
+            target: string,
+            connectDeps: { repo?: string; onOutcome?: (outcome: never) => void },
+          ) => {
+            if (target === "github") {
+              githubConnects.push(connectDeps.repo ?? "");
+              connectDeps.onOutcome?.({ kind: "pending", target: "github", pairing } as never);
+            }
+            return 0;
+          }) as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: Promise.resolve(), stop: () => {} }),
+            sleep: () => new Promise(() => {}),
+            poll: async () => ({ kind: "pending" }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(githubConnects).toEqual(["acme/other"]);
+      expect(logs.join("\n")).toContain("Not pairing acme/app yet: finish acme/other first");
+    });
+
+    test("an expired GitHub App pairing points at a fresh connect, not --status", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => ({ kind: "expired" }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).toContain("The GitHub App pairing expired");
+      // The recorded pairing is gone, so the App step sends a fresh connect.
+      expect(all).toMatch(
+        /No verified GitHub App pairing was recorded\.\n\s+Run `devintern worker connect github`:/,
+      );
+      expect(all).not.toContain(`Approve the App at ${pairing.installUrl}`);
+    });
+
+    test("Enter skips the GitHub App wait and the App step says how to finish", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: Promise.resolve(), stop: () => {} }),
+            sleep: () => new Promise(() => {}),
+            poll: async () => ({ kind: "pending" }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).toContain("Skipped. Finish later");
+      expect(all).toContain("devintern worker connect github --status");
+      expect(all).toContain("Relay pairing is not finished yet");
+      expect(all).not.toContain("Run: devintern worker connect github");
+      // The App step follows the relay path with the printed install address.
+      expect(all).toContain("Approve the App at");
+      expect(all).not.toContain("advanced no-relay mode");
+      // The closing summary routes back to the same pairing, not a re-run.
+      expect(all).toContain(`Approve the App at ${pairing.installUrl}`);
+      expect(all).not.toContain("then re-run `devintern worker init`");
+    });
   });
 
   test("passes the workspace to the license check (DEV-126)", async () => {
@@ -1544,6 +2307,7 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
         async () => "n",
         async () => "",
         log,
+        () => null,
       );
       expect(tracker).toBe("github");
       const all = logs.join("\n");
@@ -1556,12 +2320,61 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
       const stop = async (): Promise<string> => {
         throw new Error("tracker prompt reached");
       };
-      await expect(defaultEnsureTracker(tempDir, stop, stop, log)).rejects.toThrow(
+      await expect(defaultEnsureTracker(tempDir, stop, stop, log, () => null)).rejects.toThrow(
         "tracker prompt reached",
       );
       const all = logs.join("\n");
       expect(all).toContain("No tracker config yet");
       expect(all).not.toContain("Using github from");
+    });
+
+    test("persists a shell-only GITHUB_TOKEN to the workspace .env", async () => {
+      process.env.GITHUB_TOKEN = "ghp_shell_only";
+      process.env.GITHUB_REPO = "acme/app";
+      const result = await runWorkerInit(
+        deps([], {
+          ensureTracker: undefined,
+          githubCliToken: () => null,
+          prompt: async (question: string) => (question.startsWith("Ready-tasks") ? "" : "n"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=ghp_shell_only",
+      );
+    });
+
+    test("offers the signed-in gh token when an existing workspace lost its GITHUB_TOKEN", async () => {
+      // TASK_TRACKER in the shared .env makes the tracker step return early,
+      // so it never sees the missing token.
+      writeFileSync(path.join(workspaceDir, ".env"), "TASK_TRACKER=github\n", { mode: 0o600 });
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          ensureTracker: undefined,
+          githubCliToken: () => ({ token: "gho_available", account: "octocat" }),
+          githubTokenProbe: async () => {},
+          prompt: async (question: string) => {
+            questions.push(question);
+            if (question.startsWith("Ready-tasks") || question.startsWith("Use your GitHub CLI")) {
+              return "";
+            }
+            return "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(
+        questions.some((question) =>
+          question.startsWith("Use your GitHub CLI token (account octocat"),
+        ),
+      ).toBe(true);
+      expect(
+        questions.some((question) => question.startsWith("GitHub personal access token")),
+      ).toBe(false);
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=gho_available",
+      );
     });
   });
 });

@@ -52,6 +52,8 @@ Ask once, up front, and record the answers:
    ```
 
    Add the tracker's variables (for example `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`; see [Integrations](references/integrations.md)). `AGENT_HARNESS` is `claude-code`, `codex`, `opencode`, `cursor`, or another harness id; there is no flag for it. For GitHub, suggest a fine-grained token limited to the repository with Contents, Pull requests, and Issues set to Read and write and Metadata Read (created at `https://github.com/settings/personal-access-tokens/new`), or a classic token with the `repo` scope. The file must be mode `0600`.
+
+   When the GitHub CLI is installed and signed in (`gh auth status` succeeds), you can omit `GITHUB_TOKEN` from the env file: `worker init --non-interactive` reuses `gh auth token`, probes it, and saves a copy in the workspace `.env`; `--json` reports `tokenSource: "gh"`. A rejected token is not saved and setup fails with the `fix-credentials` next step. The saved copy does not refresh when `gh` re-authenticates; update `GITHUB_TOKEN` in the workspace `.env` (`~/.devintern/.env`) or re-run setup with `--env-file`.
 2. Get a checkout of the repository on the worker host if none exists. The worker keeps its own clone, so a shallow clone is enough; the checkout identifies the repository through its `origin` remote. For a private HTTPS repository, use the token without writing it to disk or the remote URL:
 
    ```bash
@@ -68,8 +70,10 @@ Inside the checkout:
 
 ```bash
 devintern worker init --non-interactive --tracker <id> [--task-query '<query>'] [--create-label] \
-  --repo-from-cwd --env-file ~/devintern.env --remove-env-file --sign-in <method> --json
+  --repo-from-cwd --env-file ~/devintern.env --remove-env-file --sign-in <method> [--start] --json
 ```
+
+Pass `--start` only with the user's go-ahead to start the worker (step 0.6): it installs and starts the background service when every check passes, or, when only sign-in is left, the `worker login --complete` of step 4 does it. Without the go-ahead, leave it out and install in step 5. Add `--no-relay` when the user chose polling only.
 
 Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 
@@ -80,6 +84,7 @@ Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 | `error` | Input problem; with `missing_input`, `missing[]` names every missing flag and variable |
 | `checks[]` | `name`, `label`, `status` (`pass`, `warn`, `action`, `fail`, `skipped`), `message`, `hint`. A `query` warn with 0 matches is fine when nothing is labelled yet. A `label` warn means the `devintern` label is missing (fix: `--create-label` with the user's yes). A `query-labels` warn means a label `--task-query` names does not exist, often a typo: ask the user to correct the query or create the label |
 | `signIn` | `url`, `method`, `expiresAt`, `complete`, `reused`; present when `--sign-in` started a sign-in (step 4) |
+| `start` | With `--start`: `result` `installed` (read `service.result`, as in step 5.3), `after_sign_in` (step 4 starts it), `not_ready` (a check failed; nothing installed), or `failed` (`code` `service_start_failed`) |
 | `repo` | `name`, `remote`, `added`, `defaultBranch`, `branch` |
 | `warnings[]` | Not failures; relay each one to the user |
 | `nextSteps[]` | `{id, message, command, url?}`; run `command` as given (table below) |
@@ -98,9 +103,9 @@ Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 | `retry` | init | Nothing was saved; re-run setup after the fixes above it |
 | `update` | init | With `code` `workspace_exists`: the exact re-run with `--yes` |
 | `service` | init, doctor | Install and start the background service (step 5) |
-| `connect` | init | Optional relay pairing (step 6) |
+| `connect` | init | Optional relay pairing (step 6); only when already signed in and not paired |
 
-`service` and `connect` are withheld while a check fails.
+`service` and `connect` are withheld while a check fails. `service` is left out once `--start` installed the service or deferred it to the sign-in, and `connect` while a sign-in is pending (completing it pairs the relay).
 
 **Re-runs.** Rerunning with the same flags is safe: it returns `unchanged`, or `action_required` again while sign-in is pending. Once a run reports `envFileRemoved: true`, drop `--env-file` and `--remove-env-file` from every re-run: the values are in the workspace `.env` now, and naming the deleted file fails with `code` `env_file_unreadable`. Different flags on an existing workspace return `failure` with `code` `workspace_exists` and an `update` next step; confirm with the user before running it, because `--yes` updates the tracker, query, and repository entries (other settings are kept). The same applies to any next-step command containing `--yes` (`fix-credentials`, `fix-query`, `add-repo`) when the workspace existed before this session.
 
@@ -124,13 +129,13 @@ The 14-day free Worker Pilot (no card required) belongs to the user's DevIntern 
 1. Use `signIn` from step 3, or run `devintern worker login <method> --no-wait --json` (`result` `pending` with `url`, `expiresAt`, `complete`) with the method from step 0.5 (`github`, `google`, `x`, or `email <address>`). A `sign-in` next step always says `github`; replace it with that method, because a different method starts a new sign-in and invalidates the link the user already has.
 2. Hand-off: show the user `url` (for email there is none: the link arrives in their inbox) and `expiresAt`. Tell them that after signing in the browser lands on a `127.0.0.1` page that does not load, which is expected, and to copy that page's full address.
 3. Either the user runs the `complete` command on the worker host with the address in single quotes, or they paste the address to you and you run `devintern worker login --complete '<address>' --json` at once. Pasting it is allowed: it holds a single-use code that works only with the verifier stored owner-only on this host. Use it only in that command, and never ask for anything else (tokens, session files, `.env` values).
-4. `result` `signed_in` (exit 0) finishes it. The pending sign-in expires 30 minutes after it starts. Rerunning `--no-wait` (or init with `--sign-in`) with the same method while more than 5 minutes remain returns the same URL with `reused: true`, so the link the user has stays valid. On `failure` (expired, used, wrong host), start again from 4.1.
+4. `result` `signed_in` (exit 0) finishes it. The same document reports what followed: `relay` is the step 6 pairing document (`pending` with an `authorize-github-app` next step, `connected`, or `skipped` for `--no-relay` or no GitHub/GitLab repository), and `service` is the step 5.3 install document when `worker init --start` was waiting for this sign-in. Run `nextSteps` in order; a relay or service problem does not change `signed_in`. The pending sign-in expires 30 minutes after it starts. Rerunning `--no-wait` (or init with `--sign-in`) with the same method while more than 5 minutes remain returns the same URL with `reused: true`, so the link the user has stays valid. On `failure` (expired, used, wrong host), start again from 4.1.
 
 ### 5. Check readiness and start the service
 
 1. Run `devintern worker doctor --json` (`schema` `devintern.worker-doctor`). Same `checks[]` and `nextSteps[]` shapes as init, plus `setup` and `summary` (step 7). `failure` (exit 1) blocks: follow the `fix-*` or `install-agent` next steps. `action_required` (exit 2) means only sign-in is left: do step 4. The token check covers push access (API permission and a dry-run push). Report every `warn` check to the user, including an entitlement shown as `skipped (DEVINTERN_SKIP_LICENSE_CHECK=1; ...)`: no license was checked.
 2. Check that nothing else runs this workspace: `devintern worker service status --json` (`result` `not_installed` when there is no service) and `devintern worker status --json`. Do not start a second worker.
-3. With the user's go-ahead (step 0.6), run `devintern worker service install --json`. It repeats the doctor checks, installs a systemd user unit (Linux) or launchd agent (macOS), starts it, and waits for the worker. `result` and exit code:
+3. Skip this when `start.result` (step 3) was `installed` or the step 4 login reported `service`; read that document's `result` instead. Otherwise, with the user's go-ahead (step 0.6), run `devintern worker service install --json`. It repeats the doctor checks, installs a systemd user unit (Linux) or launchd agent (macOS), starts it, and waits for the worker. `result` and exit code:
 
    | `result` | Exit | Meaning |
    | --- | --- | --- |
@@ -144,7 +149,7 @@ The 14-day free Worker Pilot (no card required) belongs to the user's DevIntern 
 
 ### 6. Pair the relay
 
-After sign-in, for GitHub:
+The step 4 login already ran 6.1 for you: read its `relay` document and continue at 6.2 when it is `pending`. For GitHub otherwise:
 
 1. `devintern worker connect github --no-wait --json` (`schema` `devintern.worker-connect`). `connected` (exit 0) means done. `pending` (exit 0) has a next step `authorize-github-app` whose URL (`pairing.authorizeUrl` when `pairing.appInstalled` is true, otherwise `pairing.installUrl`) the user opens in any browser to approve the DevIntern GitHub App, selecting only the intended repositories. `action_required` (exit 2) means no sign-in: do step 4. Its stderr may say a pairing "failed"; the JSON is authoritative.
 2. When the user says they approved, run `devintern worker connect github --status --json`. `pending` means not approved yet: wait for the user instead of looping. `failure` with `code` `pairing_expired` means start again at 6.1. With several GitHub accounts, repeat until nothing is pending.
