@@ -39,9 +39,12 @@ import {
 import { trackerRequiredEnv } from "../trackers/manager";
 import { Utils } from "../utils";
 import { writeSecretFile } from "../utils/secret-file";
+import { detectCheckoutBranches, remoteTrackingBranchExists } from "../workspace/checkout-branches";
 import { loadWorkspaceConfig } from "../workspace/config";
 import {
+  clearRepoDefaultBranch,
   ensureWorkspaceAndAddRepo,
+  writeRepoDefaultBranch,
   writeWorkerOperatingPolicy,
   writeWorkspaceDefaults,
 } from "../workspace/init";
@@ -277,6 +280,10 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
   run.workspaceDir = workspace.workspaceDir;
   run.repoName = workspace.repoName;
 
+  if (workspace.repoName) {
+    await recordRepoDefaultBranch(run, workspace.workspaceDir, workspace.repoName);
+  }
+
   ensureWorkspaceCodeState(run.workspaceDir);
   try {
     if (copyProjectSessionToWorkspace(run.projectRoot, run.workspaceDir)) {
@@ -287,6 +294,86 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
     run.log("   Run `devintern worker login` to sign in for the workspace.");
   }
   return true;
+}
+
+/**
+ * Record `[[repos]].default_branch`: the base task worktrees are cut from and
+ * worker task pull requests target. A branch is only offered or kept when it
+ * exists on origin, because worktrees come from `origin/<branch>`. When the
+ * checkout is on the remote's default branch it is saved silently; otherwise
+ * the wizard asks, offering the saved value (or the remote default) on Enter so
+ * a re-run keeps the earlier verified answer.
+ */
+async function recordRepoDefaultBranch(
+  run: PromptRun,
+  workspaceDir: string,
+  repoName: string,
+): Promise<void> {
+  const { branch, defaultBranch } = await detectCheckoutBranches(run.cwd);
+  if (!branch && !defaultBranch) return;
+  const saved = loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).repos.find(
+    (repo) => repo.name === repoName,
+  )?.defaultBranch;
+  const currentOnOrigin = branch ? await remoteTrackingBranchExists(run.cwd, branch) : false;
+  const savedOnOrigin = saved ? await remoteTrackingBranchExists(run.cwd, saved) : false;
+  if (saved && !savedOnOrigin) {
+    run.log(`⚠️  Saved default_branch "${saved}" is not on origin; choosing another branch.`);
+  }
+
+  if (!defaultBranch) {
+    if (!savedOnOrigin) {
+      if (saved) clearRepoDefaultBranch(workspaceDir, repoName);
+      run.log(
+        "ℹ️  This clone has no origin/HEAD, so default_branch stays unset; " +
+          "the worker follows the remote's default branch.",
+      );
+    }
+    return;
+  }
+
+  if (branch && branch !== defaultBranch) {
+    if (currentOnOrigin) {
+      const chosen = await promptRepoDefaultBranch(run, {
+        current: branch,
+        remote: defaultBranch,
+        ...(savedOnOrigin ? { saved } : {}),
+      });
+      if (chosen !== saved) {
+        writeRepoDefaultBranch(workspaceDir, repoName, chosen);
+        run.log(`💾 Wrote default_branch = "${chosen}" to workspace.toml`);
+      }
+      return;
+    }
+    run.log(
+      `⚠️  The checkout is on "${branch}", but that branch is not on origin; ` +
+        `using "${savedOnOrigin ? saved : defaultBranch}" instead.`,
+    );
+  }
+
+  const chosen = savedOnOrigin ? saved : defaultBranch;
+  if (!chosen || chosen === saved) return;
+  writeRepoDefaultBranch(workspaceDir, repoName, chosen);
+  run.log(`💾 Wrote default_branch = "${chosen}" to workspace.toml`);
+}
+
+/** Ask which branch task worktrees and PRs use; Enter keeps the saved or remote default. */
+async function promptRepoDefaultBranch(
+  run: PromptRun,
+  ctx: { current: string; remote: string; saved?: string },
+): Promise<string> {
+  const fallback = ctx.saved ?? ctx.remote;
+  const choices = [ctx.current, ctx.remote];
+  for (;;) {
+    const answer = (
+      await run.prompt(`Base tasks and PRs on ${choices.join(" or ")}? [${fallback}]: `)
+    ).trim();
+    if (!answer) return fallback;
+    if (choices.includes(answer)) return answer;
+    if (answer.toLowerCase() === "current") return ctx.current;
+    if (answer.toLowerCase() === "default") return ctx.remote;
+    if (answer === ctx.saved) return answer;
+    run.log(`   Enter ${choices.join(" or ")}, or press Enter for ${fallback}.`);
+  }
 }
 
 /**
@@ -494,7 +581,7 @@ function noteRepo(run: FlagsRun): void {
   if (repo.added && branch && defaultBranch && branch !== defaultBranch) {
     report.warnings.push(
       `The checkout is on ${branch}, but tasks start from and pull requests target ` +
-        `${defaultBranch} (recorded as default_branch). To open pull requests against ` +
+        `${defaultBranch} (recorded as default_branch). To base tasks and pull requests on ` +
         `${branch} instead, add "--pr-target-branch ${branch}" to [defaults].worker_task_args ` +
         "in workspace.toml.",
     );

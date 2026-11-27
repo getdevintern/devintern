@@ -47,7 +47,7 @@ pr_labels = ["devintern"]         # GitHub only
 [[repos]]
 name = "backend"
 remote = "git@github.com:acme/backend.git"
-default_branch = "main"         # optional; default is the remote's HEAD
+default_branch = "main"         # optional; base for task worktrees and task PRs (default: remote HEAD)
 env_file = "env/backend.env"    # optional, relative to ~/.devintern
   [repos.env]
   GITHUB_REPO = "acme/backend"

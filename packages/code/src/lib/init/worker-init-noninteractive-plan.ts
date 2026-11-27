@@ -14,6 +14,7 @@ import { redactUrlCredentials } from "../observability/dashboard-workspace";
 import { trackersSupportingPolling } from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
 import { Utils } from "../utils";
+import { detectCheckoutBranches } from "../workspace/checkout-branches";
 import { gitHubSlugFromRemote, parseWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import { parseEnvFile, parseEnvFileContent } from "../workspace/env";
@@ -101,25 +102,14 @@ async function detectCwdRepo(cwd: string): Promise<
       error: `--repo-from-cwd: ${root} has no origin remote. Add one with \`git remote add origin <url>\`.`,
     };
   }
-  const head = await Utils.executeGitCommand(["symbolic-ref", "--quiet", "--short", "HEAD"], {
-    cwd: root,
-  });
-  const branch = head.success ? head.output.trim() || undefined : undefined;
-  // The remote's default branch as the clone recorded it (`origin/HEAD`); no network.
-  const originHead = await Utils.executeGitCommand(
-    ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
-    { cwd: root },
-  );
-  const remoteDefault = originHead.success
-    ? originHead.output.trim().replace(/^origin\//, "") || undefined
-    : undefined;
+  const { branch, defaultBranch } = await detectCheckoutBranches(root);
   return {
     ok: true,
     root,
     remote,
     slug: gitHubSlugFromRemote(remote),
     branch,
-    defaultBranch: remoteDefault ?? branch,
+    defaultBranch,
   };
 }
 
