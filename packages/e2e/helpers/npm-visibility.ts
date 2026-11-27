@@ -56,20 +56,41 @@ export function registryFetchPackument(registry = NPM_REGISTRY): FetchPackument 
       signal: AbortSignal.timeout(20_000),
     });
     if (response.status === 404) return undefined;
-    if (!response.ok) throw new Error(`npm registry: HTTP ${response.status} for ${packageName}`);
+    if (!response.ok) throw new NpmRegistryHttpError(response.status, packageName);
     return parsePackument(await response.json());
   };
 }
 
+export class NpmRegistryHttpError extends Error {
+  constructor(
+    readonly status: number,
+    packageName: string,
+  ) {
+    super(`npm registry: HTTP ${status} for ${packageName}`);
+    this.name = "NpmRegistryHttpError";
+  }
+
+  /** Auth and request errors will not fix themselves by waiting; 5xx, 408 and 429 may. */
+  get retryable(): boolean {
+    return this.status >= 500 || this.status === 408 || this.status === 429;
+  }
+}
+
+/**
+ * The registry answered, but never with the version. Only thrown when at least
+ * one check got a registry answer, so an outage or a misconfigured registry is
+ * not reported as a propagation delay.
+ */
 export class NpmNotVisibleError extends Error {
   constructor(
     readonly packageName: string,
     readonly version: string,
     readonly waitedMs: number,
+    readonly lastStatus: string,
   ) {
     super(
-      `${packageName}@${version} is not visible on npm after ${formatMinutes(waitedMs)}; ` +
-        "the publish may still be propagating",
+      `${packageName}@${version} is not visible on npm after ${formatMinutes(waitedMs)} ` +
+        `(last check: ${lastStatus}); the publish may still be propagating`,
     );
     this.name = "NpmNotVisibleError";
   }
@@ -100,8 +121,10 @@ const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+].+)?$/;
 /**
  * Resolve `spec` on the registry. A dist-tag must already exist; an exact
  * version is polled with exponential backoff until it is listed or
- * `timeoutMs` passes, which throws {@link NpmNotVisibleError}. Registry
- * errors while waiting count as "not visible yet".
+ * `timeoutMs` passes. Transient registry errors (network, 5xx, 408, 429) are
+ * retried; other HTTP errors fail at once. At the deadline it throws
+ * {@link NpmNotVisibleError} if the registry ever answered, or a plain error
+ * naming the last failure if every check errored.
  */
 export async function waitForNpmVersion(
   options: WaitForNpmVersionOptions,
@@ -126,6 +149,7 @@ export async function waitForNpmVersion(
   }
 
   let delay = initialDelayMs;
+  let registryAnswered = false;
   for (let attempts = 1; ; attempts++) {
     let status: string;
     try {
@@ -137,15 +161,23 @@ export async function waitForNpmVersion(
         }
         return { version: spec, waitedMs, attempts };
       }
+      registryAnswered = true;
       status = packument
         ? `not listed yet (latest is ${packument.distTags.latest ?? "unset"})`
         : "package not found";
     } catch (error) {
+      if (error instanceof NpmRegistryHttpError && !error.retryable) throw error;
       status = error instanceof Error ? error.message : String(error);
     }
     const waitedMs = now() - started;
     const remaining = timeoutMs - waitedMs;
-    if (remaining <= 0) throw new NpmNotVisibleError(packageName, spec, waitedMs);
+    if (remaining <= 0) {
+      if (registryAnswered) throw new NpmNotVisibleError(packageName, spec, waitedMs, status);
+      throw new Error(
+        `Could not check ${packageName}@${spec} on the npm registry for ${formatMinutes(waitedMs)}; ` +
+          `last error: ${status}`,
+      );
+    }
     const pause = Math.min(delay, remaining);
     log(
       `Waiting for ${packageName}@${spec} on npm: ${status}; ` +

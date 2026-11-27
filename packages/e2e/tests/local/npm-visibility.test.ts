@@ -115,8 +115,10 @@ test("gives up after the timeout with a not-visible-on-npm error", async () => {
 
   expect(error).toBeInstanceOf(NpmNotVisibleError);
   expect((error as Error).message).toBe(
-    `${PACKAGE}@2.30.0 is not visible on npm after 15 minutes; the publish may still be propagating`,
+    `${PACKAGE}@2.30.0 is not visible on npm after 15 minutes ` +
+      "(last check: not listed yet (latest is 2.29.0)); the publish may still be propagating",
   );
+  expect((error as NpmNotVisibleError).lastStatus).toBe("not listed yet (latest is 2.29.0)");
   // The last pause is trimmed so the wait ends at the deadline, not past it.
   expect(clock.elapsed()).toBe(15 * 60_000);
 });
@@ -143,6 +145,100 @@ test("registry errors while waiting are retried", async () => {
   expect(result.version).toBe("2.30.0");
   expect(logs[0]).toContain("HTTP 503");
   expect(logs[1]).toContain("package not found");
+});
+
+/** A real registry server that always answers with `status`. */
+function failingRegistry(status: number) {
+  let requests = 0;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      requests++;
+      return new Response("nope", { status });
+    },
+  });
+  servers.push(server);
+  return { fetchPackument: registryFetchPackument(server.url.origin), requests: () => requests };
+}
+
+test("a registry that only ever errors is not reported as a propagation delay", async () => {
+  const clock = fakeClock();
+  const registry = failingRegistry(500);
+
+  const error = await waitForNpmVersion({
+    packageName: PACKAGE,
+    spec: "2.30.0",
+    fetchPackument: registry.fetchPackument,
+    sleep: clock.sleep,
+    now: clock.now,
+    log: () => {},
+  }).catch((caught: unknown) => caught);
+
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(NpmNotVisibleError);
+  expect((error as Error).message).toBe(
+    `Could not check ${PACKAGE}@2.30.0 on the npm registry for 15 minutes; ` +
+      `last error: npm registry: HTTP 500 for ${PACKAGE}`,
+  );
+  expect(clock.elapsed()).toBe(15 * 60_000);
+});
+
+test("the last registry error is named when the version never showed up", async () => {
+  const clock = fakeClock();
+  let calls = 0;
+
+  const error = await waitForNpmVersion({
+    packageName: PACKAGE,
+    spec: "2.30.0",
+    fetchPackument: async () => {
+      calls++;
+      if (calls === 1) return { distTags: { latest: "2.29.0" }, versions: new Set(["2.29.0"]) };
+      throw new Error("npm registry: HTTP 502 for @getdevintern/code");
+    },
+    sleep: clock.sleep,
+    now: clock.now,
+    log: () => {},
+  }).catch((caught: unknown) => caught);
+
+  expect(error).toBeInstanceOf(NpmNotVisibleError);
+  expect((error as Error).message).toContain("(last check: npm registry: HTTP 502 for");
+});
+
+test.each([401, 403, 400])("HTTP %d fails at once instead of waiting", async (status) => {
+  const clock = fakeClock();
+  const registry = failingRegistry(status);
+
+  const error = await waitForNpmVersion({
+    packageName: PACKAGE,
+    spec: "2.30.0",
+    fetchPackument: registry.fetchPackument,
+    sleep: clock.sleep,
+    now: clock.now,
+    log: () => {},
+  }).catch((caught: unknown) => caught);
+
+  expect(error).not.toBeInstanceOf(NpmNotVisibleError);
+  expect((error as Error).message).toBe(`npm registry: HTTP ${status} for ${PACKAGE}`);
+  expect(registry.requests()).toBe(1);
+  expect(clock.sleeps).toEqual([]);
+});
+
+test.each([429, 408, 503])("HTTP %d is retried", async (status) => {
+  const clock = fakeClock();
+  const registry = failingRegistry(status);
+
+  await waitForNpmVersion({
+    packageName: PACKAGE,
+    spec: "2.30.0",
+    timeoutMs: 30_000,
+    fetchPackument: registry.fetchPackument,
+    sleep: clock.sleep,
+    now: clock.now,
+    log: () => {},
+  }).catch(() => {});
+
+  expect(registry.requests()).toBeGreaterThan(1);
 });
 
 test("a dist-tag resolves once and is not waited for", async () => {
