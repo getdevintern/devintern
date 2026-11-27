@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { PM_TRACKER_SETUP } from "@getdevintern/pm/init-shared";
-import { firstWizardStep, prefilledValues } from "./ProjectSetupWizard.helpers.ts";
+import {
+  firstWizardStep,
+  prefilledValues,
+  reuseSourceLabel,
+  reusedSecretKeys,
+} from "./ProjectSetupWizard.helpers.ts";
 import type { ProjectInitInspect } from "../../../shared/ipc-contract.ts";
 
 function makeInspect(overrides: Partial<ProjectInitInspect> = {}): ProjectInitInspect {
@@ -10,6 +15,7 @@ function makeInspect(overrides: Partial<ProjectInitInspect> = {}): ProjectInitIn
     reusableFromCode: null,
     trackers: [],
     currentEnv: {},
+    currentSecretKeys: [],
     ...overrides,
   };
 }
@@ -25,8 +31,9 @@ describe("ProjectSetupWizard helpers", () => {
       const inspect = makeInspect({
         reusableFromCode: {
           trackerId: "jira",
-          values: { JIRA_API_TOKEN: "tok" },
-        } as ProjectInitInspect["reusableFromCode"],
+          values: { JIRA_EMAIL: "dev@acme.com" },
+          secretKeys: ["JIRA_API_TOKEN"],
+        },
       });
       expect(firstWizardStep(inspect, "init")).toBe("reuse");
     });
@@ -41,8 +48,9 @@ describe("ProjectSetupWizard helpers", () => {
         configExists: true,
         reusableFromCode: {
           trackerId: "jira",
-          values: { JIRA_API_TOKEN: "tok" },
-        } as ProjectInitInspect["reusableFromCode"],
+          values: { JIRA_EMAIL: "dev@acme.com" },
+          secretKeys: ["JIRA_API_TOKEN"],
+        },
       });
       expect(firstWizardStep(inspect, "update")).toBe("tracker");
     });
@@ -96,6 +104,29 @@ describe("ProjectSetupWizard helpers", () => {
       });
       const values = prefilledValues(inspect, "jira");
       expect(Object.keys(values).sort()).toEqual([...jiraKeys].sort());
+    });
+  });
+
+  describe("reusedSecretKeys", () => {
+    const inspect = makeInspect({
+      reusableFromCode: { trackerId: "jira", values: {}, secretKeys: ["JIRA_API_TOKEN"] },
+      reusableSource: 'DevIntern workspace (repo "app")',
+      currentSecretKeys: ["JIRA_API_TOKEN", "LINEAR_API_KEY"],
+    });
+
+    test("code source: only for the tracker DevIntern Code offered", () => {
+      expect(reusedSecretKeys(inspect, "code", "jira")).toEqual(["JIRA_API_TOKEN"]);
+      expect(reusedSecretKeys(inspect, "code", "linear")).toEqual([]);
+      expect(reuseSourceLabel(inspect, "code")).toBe('DevIntern workspace (repo "app")');
+    });
+
+    test("project source: the current secrets of the chosen tracker", () => {
+      expect(reusedSecretKeys(inspect, "project", "linear")).toEqual(["LINEAR_API_KEY"]);
+      expect(reusedSecretKeys(inspect, "project", "github")).toEqual([]);
+    });
+
+    test("no source reuses nothing", () => {
+      expect(reusedSecretKeys(inspect, null, "jira")).toEqual([]);
     });
   });
 });

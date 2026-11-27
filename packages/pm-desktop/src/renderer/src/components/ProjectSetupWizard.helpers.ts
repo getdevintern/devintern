@@ -56,3 +56,33 @@ export function prefilledValues(
   }
   return values;
 }
+
+/** Where the secrets the renderer never sees come from, if anywhere. */
+export type ReuseSource = "code" | "project" | null;
+
+/**
+ * Secret keys of `trackerId` the main process fills when left blank: DevIntern
+ * Code's (only for the tracker it offered) or the project's current ones.
+ */
+export function reusedSecretKeys(
+  inspect: ProjectInitInspect | null,
+  source: ReuseSource,
+  trackerId: string,
+): string[] {
+  if (!inspect || !source) return [];
+  let keys: string[];
+  if (source === "code") {
+    const reusable = inspect.reusableFromCode;
+    keys = reusable?.trackerId === trackerId ? reusable.secretKeys : [];
+  } else {
+    keys = inspect.currentSecretKeys;
+  }
+  const stepKeys = new Set((PM_TRACKER_SETUP[trackerId] ?? []).map((step) => step.key));
+  return keys.filter((key) => stepKeys.has(key));
+}
+
+/** Display label for a {@link ReuseSource}. */
+export function reuseSourceLabel(inspect: ProjectInitInspect | null, source: ReuseSource): string {
+  if (source === "code") return inspect?.reusableSource ?? "DevIntern Code";
+  return "this project's current settings";
+}

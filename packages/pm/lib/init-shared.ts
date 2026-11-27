@@ -17,6 +17,8 @@ export interface EnvPromptStep {
   optional?: boolean;
   example?: string;
   defaultValue?: string;
+  /** Token, API key, or password. The desktop app never sends these values to its renderer. */
+  secret?: boolean;
 }
 
 /** Resolve a step's deep link, which may depend on earlier answers. */
@@ -69,6 +71,7 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     { key: "JIRA_EMAIL", label: "Jira account email", example: "you@company.com" },
     {
       key: "JIRA_API_TOKEN",
+      secret: true,
       label: "Jira API token",
       link: "https://id.atlassian.com/manage-profile/security/api-tokens",
     },
@@ -81,6 +84,7 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
   linear: [
     {
       key: "LINEAR_API_KEY",
+      secret: true,
       label: "Linear personal API key (Settings > API > Personal API keys)",
       link: "https://linear.app/settings/api",
     },
@@ -94,12 +98,14 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
   trello: [
     {
       key: "TRELLO_API_KEY",
+      secret: true,
       label: "Trello API key (press Enter to use the bundled DevIntern key)",
       optional: true,
       defaultValue: BUNDLED_TRELLO_API_KEY,
     },
     {
       key: "TRELLO_API_TOKEN",
+      secret: true,
       label: "Trello API token (click Allow, then paste the token shown)",
       link: (values) =>
         `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=${
@@ -123,6 +129,7 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     { key: "AZURE_DEVOPS_ORG", label: "Azure DevOps organization name", example: "my-org" },
     {
       key: "AZURE_DEVOPS_PAT",
+      secret: true,
       label:
         "Azure DevOps personal access token (Work Items: Read & write; Project and Team: Read)",
       link: (values) =>
@@ -133,6 +140,7 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
   asana: [
     {
       key: "ASANA_API_TOKEN",
+      secret: true,
       label: "Asana personal access token",
       link: "https://app.asana.com/0/developer-console",
     },
@@ -146,6 +154,7 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
   github: [
     {
       key: "GITHUB_TOKEN",
+      secret: true,
       label: "GitHub personal access token (fine-grained: Issues Read & write + Metadata Read)",
       link: "https://github.com/settings/personal-access-tokens/new",
     },
@@ -161,6 +170,7 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     },
     {
       key: "GITLAB_TOKEN",
+      secret: true,
       label:
         "GitLab personal access token (scopes: api, or read_api + write_repository for read/write)",
       link: (values) => {
@@ -258,6 +268,11 @@ export function applyPmTrackerDefaults(
     }
   }
   return result;
+}
+
+/** Secret step keys (tokens, API keys, PATs) for a tracker. */
+export function pmTrackerSecretKeys(trackerId: string): string[] {
+  return (PM_TRACKER_SETUP[trackerId] ?? []).filter((step) => step.secret).map((step) => step.key);
 }
 
 /** Required step keys (no optional / default) that are still empty. */

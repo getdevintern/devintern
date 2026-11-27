@@ -28,18 +28,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/native-select";
 import type {
-  ExistingTrackerConfig,
   PmTrackerInfo,
   ProjectInitInspect,
   ProjectStatus,
+  RedactedTrackerConfig,
 } from "../../../shared/ipc-contract.ts";
 import { useInspectProjectInit } from "../queries/useInspectProjectInit.ts";
 import {
   firstWizardStep,
   prefilledValues,
+  reuseSourceLabel,
+  reusedSecretKeys,
   stepAfterOverwrite,
 } from "./ProjectSetupWizard.helpers.ts";
-import type { WizardMode, WizardStep } from "./ProjectSetupWizard.helpers.ts";
+import type { ReuseSource, WizardMode, WizardStep } from "./ProjectSetupWizard.helpers.ts";
 
 export { type WizardMode } from "./ProjectSetupWizard.helpers.ts";
 
@@ -55,10 +57,6 @@ interface ProjectSetupWizardProps {
    * existing `.env` instead of overwriting it. Defaults to `"init"`.
    */
   mode?: WizardMode;
-}
-
-function isSecretKey(key: string): boolean {
-  return /TOKEN|PAT|API_KEY|PASSWORD|SECRET/i.test(key);
 }
 
 function trackerDocs(trackers: PmTrackerInfo[], trackerId: string): string | undefined {
@@ -114,9 +112,9 @@ function OverwriteStep({ onCancel, onContinue }: { onCancel: () => void; onConti
 }
 
 interface ReuseStepProps {
-  reusable: ExistingTrackerConfig;
+  reusable: RedactedTrackerConfig;
   onManual: () => void;
-  onReuse: (reusable: ExistingTrackerConfig) => void;
+  onReuse: (reusable: RedactedTrackerConfig) => void;
 }
 
 function ReuseStep({ reusable, onManual, onReuse }: ReuseStepProps) {
@@ -204,6 +202,9 @@ interface CredentialsStepProps {
   trackerId: string;
   steps: EnvPromptStep[];
   values: Record<string, string>;
+  /** Secret keys the main process fills when left blank. */
+  reusedKeys: string[];
+  reusedFrom: string;
   docsUrl?: string;
   formError: string | null;
   probeError: string | null;
@@ -220,6 +221,8 @@ function CredentialsStep({
   trackerId,
   steps,
   values,
+  reusedKeys,
+  reusedFrom,
   docsUrl,
   formError,
   probeError,
@@ -250,10 +253,12 @@ function CredentialsStep({
       )}
       {steps.map((field) => {
         const link = stepLink(field, values);
+        const reused = reusedKeys.includes(field.key) && !values[field.key]?.trim();
         const hints: string[] = [];
-        if (field.example) hints.push(`e.g. ${field.example}`);
-        if (field.defaultValue) hints.push("leave blank for default");
-        else if (field.optional) hints.push("optional");
+        if (reused) hints.push(`reused from ${reusedFrom}; type to replace`);
+        else if (field.example) hints.push(`e.g. ${field.example}`);
+        if (!reused && field.defaultValue) hints.push("leave blank for default");
+        else if (!reused && field.optional) hints.push("optional");
         return (
           <div key={field.key} className="space-y-1">
             <Label htmlFor={`setup-field-${field.key}`}>
@@ -275,9 +280,9 @@ function CredentialsStep({
             )}
             <Input
               id={`setup-field-${field.key}`}
-              type={isSecretKey(field.key) ? "password" : "text"}
+              type={field.secret ? "password" : "text"}
               value={values[field.key] ?? ""}
-              placeholder={field.defaultValue ?? field.example}
+              placeholder={reused ? "••••••••" : (field.defaultValue ?? field.example)}
               onChange={(e) => onChange(field.key, e.target.value)}
               autoComplete="off"
               data-testid={`setup-field-${field.key}`}
@@ -378,6 +383,7 @@ export function ProjectSetupWizard({
   const [inspect, setInspect] = useState<ProjectInitInspect | null>(null);
   const [trackerId, setTrackerId] = useState("markdown");
   const [values, setValues] = useState<Record<string, string>>({});
+  const [reuseSource, setReuseSource] = useState<ReuseSource>(null);
   const [overwriteConfirmed, setOverwriteConfirmed] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -393,11 +399,12 @@ export function ProjectSetupWizard({
     setInspect(null);
     setTrackerId("markdown");
     setValues({});
+    setReuseSource(mode === "update" ? "project" : null);
     setOverwriteConfirmed(false);
     setProbeError(null);
     setFormError(null);
     setFatalError(null);
-  }, [open]);
+  }, [open, mode]);
 
   const inspectErrorMessage = inspectQuery.error?.message;
 
@@ -432,6 +439,10 @@ export function ProjectSetupWizard({
     [trackerId],
   );
 
+  const reusedKeys = reusedSecretKeys(inspect, reuseSource, trackerId);
+  const reusedFrom = reuseSourceLabel(inspect, reuseSource);
+  const reuseRequest = reuseSource && reusedKeys.length > 0 ? reuseSource : null;
+
   const docsUrl = inspect ? trackerDocs(inspect.trackers, trackerId) : undefined;
   const probeRequired = needsProbe(inspect?.trackers ?? [], trackerId);
   const finishLabel =
@@ -449,9 +460,11 @@ export function ProjectSetupWizard({
     setValues((prev) => ({ ...prev, [key]: value }));
   };
 
-  const applyReusable = (existing: ExistingTrackerConfig) => {
+  const applyReusable = (existing: RedactedTrackerConfig) => {
     setTrackerId(existing.trackerId);
+    // Secrets stay in the main process; it fills the ones left blank.
     setValues({ ...existing.values });
+    setReuseSource("code");
     setStep("credentials");
   };
 
@@ -473,7 +486,9 @@ export function ProjectSetupWizard({
   };
 
   const validateForm = (): boolean => {
-    const missingKeys = missingRequiredPmFields(trackerId, values);
+    const missingKeys = missingRequiredPmFields(trackerId, values).filter(
+      (key) => !reusedKeys.includes(key),
+    );
     if (missingKeys.length > 0) {
       const labels = missingKeys.map((key) => {
         const step = steps.find((s) => s.key === key);
@@ -496,7 +511,11 @@ export function ProjectSetupWizard({
     if (!skipProbe && needsProbe(inspect.trackers, trackerId)) {
       setStep("probing");
       setProbeError(null);
-      const probed = await window.pm.probeTrackerConnection(trackerId, values);
+      const probed = await window.pm.probeTrackerConnection(
+        trackerId,
+        values,
+        reuseRequest ? { projectDir, source: reuseRequest } : undefined,
+      );
       if (!probed.ok) {
         setProbeError(probed.error.message);
         setStep("probe-failed");
@@ -524,6 +543,7 @@ export function ProjectSetupWizard({
             values,
             // Only true after the overwrite step — cancel there never reaches finish.
             overwrite: overwriteConfirmed,
+            reuseFromCode: reuseRequest === "code",
           });
     if (!result.ok) {
       if (mode === "init" && result.error.code === "already_exists") {
@@ -576,6 +596,7 @@ export function ProjectSetupWizard({
             onManual={() => {
               setTrackerId(inspect.trackers[0]?.id ?? "markdown");
               setValues({});
+              setReuseSource(null);
               setStep("tracker");
             }}
             onReuse={applyReusable}
@@ -599,6 +620,8 @@ export function ProjectSetupWizard({
             trackerId={trackerId}
             steps={steps}
             values={values}
+            reusedKeys={reusedKeys}
+            reusedFrom={reusedFrom}
             docsUrl={docsUrl}
             formError={formError}
             probeError={probeError}

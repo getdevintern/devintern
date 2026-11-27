@@ -38,7 +38,7 @@ From your project directory:
 devpm init
 ```
 
-The wizard asks which tracker you use, links to its token page, validates the connection, and writes `.devintern-pm/.env` (adding it to `.gitignore`). If DevIntern Code already works on this project (the repository is registered in `~/.devintern/workspace.toml`), it offers to reuse the tracker credentials DevIntern Code uses for it.
+The wizard asks which tracker you use, links to its token page, validates the connection, and writes `.devintern-pm/.env` (adding it to `.gitignore`). If DevIntern Code already works on this project (the repository is registered in `~/.devintern/workspace.toml`), it offers to reuse the tracker credentials DevIntern Code uses for it, including those of the one `[[teams]]` entry fixed to that repository (when several teams are fixed to it, only the repository's own credentials are offered).
 
 To set up credentials by hand, follow your tracker's guide: [Jira](./jira-integration.md), [Linear](./linear-integration.md), [Trello](./trello-integration.md), [Asana](./asana-integration.md), [Azure DevOps](./azure-devops-integration.md), [GitHub Issues](./github-integration.md), or [GitLab](./gitlab-integration.md). For scripts or CI, `devpm init --yes` writes a template, filling in the Jira and agent settings DevIntern Code uses for the project when it finds them.
 

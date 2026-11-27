@@ -11,9 +11,12 @@ export type { WorkspaceRepoMatch } from "./lookup.ts";
 export { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "./paths.ts";
 export {
   matchWorkspaceRepo,
+  namespacedTeamEnv,
   normalizeRemote,
   parseWorkspaceFile,
   readWorkspaceFile,
   repoCredentialEnv,
+  repoCredentialTeam,
+  teamCredentialEnv,
 } from "./repos.ts";
-export type { WorkspaceFile, WorkspaceRepo } from "./repos.ts";
+export type { WorkspaceFile, WorkspaceRepo, WorkspaceTeam } from "./repos.ts";
