@@ -35,7 +35,7 @@ import type { PipelineConfig } from "../../types/settings";
 import type { Task } from "../../types/task-tracker";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { finalizeAgentRun } from "./run-harness-finalize";
-import { readHeadCommit } from "./run-harness-git";
+import { readHeadCommit, readPublishedBranchSha } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
 import { tagOutcomeClass } from "../state/run-outcome";
@@ -179,6 +179,10 @@ export async function runAgentSession(
       // tell "the agent committed its own work" (HEAD moved) apart from "the
       // agent only wrote a plan" (HEAD unchanged, clean tree).
       const headBeforeRun = await readHeadCommit();
+      // Record what origin already has for this run's branch (resumed runs
+      // check out an existing remote branch). Publishing may rewrite exactly
+      // this commit with a lease if the agent rebases or amends it.
+      const remoteShaBeforeRun = enableGit ? await readPublishedBranchSha() : undefined;
 
       // Spawn agent process with enhanced permissions and max turns
       const spawnArgs = [
@@ -522,6 +526,7 @@ export async function runAgentSession(
               autoReviewIterations,
               isPlanRetry,
               headBeforeRun,
+              remoteShaBeforeRun,
               prTargetBranchExplicit,
               requestedPrTargetBranch,
               taskContent,

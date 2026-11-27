@@ -53,6 +53,12 @@ export interface FinalizeContext {
    * "nothing left for the pipeline to commit", not "the agent only planned".
    */
   headBeforeRun?: string;
+  /**
+   * `origin/<branch>` captured before the implementation agent started, when
+   * the run resumed a branch DevIntern had already published. Publish may
+   * rewrite that commit with a lease if the agent rebased or amended it.
+   */
+  remoteShaBeforeRun?: string;
   prTargetBranchExplicit: boolean;
   requestedPrTargetBranch?: string;
   verify?: VerifyConfig;
@@ -83,6 +89,42 @@ export async function readHeadCommit(): Promise<string | undefined> {
   const result = await Utils.executeGitCommand(["rev-parse", "HEAD"]);
   const head = result.output.trim();
   return result.success && head ? head : undefined;
+}
+
+/**
+ * Read the commit `origin/<current branch>` points at, when this branch is
+ * already published and the run's starting HEAD contains it. A resumed run
+ * starts from this commit; publish may rewrite it with a lease if the agent
+ * rebases or amends it.
+ *
+ * A fresh branch has no remote-tracking ref, so the network probe is skipped.
+ * When origin has commits HEAD lacks, `undefined` is returned too: publishing
+ * must report divergence instead of overwriting work the run did not start
+ * from.
+ *
+ * @param options - Optional git working directory
+ * @returns The published commit SHA, or `undefined` when it cannot be used
+ */
+export async function readPublishedBranchSha(options?: {
+  cwd?: string;
+}): Promise<string | undefined> {
+  const cwd = options?.cwd;
+  const branch = await Utils.getCurrentBranch(cwd);
+  if (!branch) return undefined;
+  if (!(await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd }))) return undefined;
+
+  const remote = await Utils.executeGitCommand(
+    ["ls-remote", "--heads", "origin", `refs/heads/${branch}`],
+    { cwd, env: { GIT_TERMINAL_PROMPT: "0" } },
+  );
+  if (!remote.success) return undefined;
+  const sha = remote.output.trim().split(/\s+/, 1)[0];
+  if (!sha) return undefined;
+
+  const ancestor = await Utils.executeGitCommand(["merge-base", "--is-ancestor", sha, "HEAD"], {
+    cwd,
+  });
+  return ancestor.success ? sha : undefined;
 }
 
 /**
@@ -172,6 +214,9 @@ export function createGitHelpers(ctx: FinalizeContext) {
       attempt++;
       const pushResult = await Utils.pushCurrentBranch({
         verbose: runContext.options.verbose,
+        // A resumed run may have rewritten the commit it started from; publish
+        // rewrites it with a lease only while origin still points at that SHA.
+        leaseRemoteSha: ctx.remoteShaBeforeRun,
       });
       if (pushResult.success) {
         console.log(`✅ ${pushResult.message}`);

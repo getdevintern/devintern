@@ -2,6 +2,7 @@ import { executeGitCommandWithConfigLockRetry, hasConfigLockError } from "./git-
 import { hasUncommittedWork, stageWorkTreeChanges } from "./git-stage";
 import { classifyCommitConfigError } from "./git-identity";
 import { Utils } from "./registry";
+import type { GitCommandResult } from "./types";
 
 /**
  * Park uncommitted work (including untracked files) in a labelled stash
@@ -376,16 +377,111 @@ export async function commitChanges(
   }
 }
 
+/** Outcome of {@link rewritePublishedBranchWithLease}. */
+type LeaseRewrite =
+  | { kind: "not-applicable" }
+  | { kind: "done"; result: { success: boolean; message: string; hookError?: string } }
+  | { kind: "origin-moved"; pushResult: GitCommandResult };
+
+/**
+ * Rewrite `origin/<branch>` with a lease when the run started at exactly the
+ * commit origin still has and its rewritten HEAD no longer contains it.
+ *
+ * This is allowed even when the branch has an open PR: auto-review already
+ * rewrites PR branches with `--force-with-lease` after an amend, and this
+ * lease is stricter because the old value must be the exact commit the run
+ * started from. A commit origin gained after that point is never overwritten.
+ *
+ * @param input - Branch, recorded origin SHA, remote tip, and git options
+ */
+async function rewritePublishedBranchWithLease(input: {
+  branch: string;
+  leaseRemoteSha: string | undefined;
+  remoteTip: string | undefined;
+  verbose: boolean;
+  cwd?: string;
+}): Promise<LeaseRewrite> {
+  const { branch, leaseRemoteSha, remoteTip, verbose, cwd } = input;
+  if (!leaseRemoteSha || remoteTip !== leaseRemoteSha || !branch.startsWith("feature/")) {
+    return { kind: "not-applicable" };
+  }
+
+  const ancestor = await Utils.executeGitCommand(
+    ["merge-base", "--is-ancestor", leaseRemoteSha, "HEAD"],
+    { cwd },
+  );
+  if (ancestor.success) return { kind: "not-applicable" };
+
+  // The agent rewrote the branch (rebase/amend), so HEAD no longer contains
+  // the published commit. Rewrite origin only while it still points at exactly
+  // the recorded commit: a commit the run did not start from is never
+  // overwritten. `remoteTip` came from the same `ls-remote`, and the explicit
+  // lease value makes Git reject a concurrent update between the two calls.
+  const head = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd });
+  const newSha = head.success ? head.output.trim() : "";
+  const pushResult = await Utils.executeGitCommand(
+    [
+      "push",
+      `--force-with-lease=refs/heads/${branch}:${leaseRemoteSha}`,
+      "origin",
+      `HEAD:refs/heads/${branch}`,
+    ],
+    { verbose, cwd },
+  );
+  if (pushResult.success) {
+    const oldSha = leaseRemoteSha.slice(0, 7);
+    const shortNew = newSha.slice(0, 7);
+    console.log(
+      `📤 Updated origin/${branch} to the rewritten branch (lease ${oldSha} -> ${shortNew})`,
+    );
+    return {
+      kind: "done",
+      result: {
+        success: true,
+        message: `Rewrote '${branch}' on remote with a lease (${oldSha} -> ${shortNew})`,
+      },
+    };
+  }
+
+  // A hook or network failure while origin is still at the recorded commit is
+  // fixable/retryable, not divergence: HEAD only looks rewritten because the
+  // run's own rebase/amend is still unpushed.
+  const afterFailure = await Utils.executeGitCommand(["ls-remote", "--heads", "origin", branch], {
+    verbose: false,
+    cwd,
+  });
+  const afterFailureSha = afterFailure.success
+    ? afterFailure.output.trim().split(/\s+/, 1)[0]
+    : undefined;
+  if (afterFailureSha === leaseRemoteSha) {
+    const fullError = [pushResult.error, pushResult.output].filter(Boolean).join("\n").trim();
+    return {
+      kind: "done",
+      result: {
+        success: false,
+        message: `Failed to push branch: ${fullError || pushResult.error}`,
+        hookError: fullError || pushResult.error,
+      },
+    };
+  }
+  // Origin moved past the recorded commit; the caller's divergence check
+  // reports it instead of overwriting someone's work.
+  return { kind: "origin-moved", pushResult };
+}
+
 /**
  * Push the current branch to `origin`, setting upstream on first push.
  *
- * @param options - Push safety, verbose logging, and working directory
+ * @param options - Push safety, verbose logging, and working directory.
+ *   `leaseRemoteSha` lets a task run rewrite the branch it started from when
+ *   origin still points at exactly that commit and HEAD no longer contains it.
  */
 export async function pushCurrentBranch(options?: {
   verbose?: boolean;
   cwd?: string;
   expectedBranch?: string;
   expectedRemoteSha?: string;
+  leaseRemoteSha?: string;
 }): Promise<{
   success: boolean;
   message: string;
@@ -395,6 +491,7 @@ export async function pushCurrentBranch(options?: {
   const cwd = options?.cwd;
   const expectedBranch = options?.expectedBranch;
   const expectedRemoteSha = options?.expectedRemoteSha;
+  const leaseRemoteSha = options?.leaseRemoteSha;
 
   try {
     // Get current branch name (from the specified working directory)
@@ -465,13 +562,29 @@ export async function pushCurrentBranch(options?: {
       ["ls-remote", "--heads", "origin", currentBranch],
       { verbose, cwd },
     );
+    const remoteTip = remoteBranchExists.success
+      ? remoteBranchExists.output.trim().split(/\s+/, 1)[0]
+      : undefined;
+
+    const lease = await rewritePublishedBranchWithLease({
+      branch: currentBranch,
+      leaseRemoteSha,
+      remoteTip,
+      verbose,
+      cwd,
+    });
+    if (lease.kind === "done") {
+      return lease.result;
+    }
 
     let pushResult;
-    if (expectedRemoteSha || (remoteBranchExists.success && remoteBranchExists.output.trim())) {
+    if (lease.kind === "origin-moved") {
+      pushResult = lease.pushResult;
+    } else if (expectedRemoteSha || remoteTip) {
       // The ancestry check above guarantees this update is a fast-forward.
-      // Use a normal push so no conflict-resolution path can overwrite
-      // remote history, even with a lease. A concurrent update is rejected
-      // by Git and handled as divergence below.
+      // Conflict-resolution and review paths do not pass `leaseRemoteSha`, so
+      // a normal push keeps their remote history untouched. A concurrent
+      // update is rejected by Git and handled as divergence below.
       pushResult = await Utils.executeGitCommand(["push", "origin", currentBranch], {
         verbose,
         cwd,
