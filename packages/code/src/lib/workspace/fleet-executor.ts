@@ -162,6 +162,7 @@ export interface WorkspaceTaskAcquirerDeps {
       cwd: string;
       env: Record<string, string | undefined>;
       signal?: AbortSignal;
+      isDraining?: () => boolean;
       onChildSpawn?: (pid: number) => void;
     },
   ) => Promise<TaskExecutionResult>;
@@ -579,6 +580,7 @@ export function createGatedFleetTaskExecutor(
               cwd: worktree,
               env: childEnv,
               signal,
+              isDraining: () => supervisor.isDraining(),
               ...(options.onChildSpawn ? { onChildSpawn: options.onChildSpawn } : {}),
             });
           } finally {

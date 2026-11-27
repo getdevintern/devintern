@@ -681,7 +681,7 @@ describe("renderers keep self-capture semantics", () => {
   test("systemd unit stops retrying permanent config errors and allows a graceful stop", () => {
     const unit = renderSystemdUnit({ execPath: "devintern", projectDir: "/srv/app" });
     expect(unit).toContain("Restart=on-failure\nRestartSec=30\nRestartPreventExitStatus=78\n");
-    expect(unit).toContain("TimeoutStopSec=120\n");
+    expect(unit).toContain("KillMode=mixed\nTimeoutStopSec=120\n");
   });
 
   test("launchd agent keeps RunAtLoad and KeepAlive and logs to its own file", () => {

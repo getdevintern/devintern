@@ -95,7 +95,7 @@ Either way, the run is recorded as `failed` with the reason `pushed but PR creat
 
 ## Interrupted runs
 
-A graceful stop (Ctrl-C, `SIGTERM`) comments on in-flight tickets and moves them back to To Do. After a hard crash (power loss, `kill -9`), the worker does the same at its next startup, before picking up new work. If the interrupted run already had commits on its branch, the worker continues it instead.
+A graceful stop (Ctrl-C, `SIGTERM`) comments on in-flight tickets and moves them back to To Do. After a hard crash (power loss, `kill -9`), the worker does the same at its next startup, before picking up new work. If the interrupted run already had commits on its branch, the worker continues it instead. Ad-hoc tasks (`devintern worker add`) interrupted by a stop or restart resume at the next start; one that still ended `failed` can be re-queued with `devintern worker add --resume <task>`.
 
 Tickets that someone moved out of In Progress after the crash are left alone. Runs older than 7 days are marked failed without a comment; change the cutoff with `WORKER_ORPHAN_MAX_AGE_HOURS` in the workspace `.env` (`0` disables the comments). Recovered tickets are not re-run automatically; they follow the [retry rules](#re-running-a-task).
 

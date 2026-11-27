@@ -261,11 +261,15 @@ After=network-online.target
 [Service]
 ExecStart=/usr/local/bin/devintern worker
 Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=120
 WorkingDirectory=/home/you/.devintern
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+`KillMode=mixed` lets the worker stop its own running tasks, so a stop or restart doesn't end them as failures. A service installed by an earlier version doesn't have it: run `devintern worker service install` again to update it.
 
 On Windows, run `devintern worker` in a terminal. For `PATH` pinning, git push credentials, and the commit identity on an unattended host, see [Keeping unattended runs healthy](./automated-task-processing.md#keeping-unattended-runs-healthy).
 
