@@ -352,8 +352,8 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
       run.log("❌ A query is required — it defines what 'ready for the agent' means.");
       continue;
     }
-    await offerDevinternLabel(run, query);
     if (!run.deps.dryRunQuery) {
+      await offerDevinternLabel(run, query);
       break;
     }
     try {
@@ -367,6 +367,7 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
             : "   (0 matches is fine if nothing is ready yet — the worker will poll.)",
         );
       }
+      await offerDevinternLabel(run, query);
       break;
     } catch (error) {
       const failure = describeQueryFailure((error as Error).message, process.env.GITHUB_REPO);

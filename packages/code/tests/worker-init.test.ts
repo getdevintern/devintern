@@ -309,6 +309,22 @@ describe("runWorkerInit", () => {
       expect(config.defaults.taskQuery).toBe("is:open label:ready");
     });
 
+    test("does not offer the label until the query passes its dry run", async () => {
+      const label = labelStub(false);
+      const result = await runWorkerInit(
+        deps(["", "n"], {
+          ensureTracker: async () => "github",
+          dryRunQuery: async () => {
+            throw new Error("syntax error");
+          },
+          devinternLabelOps: label.factory,
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("Query failed");
+      expect(label.calls).toEqual({ exists: 0, create: 0 });
+    });
+
     test("asks before creating a missing label, and creates it on yes", async () => {
       const label = labelStub(false);
       const questions: string[] = [];
