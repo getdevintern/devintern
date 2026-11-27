@@ -155,7 +155,7 @@ test.skipIf(skip)(
 
       // No session in the isolated HOME: sign-in is a warning, not a failure.
       expect(text).toContain("⚠️  DevIntern sign-in");
-      expect(text).toContain("Run 'devintern login'");
+      expect(text).toMatch(/Run `devintern worker login( --workspace \S+)? github`/);
       expect(text).toContain("⚠️  Ready but degraded — review the warnings above.");
       expect(text).not.toContain("❌ Not ready");
 

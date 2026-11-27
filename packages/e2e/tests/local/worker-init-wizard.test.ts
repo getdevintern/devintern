@@ -38,7 +38,8 @@ const TRACKER_PROMPT = /Enter a number \(1-\d+\) or tracker id: $/;
 const QUERY_PROMPT = /Ready-tasks query: $/;
 
 const TOKEN_PROMPT = /GitHub token for creating pull requests[^\n]*: $/;
-const SIGN_IN_PROMPT = /Sign in now to start your 14-day free Worker Pilot[^\n]*\[Y\/n\]: $/;
+const SIGN_IN_PROMPT = /Sign in now to start the Worker Pilot\? \[Y\/n\]: $/;
+const RECOMMENDED_PROMPT = /Use the recommended worker settings \([^\n]*\)\? \[Y\/n\]: $/;
 
 interface AnswerOptions {
   /** Typed at the tasks-directory prompt (default: the fixture's absolute path). */
@@ -47,6 +48,11 @@ interface AnswerOptions {
   token?: string;
   /** False when the license check is skipped, so there is no sign-in prompt. */
   licensing?: boolean;
+  /**
+   * Answer "n" to the recommended-settings question and walk the CI,
+   * conflict, active-hours, and Sentry questions (default: accept them).
+   */
+  expandedSettings?: boolean;
 }
 
 /** Every wizard prompt for the Markdown path, answered with defaults or "no". */
@@ -59,10 +65,15 @@ function markdownAnswers(fixture: WorkerInitFixture, options: AnswerOptions = {}
     ],
     [TOKEN_PROMPT, `${options.token ?? ""}\r`],
     [QUERY_PROMPT, "status=todo\r"],
-    [/Automatically repair failing CI[^\n]*\[y\/N\]: $/, "n\r"],
-    [/Conflict handling[^\n]*\[auto\]: $/, "\r"],
-    [/Limit new-task pickup to active hours\? \[y\/N\]: $/, "n\r"],
-    [/Watch a Sentry project[^\n]*\[y\/N\]: $/, "n\r"],
+    ...(options.expandedSettings
+      ? ([
+          [RECOMMENDED_PROMPT, "n\r"],
+          [/Automatically repair failing CI[^\n]*\[y\/N\]: $/, "n\r"],
+          [/Conflict handling[^\n]*\[auto\]: $/, "\r"],
+          [/Limit new-task pickup to active hours\? \[y\/N\]: $/, "n\r"],
+          [/Watch a Sentry project[^\n]*\[y\/N\]: $/, "n\r"],
+        ] as Answer[])
+      : ([[RECOMMENDED_PROMPT, "\r"]] as Answer[])),
     ...(options.licensing === false ? [] : ([[SIGN_IN_PROMPT, "n\r"]] as Answer[])),
     [/React in seconds through the DevIntern relay[^\n]*\[Y\/n\]: $/, "n\r"],
   ];
@@ -167,24 +178,37 @@ function tailAfter(output: string, prompt: RegExp): string {
   return match ? output.slice(match.index! + match[0].length) : output;
 }
 
-/** Aborted prompts end with one clean `❌` line naming how the input stopped. */
-function expectCleanAbort(run: WizardRun, prompt: RegExp, reason: string): void {
+/**
+ * Aborted prompts end with one clean `❌` line naming how the input stopped.
+ * Once the workspace is written (`paused`), a `⏸️  Setup paused` line before
+ * it says where the answers so far are saved.
+ */
+function expectCleanAbort(
+  run: WizardRun,
+  prompt: RegExp,
+  reason: string,
+  options: { paused?: boolean } = {},
+): void {
   expect(run.exitCode, run.output).not.toBe(0);
   for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
   const tail = tailAfter(run.output, prompt)
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "");
-  expect(tail).toHaveLength(1);
-  expect(tail[0]).toStartWith("❌");
-  expect(tail[0]).toContain(reason);
+  expect(tail).toHaveLength(options.paused ? 2 : 1);
+  if (options.paused) {
+    expect(tail[0]).toStartWith("⏸️  Setup paused. Your answers so far are saved in");
+    expect(tail[0]).toContain("workspace.toml");
+  }
+  expect(tail.at(-1)).toStartWith("❌");
+  expect(tail.at(-1)).toContain(reason);
 }
 
 ptyTest(
   "worker init wizard: markdown happy path (license check skipped) reports ready with every readiness check passing",
   async () => {
     await withWizardFixture(async (fixture, proxy) => {
-      const answers = markdownAnswers(fixture, { licensing: false });
+      const answers = markdownAnswers(fixture, { licensing: false, expandedSettings: true });
       const run = await runWizard(fixture, proxy, answers, { licensing: false });
       expect(run.exitCode, run.output).toBe(0);
       expect(run.answered).toHaveLength(answers.length);
@@ -217,10 +241,21 @@ ptyTest(
   "worker init wizard: declining the sign-in saves the setup and says signing in is the one step left",
   async () => {
     await withWizardFixture(async (fixture, proxy) => {
-      const answers = markdownAnswers(fixture);
+      // Accept the relay so the test sees it skip without a second sign-in question.
+      const answers = markdownAnswers(fixture).map(([prompt, keys]): Answer => [
+        prompt,
+        /relay/.test(prompt.source) ? "y\r" : keys,
+      ]);
       const run = await runWizard(fixture, proxy, answers);
       expect(run.answered).toHaveLength(answers.length);
       for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
+      // One answer took the recommended settings: no per-setting questions.
+      expect(run.output).toContain("💾 Wrote the recommended worker settings to workspace.toml.");
+      expect(run.output).not.toContain("Automatically repair failing CI");
+      expect(run.output).not.toContain("Watch a Sentry project");
+      // Declining the Pilot sign-in is not followed by a second sign-in question.
+      expect(run.output).not.toContain("Sign in now to connect the relay");
+      expect(run.output).toContain("Relay needs sign-in; skipped.");
       expect(run.output).toContain("📋 Readiness (the same checks as `devintern worker doctor`):");
       // No session yet is a step, not a broken setup.
       expect(run.output).toContain(
@@ -258,7 +293,9 @@ ptyTest(
       // The query prompt shows the saved query as its default: keep it.
       const answers: Answer[] = [
         [/Ready-tasks query[^\n]*: $/, "\r"],
-        ...markdownAnswers(fixture, { licensing: false }).slice(4),
+        ...markdownAnswers(fixture, { licensing: false }).slice(
+          markdownAnswers(fixture).findIndex(([prompt]) => prompt === QUERY_PROMPT) + 1,
+        ),
       ];
       const run = await runWizard(fixture, proxy, answers, { licensing: false });
       expect(run.exitCode, run.output).toBe(0);
@@ -311,7 +348,7 @@ for (const [name, key, reason] of [
           [...answers.slice(0, queryIndex), [QUERY_PROMPT, key]],
           { licensing: false },
         );
-        expectCleanAbort(aborted, QUERY_PROMPT, reason);
+        expectCleanAbort(aborted, QUERY_PROMPT, reason, { paused: true });
 
         // The tracker was written when the workspace was created, so the
         // half-initialised workspace is not left on the "jira" default.
