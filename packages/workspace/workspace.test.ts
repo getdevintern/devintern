@@ -156,6 +156,23 @@ describe("repoCredentialEnv", () => {
   test("parseEnvText strips quotes and keeps = in values", () => {
     expect(parseEnvText('# c\nA="x=y"\nBAD\n')).toEqual({ A: "x=y" });
   });
+
+  test("parseEnvText accepts a shell export prefix", () => {
+    expect(parseEnvText("export A=1\n  export   B='two'\n")).toEqual({ A: "1", B: "two" });
+  });
+
+  test("reads every layer through a caller-supplied reader", () => {
+    const read: string[] = [];
+    const env = repoCredentialEnv({ envFile: "env/api.env", env: {} }, workspaceDir, (path) => {
+      read.push(path);
+      return { FROM: path };
+    });
+    expect(read.toSorted()).toEqual([
+      join(workspaceDir, ".env"),
+      join(workspaceDir, "env", "api.env"),
+    ]);
+    expect(env).toEqual({ FROM: join(workspaceDir, "env", "api.env") });
+  });
 });
 
 describe("findWorkspaceRepo", () => {
