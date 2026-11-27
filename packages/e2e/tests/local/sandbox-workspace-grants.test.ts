@@ -120,42 +120,55 @@ test.skipIf(skip)(
   90_000,
 );
 
-test.skipIf(skip)(
-  "a nono-wrapped agent cannot write an absent workspace grant directory",
-  async () => {
-    const omitted: WorkspaceGrantName = "state";
-    const present = GRANTED.filter((name) => name !== omitted);
-    const run = await grantFixture(present).prepare();
-    try {
-      // Fixture precondition: only the named directories exist before the run.
-      expect(existsSync(run.workspaceGrantPaths[omitted])).toBe(false);
+/**
+ * Workspace directories the CLI never creates during a task run, so an absent
+ * one stays absent when the policy is built.
+ *
+ * `state/` is not in this list: the run recorder creates
+ * `state/run-outputs/` before every agent spawn (agent-facing tools append to
+ * `DEVINTERN_RUN_OUTPUTS` there with plain shell redirection), so `state/`
+ * always exists by the time `agentSandboxPolicy()` runs and is granted by
+ * design. Omitting it would test the run recorder, not the grant filter.
+ */
+const ABSENT_CANDIDATES: readonly WorkspaceGrantName[] = ["injected", "automations"];
 
-      const result = await run.run();
-      const text = `${result.stdout}\n${result.stderr}`;
-      expect(result.exitCode).toBe(0);
-      expect(text).toContain("🔒 Agent sandbox: nono (kernel sandbox)");
+for (const omitted of ABSENT_CANDIDATES) {
+  test.skipIf(skip)(
+    `a nono-wrapped agent cannot write an absent workspace grant directory (${omitted}/)`,
+    async () => {
+      const present = GRANTED.filter((name) => name !== omitted);
+      const run = await grantFixture(present).prepare();
+      try {
+        // Fixture precondition: only the named directories exist before the run.
+        expect(existsSync(run.workspaceGrantPaths[omitted])).toBe(false);
 
-      const checks = run.checks();
-      expectStandardBoundary(run, checks);
+        const result = await run.run();
+        const text = `${result.stdout}\n${result.stderr}`;
+        expect(result.exitCode).toBe(0);
+        expect(text).toContain("🔒 Agent sandbox: nono (kernel sandbox)");
 
-      // The absent directory was not granted, and the CLI did not create it
-      // implicitly or widen the grant to the whole workspace.
-      expect(checks[`workspace-${omitted}-write`]?.ok).toBe(false);
-      expect(existsSync(run.workspaceGrantPaths[omitted])).toBe(false);
+        const checks = run.checks();
+        expectStandardBoundary(run, checks);
 
-      for (const name of present) {
-        const probe = join(run.workspaceGrantPaths[name], "sandbox-probe-write");
-        expect(checks[`workspace-${name}-write`]?.ok).toBe(true);
-        expect(existsSync(probe)).toBe(true);
+        // The absent directory was not granted, and the CLI did not create it
+        // implicitly or widen the grant to the whole workspace.
+        expect(checks[`workspace-${omitted}-write`]?.ok).toBe(false);
+        expect(existsSync(run.workspaceGrantPaths[omitted])).toBe(false);
+
+        for (const name of present) {
+          const probe = join(run.workspaceGrantPaths[name], "sandbox-probe-write");
+          expect(checks[`workspace-${name}-write`]?.ok).toBe(true);
+          expect(existsSync(probe)).toBe(true);
+        }
+        expect(checks["workspace-sibling-write"]?.ok).toBe(false);
+        expect(existsSync(run.workspaceDeniedPath)).toBe(false);
+
+        expect(await run.git("branch", "--show-current")).toBe(run.head);
+        expect(await run.remoteSha(run.head)).toBe(await run.git("rev-parse", "HEAD"));
+      } finally {
+        run.dispose();
       }
-      expect(checks["workspace-sibling-write"]?.ok).toBe(false);
-      expect(existsSync(run.workspaceDeniedPath)).toBe(false);
-
-      expect(await run.git("branch", "--show-current")).toBe(run.head);
-      expect(await run.remoteSha(run.head)).toBe(await run.git("rev-parse", "HEAD"));
-    } finally {
-      run.dispose();
-    }
-  },
-  90_000,
-);
+    },
+    90_000,
+  );
+}
