@@ -69,6 +69,7 @@ export function autoMergeCliArgs(
     ...(policy.review ? [] : ["--no-review"]),
     ...(policy.recheckOnPush === false ? ["--no-recheck-on-push"] : []),
     ...(policy.requireChecks ? ["--require-checks"] : []),
+    ...(policy.requireApproval ? ["--require-approval"] : []),
     ...(policy.reviewPolicy ? ["--policy", policy.reviewPolicy] : []),
     // `=` form: the text may start with "-" (a bullet list).
     ...(policy.reviewInstructions ? [`--review-instructions=${policy.reviewInstructions}`] : []),
@@ -121,6 +122,7 @@ export function parseAutoMergeResultLine(output: string): AutoMergeResult | null
         ...(record.ciWait === true ? { ciWait: true } : {}),
         ...(isCiChecksProblem(record.ciWaitProblem) ? { ciWaitProblem: record.ciWaitProblem } : {}),
         ...(record.ciChecksUnread === true ? { ciChecksUnread: true } : {}),
+        ...(record.approvalWait === true ? { approvalWait: true } : {}),
       };
     }
   }

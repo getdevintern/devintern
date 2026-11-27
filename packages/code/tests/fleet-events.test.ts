@@ -551,6 +551,10 @@ ${repoExtra}
       },
     });
     await run("acme/backend", 1, "a".repeat(40));
+    // A teammate's PR asks the CLI to enforce required reviews; the agent's own does not.
+    await run("acme/backend", 2, "a".repeat(40), { lastAttempt: false, team: true });
+    expect((policies[0] as { requireApproval?: boolean }).requireApproval).toBeUndefined();
+    expect(policies.pop()).toMatchObject({ requireApproval: true });
     // Hot reload picks up the workspace list once the repo override is gone.
     config.repos = workspace("").repos;
     await run("acme/backend", 1, "a".repeat(40));
