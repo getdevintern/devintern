@@ -25,6 +25,11 @@ import { RunStore } from "../src/lib/state/run-recorder";
 import { WorkerState } from "../src/lib/state/worker-state";
 import type { ConflictResolutionMode } from "../src/lib/workspace/config";
 import { resetUnusableStateWarnings } from "../src/lib/review/agent-pr-reconciler";
+import {
+  getWorkerFailover,
+  resetWorkerFailover,
+  startWorkerFailover,
+} from "../src/lib/worker/failover";
 
 describe("ReviewPollingAcquirer", () => {
   let dbPath: string;
@@ -1097,6 +1102,40 @@ describe("ReviewPollingAcquirer", () => {
     });
     expect(run?.harness).toBeTruthy();
     runStore.close();
+  });
+
+  test("a conflict run records the active failover harness, not the configured primary", async () => {
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "claude-code,codex",
+      log: () => {},
+    });
+    try {
+      const failover = getWorkerFailover()!;
+      failover.reportFromHint({ untilMs: Date.now() + 60_000 }, "claude-code");
+      expect(failover.activeName).toBe("codex");
+
+      workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42, branch: "agent/task" });
+      const runStore = new RunStore(dbPath);
+      const made = makeAcquirer(
+        {
+          prState: "open",
+          mergeableState: "behind",
+          headSha: "head1",
+          baseSha: "base1",
+          baseIncluded: false,
+          reviews: [],
+          comments: [],
+        },
+        { runStore },
+      );
+      await made.acquirer.tick();
+      expect(runStore.listRuns()[0]?.harness).toBe("codex");
+      runStore.close();
+    } finally {
+      resetWorkerFailover();
+    }
   });
 
   const DAY_MS = 86_400_000;

@@ -17,6 +17,7 @@ import { assertTeamPrSyncSandbox, teamAutoMergeSlugs, teamPrSyncSlugs } from "./
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
 import type { TaskSupervisor } from "../worker/supervisor";
+import { runHarnessForRecording } from "../worker/failover";
 import type { TaskTrackerClient } from "../trackers/client";
 
 type FleetGitHubClient = import("../code-host/github/reviews").GitHubReviewsClient;
@@ -243,7 +244,6 @@ async function buildAutoMergeWatcher(params: {
   const { config, gh, workspaceDir } = params;
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
     await import("../acquirers/auto-merge-watcher");
-  const { parseHarnessList } = await import("@devintern/agent-harness");
   const { isGitHubNotFound } = await import("../code-host/github/github-errors");
   const { fleetAutoMergePolicyFingerprint } = await import("./fleet-events");
   const { OPEN_PR_LIST_PAGE_SIZE } = await import("../acquirers/team-pr-sweep");
@@ -275,11 +275,11 @@ async function buildAutoMergeWatcher(params: {
     },
     mergePr: params.mergePr,
     runStore: params.runStore,
-    // Only a run that can reach the agent review names a harness.
+    // Only a run that can reach the agent review names a harness: the pinned
+    // review agent, otherwise the failover entry that is active right now.
     harness: () =>
       config.workspace.autoMerge.review
-        ? (config.workspace.autoMerge.agent?.harness ??
-          parseHarnessList(process.env.AGENT_HARNESS)[0])
+        ? runHarnessForRecording(config.workspace.autoMerge.agent?.harness)
         : undefined,
     policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug, workspaceDir),
     recheckOnPush: () => config.workspace.autoMerge.recheckOnPush,
@@ -559,6 +559,8 @@ export async function buildFleetEventAcquirers(
       shouldPollFeedback,
       workerState: state.workerState,
       queue: state.queue,
+      // Read at run time so a live reload of the conflict agent applies.
+      harness: () => config.workspace.conflictAgent?.harness,
       github: {
         fetchPr: async (repo, n, etag) => {
           try {
