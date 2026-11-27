@@ -4,6 +4,7 @@ import { enforceLicenseOrExit, loadEnvironment, loadSupabaseConfig } from "../cl
 import { bootstrapCheckoutEnv, checkoutEnvPath } from "../cli/checkout-env";
 import { hasHelpArg } from "../cli/help";
 import { flushAnalytics, trackDoctorRun } from "./analytics";
+import type { runWorkerDoctorText } from "./worker-doctor-text";
 
 /**
  * `devintern dashboard` — serve the local observability dashboard standalone.
@@ -177,10 +178,14 @@ export async function runDoctorCommand(): Promise<never> {
         "sandbox, model, readiness), tracker credentials, sign-in, and license",
         "readiness for a first run.",
         "",
+        "In a checkout registered as a worker repository, runs the worker checks",
+        "instead (the same checklist as `devintern worker doctor`).",
+        "",
         "Exit codes:",
         "  0  ready (warnings such as a degraded harness chain are shown, not fatal)",
         "  1  not ready: at least one check failed",
-        "  2  degraded: warnings but no failures (only with --strict)",
+        "  2  degraded: warnings but no failures (only with --strict); in a worker",
+        "     repository also when only a step for you is left (sign in)",
         "",
         "Options:",
         "  --strict    Exit 2 when any check warns",
@@ -190,6 +195,11 @@ export async function runDoctorCommand(): Promise<never> {
     process.exit(0);
   }
   const strict = args.includes("--strict");
+  const workerCode = await runWorkerRepoDoctor(strict);
+  if (workerCode !== null) {
+    await flushAnalytics();
+    process.exit(workerCode);
+  }
   const { collectReadinessChecks, renderReadinessReport } = await import("./readiness");
   // A registered checkout reads the workspace env layers, like a task run.
   const workspaceRun = await bootstrapCheckoutEnv();
@@ -226,6 +236,46 @@ export async function runDoctorCommand(): Promise<never> {
   });
   await flushAnalytics();
   process.exit(doctorExitCode(report, strict));
+}
+
+/**
+ * `devintern doctor` in a worker repository: the checkout's `origin` (or
+ * path) matches a `[[repos]]` entry that is not `manual_only`. Its tasks run
+ * through the worker, so the per-repo checks would test the wrong thing; run
+ * the `worker doctor` checklist instead.
+ *
+ * @returns The exit code, or null when this is not a worker repository
+ */
+export async function runWorkerRepoDoctor(
+  strict: boolean,
+  deps: {
+    cwd?: string;
+    workspaceDir?: string;
+    log?: (message: string) => void;
+    /** Worker checklist; defaults to the `worker doctor` text pass. */
+    runChecks?: typeof runWorkerDoctorText;
+  } = {},
+): Promise<number | null> {
+  const log = deps.log ?? console.log;
+  const { findWorkspaceRepoForCheckout } = await import("../workspace/manual-run");
+  const run = await findWorkspaceRepoForCheckout({
+    cwd: deps.cwd,
+    workspaceDir: deps.workspaceDir,
+  });
+  if (!run || run.repo.manualOnly) return null;
+  const { workspaceConfigPath } = await import("../workspace/paths");
+  const configPath = workspaceConfigPath(run.workspaceDir);
+  log(`ℹ️  This checkout is the worker repository "${run.repo.name}" in ${configPath}.`);
+  log("   Running the worker checks (same as `devintern worker doctor`).\n");
+  const runChecks = deps.runChecks ?? (await import("./worker-doctor-text")).runWorkerDoctorText;
+  const result = await runChecks(run.workspaceDir, { workspacePath: configPath }, log);
+  await trackDoctorRun({
+    checks: result.checks,
+    hasFailures: result.hasFailures,
+    hasWarnings: result.hasWarnings,
+  });
+  if (result.exitCode !== 0) return result.exitCode;
+  return strict && result.hasWarnings ? 2 : 0;
 }
 
 /**

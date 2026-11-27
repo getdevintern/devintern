@@ -140,4 +140,4 @@ Every failure comes with a suggested fix. The probes only run `<cli> --version` 
 | `1`       | Not ready: a check failed, for example no harness in the chain can run or the primary can't start |
 | `2`       | Only with `--strict`: warnings but no failures, for CI that requires a fully ready setup       |
 
-`devintern init` runs some of these checks at the end. For the unattended worker, use [`devintern worker doctor`](./worker.md#checking-readiness-worker-doctor). If a failure looks like a DevIntern bug, run `devintern report` ([Reporting bugs](./reporting-bugs.md)).
+`devintern init` runs some of these checks at the end. In a checkout of a worker repository, `devintern doctor` runs the [`devintern worker doctor`](./worker.md#checking-readiness-worker-doctor) checks instead and uses their exit codes (`2` also means only sign-in is left); `--strict` still exits `2` on warnings. If a failure looks like a DevIntern bug, run `devintern report` ([Reporting bugs](./reporting-bugs.md)).

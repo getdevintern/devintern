@@ -215,23 +215,21 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     }
   }
 
-  const { collectWorkerDoctorChecks, workerDoctorClosingLine } =
-    await import("../observability/worker-readiness");
-  const { renderReadinessReport } = await import("../observability/readiness");
   const workspaceDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
-  // Mirror the daemon: shared workspace values (AGENT_HARNESS, AGENT_CLI_PATH,
-  // LICENSE_KEY, ...) apply to this process. Only process.env changes.
-  const processEnv = { ...process.env };
-  try {
-    applyWorkspaceProcessEnv(workspaceDir);
-  } catch {
-    // Unreadable workspace .env: the config check reports the workspace state.
-  }
-  const checks = await collectWorkerDoctorChecks(
-    { workspacePath, offline, testNotifications },
-    { processEnv },
-  );
   if (json) {
+    const { collectWorkerDoctorChecks } = await import("../observability/worker-readiness");
+    // Mirror the daemon: shared workspace values (AGENT_HARNESS, AGENT_CLI_PATH,
+    // LICENSE_KEY, ...) apply to this process. Only process.env changes.
+    const processEnv = { ...process.env };
+    try {
+      applyWorkspaceProcessEnv(workspaceDir);
+    } catch {
+      // Unreadable workspace .env: the config check reports the workspace state.
+    }
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath, offline, testNotifications },
+      { processEnv },
+    );
     const { buildWorkerDoctorReport, readinessExitCode } =
       await import("../observability/readiness-json");
     const document = buildWorkerDoctorReport(checks, {
@@ -242,16 +240,14 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     console.log(JSON.stringify(document, null, 2));
     process.exit(readinessExitCode(document.result));
   }
-  const report = renderReadinessReport(checks);
-  console.log(`🩺 devintern worker readiness${offline ? " (offline)" : ""}:\n`);
-  console.log(report.lines.join("\n"));
-  console.log(`\n${workerDoctorClosingLine(checks, report)}`);
-  const { setupStateFor } = await import("../observability/readiness-json");
-  const { setup, summary } = setupStateFor(checks);
-  // The done signal for scripts and agents reading the text output.
-  console.log(`Setup: ${setup} — ${summary}`);
+  const { runWorkerDoctorText } = await import("../observability/worker-doctor-text");
+  const result = await runWorkerDoctorText(workspaceDir, {
+    workspacePath,
+    offline,
+    testNotifications,
+  });
   // 2: nothing is broken, but a step is left (sign in to start the Worker Pilot).
-  process.exit(report.hasFailures ? 1 : report.hasActions ? 2 : 0);
+  process.exit(result.exitCode);
 }
 
 const WORKER_INIT_USAGE = [
@@ -393,6 +389,20 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     console.error("   Run `devintern worker init --help` for options.");
     process.exit(1);
   }
+  const exitCode = await runInteractiveWorkerInit(args);
+  await flushAnalytics();
+  process.exit(exitCode);
+}
+
+/**
+ * The interactive `worker init` wizard with its production dependencies,
+ * without the process exit (`devintern init` runs it too when the user
+ * chooses a worker).
+ *
+ * @param args - `worker init` arguments (`--customize`, `--no-service`)
+ * @returns 0 ready, 2 only sign-in is left, 1 a check failed or setup stopped
+ */
+export async function runInteractiveWorkerInit(args: string[]): Promise<number> {
   loadEnvironment();
   const { checkWorkerEntitlement, runWorkerInit } = await import("../init/worker-init");
   const { isInteractive } = await import("../init/wizard");
@@ -403,7 +413,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       '   devintern worker init --non-interactive --tracker jira --task-query "<query>" --repo-from-cwd',
     );
     console.log("   Run `devintern worker init --help` for every option.");
-    process.exit(1);
+    return 1;
   }
   const trackerManager = new TaskTrackerManager();
   let exitCode = 1;
@@ -448,8 +458,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       `\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern worker init\`.`,
     );
   }
-  await flushAnalytics();
-  process.exit(exitCode);
+  return exitCode;
 }
 
 /** Parse daemon flags, load the workspace, gate on license, and run the worker. */
