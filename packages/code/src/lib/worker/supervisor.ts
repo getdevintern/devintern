@@ -55,7 +55,9 @@ export type QueuedJobWaitReason =
   /** The repository's checkout budget (per-repo limit or shared base) is in use. */
   | "repo"
   /** Every global slot is in use. */
-  | "global";
+  | "global"
+  /** Host memory pressure: starting another job now could push the machine into swap. */
+  | "memory";
 
 /** A queued job as reported by {@link TaskSupervisor.queuedJobs}. */
 export interface QueuedJobSnapshot {
@@ -68,6 +70,12 @@ export interface QueuedJobSnapshot {
   exclusiveKey?: string;
   enqueuedAt: number;
   waitingOn: QueuedJobWaitReason;
+  /**
+   * `waitingOn: "memory"`: the probe's detailed reason (which threshold fired
+   * and its numbers), so an operator can tell a false positive from real OOM
+   * risk without guessing.
+   */
+  blockReason?: string;
 }
 
 export interface SupervisorLimits {
@@ -171,9 +179,29 @@ export const JOB_PRIORITY: Record<JobKind, number> = {
  */
 export const PRIORITY_AGING_MS = 15 * 60 * 1000;
 
+/** Default wait before re-checking host pressure for jobs it held back. */
+export const DEFAULT_BACKPRESSURE_RETRY_MS = 15_000;
+
 export interface SupervisorOptions {
   /** Clock for priority aging; injectable for tests. */
   now?: () => number;
+  /**
+   * Host-pressure probe consulted before a queued job starts. Returning a
+   * reason defers admission (the job stays queued and is reported with
+   * `waitingOn: "memory"`); running jobs are never interrupted. A throwing
+   * probe fails open so a broken reader cannot idle the worker.
+   */
+  backpressure?: () => string | null;
+  /** How long to wait before probing again while jobs are held back. */
+  backpressureRetryMs?: number;
+  /**
+   * Called when host pressure starts holding back at least one queued job
+   * (with the probe's reason) and again with `null` once nothing is held back
+   * by it. Fires only on those transitions, so a long pressure spell logs
+   * twice, not once per retry. Covers task jobs, which the dashboard queue
+   * does not list.
+   */
+  onBackpressureChange?: (reason: string | null) => void;
 }
 
 interface RunningJob {
@@ -212,6 +240,7 @@ export function createTaskSupervisor(
 ): TaskSupervisor {
   validateLimits(initialLimits);
   const now = options.now ?? Date.now;
+  const backpressureRetryMs = options.backpressureRetryMs ?? DEFAULT_BACKPRESSURE_RETRY_MS;
 
   let limits = { ...initialLimits };
   // Two independent closed states: `draining` is the shutdown drain (terminal
@@ -241,8 +270,25 @@ export function createTaskSupervisor(
   const repoWorktreeCount = (repo: string): number =>
     (taskCounts.get(repo) ?? 0) + (prCounts.get(repo) ?? 0);
 
-  /** Why `request` cannot start right now, or null when it can. */
-  const blockedOn = (request: ScheduleRequest<unknown>): QueuedJobWaitReason | null => {
+  /** Current host-pressure reason, or null. A throwing probe fails open. */
+  const pressureReason = (): string | null => {
+    if (!options.backpressure) return null;
+    try {
+      return options.backpressure();
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Why `request` cannot start right now, or null when it can. `pressure` is
+   * the pump's single host-pressure snapshot: probing per job makes admission
+   * and the retry timer disagree when the reading changes mid-pump.
+   */
+  const blockedOn = (
+    request: ScheduleRequest<unknown>,
+    pressure: string | null,
+  ): QueuedJobWaitReason | null => {
     if (request.exclusiveKey !== undefined && heldExclusiveKeys.has(request.exclusiveKey)) {
       return "exclusive";
     }
@@ -262,10 +308,14 @@ export function createTaskSupervisor(
       if (occupiedBaseRepos.has(request.repo!)) return "repo";
     }
     if (running.size >= limits.maxConcurrency) return "global";
+    // Last: a slot is free, but the host has no memory headroom for another
+    // agent process tree. The job stays queued and a timer re-checks.
+    if (pressure !== null) return "memory";
     return null;
   };
 
-  const canStart = (request: ScheduleRequest<unknown>): boolean => blockedOn(request) === null;
+  const canStart = (request: ScheduleRequest<unknown>, pressure: string | null): boolean =>
+    blockedOn(request, pressure) === null;
 
   const acquireResources = (request: ScheduleRequest<unknown>): void => {
     if (request.checkoutClass === "task_worktree") {
@@ -294,13 +344,13 @@ export function createTaskSupervisor(
     at - job.enqueuedAt >= PRIORITY_AGING_MS ? 0 : JOB_PRIORITY[job.request.kind];
 
   /** Index of the highest-priority job that can start (FIFO within a level), or -1. */
-  const nextAdmissible = (): number => {
+  const nextAdmissible = (pressure: string | null): number => {
     const at = now();
     let best = -1;
     let bestPriority = Infinity;
     for (let index = 0; index < queued.length; index++) {
       const job = queued[index]!;
-      if (!canStart(job.request)) continue;
+      if (!canStart(job.request, pressure)) continue;
       const priority = priorityOf(job, at);
       if (priority < bestPriority) {
         best = index;
@@ -312,14 +362,38 @@ export function createTaskSupervisor(
   };
 
   let pumping = false;
+  /** Whether the last pump left at least one queued job held back by pressure. */
+  let heldByPressure = false;
+  const reportPressure = (pressure: string | null): void => {
+    const held =
+      pressure !== null && queued.some((job) => blockedOn(job.request, pressure) === "memory");
+    if (held === heldByPressure) return;
+    heldByPressure = held;
+    try {
+      options.onBackpressureChange?.(held ? pressure : null);
+    } catch {
+      // A broken logger must not break admission.
+    }
+  };
+  let pressureTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearPressureTimer = (): void => {
+    if (pressureTimer === undefined) return;
+    clearTimeout(pressureTimer);
+    pressureTimer = undefined;
+  };
   const pump = (): void => {
     if (pumping || admissionsBlocked()) return;
     pumping = true;
+    // One host-pressure reading per pump: the admission scan and the retry
+    // timer below must agree. A second probe could return clear right after
+    // the scan saw pressure, leaving queued work with nothing to re-pump it.
+    let pressure: string | null = null;
     try {
+      pressure = pressureReason();
       // Scan for the best admissible job each time. A saturated repository
       // must not block unrelated work queued behind it.
       for (;;) {
-        const index = nextAdmissible();
+        const index = nextAdmissible(pressure);
         if (index < 0) return;
         const [job] = queued.splice(index, 1);
         if (!job) return;
@@ -363,6 +437,22 @@ export function createTaskSupervisor(
       }
     } finally {
       pumping = false;
+      reportPressure(pressure);
+      // A job held back only by host pressure has no completion event to
+      // re-pump: poll while the queue is non-empty so it starts once memory
+      // recovers. One unref'd timer at a time. The snapshot from this pump,
+      // not a fresh probe, decides whether a job was actually held back; the
+      // `running.size === 0` arm is the safety net for a queue that ended the
+      // scan with nothing running and nothing scheduled to call pump again.
+      if (queued.length === 0) {
+        clearPressureTimer();
+      } else if (pressureTimer === undefined && (pressure !== null || running.size === 0)) {
+        pressureTimer = setTimeout(() => {
+          pressureTimer = undefined;
+          pump();
+        }, backpressureRetryMs);
+        pressureTimer.unref?.();
+      }
     }
   };
 
@@ -379,6 +469,7 @@ export function createTaskSupervisor(
   const beginDraining = (): void => {
     if (draining) return;
     draining = true;
+    clearPressureTimer();
     rejectQueued();
   };
 
@@ -449,6 +540,7 @@ export function createTaskSupervisor(
     holdAdmissions(): void {
       if (holding) return;
       holding = true;
+      clearPressureTimer();
       rejectQueued();
     },
 
@@ -468,19 +560,26 @@ export function createTaskSupervisor(
     },
 
     queuedJobs(): QueuedJobSnapshot[] {
-      return queued.map(({ request, enqueuedAt }) => ({
-        id: request.id,
-        source: request.source,
-        ...(request.repo !== undefined ? { repo: request.repo } : {}),
-        kind: request.kind,
-        ...(request.label !== undefined ? { label: request.label } : {}),
-        checkoutClass: request.checkoutClass,
-        ...(request.exclusiveKey !== undefined ? { exclusiveKey: request.exclusiveKey } : {}),
-        enqueuedAt,
+      // One snapshot for every row, like a pump: rows must not disagree about
+      // the host's pressure.
+      const pressure = pressureReason();
+      return queued.map(({ request, enqueuedAt }) => {
         // A job left in the queue after a pump is blocked; "global" covers the
         // brief window before the pump admits it.
-        waitingOn: blockedOn(request) ?? "global",
-      }));
+        const waitingOn = blockedOn(request, pressure) ?? "global";
+        return {
+          id: request.id,
+          source: request.source,
+          ...(request.repo !== undefined ? { repo: request.repo } : {}),
+          kind: request.kind,
+          ...(request.label !== undefined ? { label: request.label } : {}),
+          checkoutClass: request.checkoutClass,
+          ...(request.exclusiveKey !== undefined ? { exclusiveKey: request.exclusiveKey } : {}),
+          enqueuedAt,
+          waitingOn,
+          ...(waitingOn === "memory" && pressure !== null ? { blockReason: pressure } : {}),
+        };
+      });
     },
 
     queuedCount(): number {

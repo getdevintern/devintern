@@ -783,8 +783,10 @@ export interface QueuedWorkItem {
   automationId?: string;
   /** PR job: worker job kind (`conflict`, `auto_merge`, `review`, `ci_fix`). */
   jobKind?: string;
-  /** PR job: blocked by another job on the same PR, the per-repo limit, or the global limit. */
-  waitingOn?: "exclusive" | "repo" | "global";
+  /** PR job: blocked by another job on the same PR, the per-repo limit, the global limit, or host memory. */
+  waitingOn?: "exclusive" | "repo" | "global" | "memory";
+  /** PR job: when waiting on `memory`, the worker's detailed host-memory reason. */
+  blockReason?: string;
   /** Ad-hoc / tracker: task keys this task depends on (tracker: its native blockers). */
   dependsOn?: string[];
   /** Ad-hoc / tracker: `merged` (wait for merges) or `stacked` (branch from one unmerged dependency). */

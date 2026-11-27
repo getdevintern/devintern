@@ -13,6 +13,7 @@ import { parseWorkerScheduleSection } from "../worker/schedule";
 import { parseEstimationEntries } from "../automation/estimation-config";
 import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
+import { parseMemoryBudget, readJobMemoryMax } from "./config-memory";
 import { readTeamPrFlags } from "./config-team-prs";
 import { parseTrackerSettings } from "./tracker-settings";
 import { validateManualOnlyReferences, workerWorkspaceView } from "./manual-only";
@@ -22,7 +23,6 @@ import { parseAgentSelection } from "../agent/selection";
 import type { HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
 import { parseNotificationsSection } from "../notifications/delivery/config";
-import { jobMemoryMaxProblem } from "../worker/job-memory-format";
 import type {
   ConflictResolutionMode,
   GitAuthorSetting,
@@ -304,6 +304,7 @@ function parseWorkspaceSettings(
         message: "[workspace.execution].max_concurrency_per_repo must be a positive integer.",
       },
     ) ?? DEFAULT_MAX_CONCURRENCY_PER_REPO;
+  const memory = parseMemoryBudget(executionTable, "[workspace.execution]", errors);
   if (maxConcurrencyPerRepo > maxConcurrency) {
     errors.push(
       "[workspace.execution].max_concurrency_per_repo cannot exceed [workspace.execution].max_concurrency.",
@@ -345,7 +346,7 @@ function parseWorkspaceSettings(
   const gitAuthor = readGitAuthor(workspaceTable, "[workspace]", errors);
 
   return {
-    execution: { isolation, maxConcurrency, maxConcurrencyPerRepo },
+    execution: { isolation, maxConcurrency, maxConcurrencyPerRepo, memory },
     worktreesTtlDays,
     dashboard,
     dashboardPort,
@@ -463,9 +464,7 @@ function parseDefaultsSection(
   defaultsTable: Record<string, unknown>,
   errors: string[],
 ): WorkspaceDefaults {
-  const jobMemoryMax = readString(defaultsTable, "job_memory_max", "[defaults]", errors);
-  const jobMemoryProblem = jobMemoryMaxProblem(jobMemoryMax);
-  if (jobMemoryProblem) errors.push(jobMemoryProblem);
+  const jobMemoryMax = readJobMemoryMax(defaultsTable, errors);
   return {
     tracker: readString(defaultsTable, "tracker", "[defaults]", errors) ?? "",
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),

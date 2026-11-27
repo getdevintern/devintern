@@ -72,9 +72,12 @@ export interface QueuedWorkItem {
   jobKind?: JobKind;
   /**
    * PR job: what it waits on — `exclusive` (another job on the same PR is
-   * running), `repo` (the repository's per-repo limit), or `global`.
+   * running), `repo` (the repository's per-repo limit), `global` (the worker's
+   * concurrency limit), or `memory` (host memory pressure).
    */
   waitingOn?: QueuedJobWaitReason;
+  /** PR job: when {@link waitingOn} is `memory`, the host probe's detailed reason. */
+  blockReason?: string;
   /** Ad-hoc / tracker: task keys this task depends on (tracker: its native blockers). */
   dependsOn?: string[];
   /** Ad-hoc / tracker: how it waits on {@link dependsOn} (`merged` or `stacked`). */
@@ -414,13 +417,17 @@ export function prJobWaitMessage(waitingOn: QueuedJobWaitReason): string {
       return "Waiting for a free slot on this repository (max_concurrency_per_repo)";
     case "global":
       return "Waiting for a free worker slot (max_concurrency)";
+    case "memory":
+      return "Waiting for the host to have enough free memory";
   }
 }
 
 /**
  * Map a supervisor job still waiting to start to a queued item when it is PR
  * work (a `pr_worktree` job, or any job held back by an exclusive key);
- * `null` for anything else (tasks and automations have their own rows).
+ * `null` for anything else: a task row is claimed before it reaches the
+ * supervisor (so the dashboard never lists it as pending) and an automation
+ * has its own activity row.
  */
 export function supervisorJobToQueuedItem(job: QueuedJobSnapshot): QueuedWorkItem | null {
   if (job.checkoutClass !== "pr_worktree" && job.exclusiveKey === undefined) return null;
@@ -438,6 +445,7 @@ export function supervisorJobToQueuedItem(job: QueuedJobSnapshot): QueuedWorkIte
     message: prJobWaitMessage(job.waitingOn),
     jobKind: job.kind,
     waitingOn: job.waitingOn,
+    ...(job.blockReason !== undefined ? { blockReason: job.blockReason } : {}),
   };
 }
 

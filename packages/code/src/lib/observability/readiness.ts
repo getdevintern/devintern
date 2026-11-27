@@ -23,6 +23,7 @@ import type { SupabaseAuthConfig } from "@devintern/auth";
 import { harnessModelEnvKey, resolveAgentModel } from "../agent/model";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 import { signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
+import { humanText } from "./next-steps-text";
 import { resolveWorkspaceDir, workspaceConfigPath } from "../workspace/paths";
 import { defaultCatalogDir, validateCatalog } from "../automation/catalog";
 
@@ -651,7 +652,7 @@ export function renderReadinessReport(checks: ReadinessCheck[]): RenderedReadine
       lines.push(`     ${item}`);
     }
     if (check.hint && check.status !== "ok") {
-      lines.push(`     💡 ${check.hint}`);
+      lines.push(`     💡 ${humanText(check.hint)}`);
     }
     if (check.status === "fail") hasFailures = true;
     if (check.status === "warn") hasWarnings = true;

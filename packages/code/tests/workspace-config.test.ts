@@ -17,6 +17,11 @@ import {
   parseWorkspaceConfig,
 } from "../src/lib/workspace/config";
 import {
+  DEFAULT_MEMORY_HIGH_PERCENT,
+  DEFAULT_MEMORY_MAX_PERCENT,
+  DEFAULT_MEMORY_SWAP_MAX_PERCENT,
+} from "../src/lib/worker/memory-budget";
+import {
   hasWorkspace,
   locksDir,
   reposDir,
@@ -73,6 +78,11 @@ describe("parseWorkspaceConfig", () => {
       isolation: undefined,
       maxConcurrency: DEFAULT_MAX_CONCURRENCY,
       maxConcurrencyPerRepo: DEFAULT_MAX_CONCURRENCY_PER_REPO,
+      memory: {
+        highPercent: DEFAULT_MEMORY_HIGH_PERCENT,
+        maxPercent: DEFAULT_MEMORY_MAX_PERCENT,
+        swapMaxPercent: DEFAULT_MEMORY_SWAP_MAX_PERCENT,
+      },
     });
     expect(config.defaults.tracker).toBe("jira");
     expect(config.defaults.taskQuery).toBe("labels = devintern");
@@ -294,6 +304,11 @@ tracker = "markdown"
       isolation: "best_effort_host",
       maxConcurrency: 4,
       maxConcurrencyPerRepo: 2,
+      memory: {
+        highPercent: DEFAULT_MEMORY_HIGH_PERCENT,
+        maxPercent: DEFAULT_MEMORY_MAX_PERCENT,
+        swapMaxPercent: DEFAULT_MEMORY_SWAP_MAX_PERCENT,
+      },
     });
   });
 

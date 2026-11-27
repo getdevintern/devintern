@@ -50,7 +50,9 @@ function statusDetail(item: QueuedWorkItem, now: number): string | undefined {
     return `${item.attempts} failed ${item.attempts === 1 ? "attempt" : "attempts"}`;
   if (item.kind === "automation") return "Waiting for a slot";
   if (item.kind === "pr-job") {
-    return item.waitingOn === "exclusive" ? "Waiting for this PR" : "Waiting for a slot";
+    if (item.waitingOn === "exclusive") return "Waiting for this PR";
+    if (item.waitingOn === "memory") return "Waiting for free memory";
+    return "Waiting for a slot";
   }
   if (item.actor) return `Queued by ${item.actor}`;
   return undefined;
@@ -199,6 +201,7 @@ function QueuedDetails({
             {item.message}
           </Fact>
         ) : null}
+        {item.blockReason ? <Fact label="Memory">{item.blockReason}</Fact> : null}
         {item.lastError ? (
           <Fact label="Last error">
             <span className="text-danger">{item.lastError}</span>

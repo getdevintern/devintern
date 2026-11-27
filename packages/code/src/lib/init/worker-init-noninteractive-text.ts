@@ -5,6 +5,12 @@
 
 import { renderPendingSignIn } from "../account/cli";
 import { WORKER_PILOT_OFFER, signInCommand } from "../account/worker-pilot";
+import {
+  humanNextStep,
+  humanNextSteps,
+  humanText,
+  renderNextSteps,
+} from "../observability/next-steps-text";
 import type {
   CheckStatus,
   InitCheck,
@@ -59,7 +65,7 @@ function closingLine(report: NonInteractiveInitReport, failed: InitCheck[]): str
     const signIn = report.nextSteps.find((step) => step.id === "sign-in");
     const how = report.signIn
       ? `open the address above, then run \`${report.signIn.complete}\` on this host`
-      : `run \`${signIn?.command ?? signInCommand()}\``;
+      : `run \`${signIn ? humanNextStep(signIn).command : signInCommand()}\``;
     const then =
       report.start?.result === "after_sign_in"
         ? "; that also installs and starts the worker service"
@@ -77,7 +83,9 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
   const lines: string[] = [];
   if (report.error) {
     lines.push(`❌ ${report.error}`);
-    for (const step of report.nextSteps) lines.push(`   ${step.message}: ${step.command}`);
+    for (const step of humanNextSteps(report.nextSteps)) {
+      lines.push(`   ${step.message}: ${step.command}`);
+    }
     return lines;
   }
   lines.push("", "Checks:");
@@ -87,7 +95,7 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
   );
   for (const check of checks) {
     lines.push(`  ${STATUS_ICON[check.status]} ${check.name}: ${check.message}`);
-    if (check.hint) lines.push(`     → ${check.hint}`);
+    if (check.hint) lines.push(`     → ${humanText(check.hint)}`);
   }
   if (report.tokenSource) {
     lines.push("", `🔑 GitHub token from ${TOKEN_SOURCE_LABEL[report.tokenSource]}.`);
@@ -97,12 +105,13 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
     for (const line of renderPendingSignIn(report.signIn)) lines.push(`   ${line}`);
   }
   if (report.nextSteps.length > 0) {
-    lines.push("", "Next steps:");
-    hostProblemsFirst(report.nextSteps, (step) => HOST_STEPS.has(step.id)).forEach(
-      (step, index) => {
-        lines.push(`  ${index + 1}. ${step.message}:`);
-        lines.push(`     ${step.command}`);
-      },
+    lines.push(
+      "",
+      "Next steps:",
+      ...renderNextSteps(
+        hostProblemsFirst(report.nextSteps, (step) => HOST_STEPS.has(step.id)),
+        { indent: "  " },
+      ),
     );
   }
   for (const warning of report.warnings) lines.push("", `⚠️  ${warning}`);

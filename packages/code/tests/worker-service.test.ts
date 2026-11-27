@@ -189,6 +189,7 @@ describe("installWorkerService on Linux", () => {
       ["systemctl", "--user", "is-active", "devintern-worker"],
       ["systemctl", "--user", "is-enabled", "devintern-worker"],
       ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "reset-failed", "devintern-worker"],
       ["systemctl", "--user", "enable", "--now", "devintern-worker"],
       // No `is-active` here: it says "active" even for a worker that exits a
       // second later; callers run the honest start check instead.
@@ -220,6 +221,40 @@ describe("installWorkerService on Linux", () => {
       "--now",
       "devintern-worker",
     ]);
+  });
+
+  test("clears a start-limit counter before restarting a running service", async () => {
+    const unitPath = systemdUnitPath("/home/tester");
+    const commands: string[][] = [];
+    let startLimitCleared = false;
+    const { deps } = fakeServiceDeps({
+      platform: "linux",
+      files: { [unitPath]: managedUnit },
+      run: async (command, args) => {
+        commands.push([command, ...args]);
+        if (args.includes("reset-failed")) startLimitCleared = true;
+        if (args.includes("is-active") || args.includes("is-enabled")) return ok;
+        // systemd refuses a restart while the unit is in `start-limit-hit`.
+        if (args.includes("restart") && !startLimitCleared) {
+          return {
+            status: 1,
+            stdout: "",
+            stderr:
+              "Job for devintern-worker.service failed because start of the service was attempted too often.",
+          };
+        }
+        return ok;
+      },
+    });
+    const result = await installWorkerService(
+      { workspaceDir: "/srv/workspace", execPath: "devintern" },
+      deps,
+    );
+    expect(result).toEqual({ ok: true, updated: true });
+    const reset = commands.findIndex(([, , verb]) => verb === "reset-failed");
+    const restart = commands.findIndex(([, , verb]) => verb === "restart");
+    expect(reset).toBeGreaterThanOrEqual(0);
+    expect(reset).toBeLessThan(restart);
   });
 
   test("refuses to overwrite a custom systemd unit", async () => {
@@ -684,13 +719,12 @@ describe("renderers keep self-capture semantics", () => {
     expect(unit).toContain("KillMode=mixed\nTimeoutStopSec=120\n");
   });
 
-  test("systemd unit stays uncapped but makes unit-level OOM a clean stop", () => {
+  test("systemd unit enables memory accounting and keeps OOM kills scoped", () => {
     const unit = renderSystemdUnit({ execPath: "devintern", projectDir: "/srv/app" });
-    expect(unit).toContain("MemoryAccounting=yes\nOOMPolicy=stop");
-    // Per-job scopes carry the limits; the daemon itself must not be capped so
-    // it is the last process systemd-oomd considers.
-    expect(unit).not.toContain("MemoryMax=");
-    expect(unit).not.toContain("MemoryHigh=");
+    // Per-job scopes carry their own limits; the service cgroup carries the
+    // host-memory budget (see worker-memory.test.ts).
+    expect(unit).toContain("MemoryAccounting=yes\nOOMPolicy=continue");
+    expect(unit).not.toContain("OOMPolicy=stop");
   });
 
   test("launchd agent keeps RunAtLoad and KeepAlive and logs to its own file", () => {

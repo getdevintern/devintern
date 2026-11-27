@@ -31,6 +31,7 @@ import {
 } from "../account/worker-pilot";
 
 import { trackWorkerInitFailed } from "../observability/analytics";
+import { humanText } from "../observability/next-steps-text";
 import { renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
 import { toReportCheck } from "../observability/readiness-json";
@@ -975,7 +976,7 @@ export function readinessBlockers(
     return checks
       .filter((check) => check.status === "fail" || check.status === "action")
       .map((check) => ({
-        text: `${check.label}: ${check.hint ?? check.detail ?? "see the check above"}`,
+        text: `${check.label}: ${check.hint ? humanText(check.hint) : (check.detail ?? "see the check above")}`,
         action: check.status === "action",
       }));
   }

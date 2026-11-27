@@ -3,6 +3,7 @@
  * out of `worker-readiness.ts`.
  */
 import type { WorkerStatusView } from "./dashboard-api";
+import { humanText } from "./next-steps-text";
 import type { ReadinessCheck } from "./readiness";
 
 /**
@@ -49,7 +50,7 @@ export function workerDoctorClosingLine(
   if (report.hasActions) {
     const steps = checks
       .filter((check) => check.status === "action")
-      .map((check) => check.hint ?? check.detail ?? check.label);
+      .map((check) => (check.hint ? humanText(check.hint) : (check.detail ?? check.label)));
     return `👉 Setup is fine; one step left before the worker can start. ${steps.join(" ")}`;
   }
   const worker = checks.find((check) => check.id === "worker");

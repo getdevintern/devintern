@@ -10,6 +10,7 @@ import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { dirname } from "path";
 
 import { resolveWorkspaceDir } from "../workspace/paths";
+import { describeJobMemoryPlan, resolveJobMemoryPlanForStartup } from "./job-memory";
 import { claimJobScopeSlice, jobScopeClaimMarkerPath, jobScopeSliceName } from "./job-scope-slice";
 import type { JobScopeSurface } from "./job-scope-slice";
 import { userBusEnv } from "./service";
@@ -261,4 +262,16 @@ export function withLeftoverJobScopeCleanup(
     recordJobScopeClaim(resolveWorkspaceDir(env), env);
     await next();
   };
+}
+
+/**
+ * Resolve the startup plan and log it, so the effective cap is in the worker
+ * log before the first job.
+ *
+ * @param surface - Slice the process claims; see `resolveJobMemoryPlanForStartup`.
+ */
+export async function logJobMemoryPlan(surface: JobScopeSurface): Promise<void> {
+  console.log(
+    `🧠 ${describeJobMemoryPlan(await resolveJobMemoryPlanForStartup(process.env, surface))}`,
+  );
 }

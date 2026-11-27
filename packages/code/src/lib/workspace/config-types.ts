@@ -7,6 +7,7 @@ import type { AgentSelection } from "../agent/selection";
 import type { AutoMergeMethod, MergeSafetyPolicy } from "../review/merge-gate";
 import type { DashboardAllowedOrigin } from "../observability/dashboard-origins";
 import type { DependencyMode } from "../dependencies/gate";
+import type { MemoryBudgetPercentages } from "../worker/memory-budget";
 
 /** When automatic conflict resolution on the agent's PRs runs. */
 export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
@@ -22,6 +23,12 @@ export interface WorkspaceExecutionSettings {
   maxConcurrency: number;
   /** Maximum disposable-worktree task jobs admitted for one repository. */
   maxConcurrencyPerRepo: number;
+  /**
+   * Host-memory budget written into the generated systemd unit: percentages
+   * of host RAM for `MemoryHigh`, `MemoryMax`, and `MemorySwapMax`. Applies
+   * after `devintern worker service install` rewrites the unit.
+   */
+  memory: MemoryBudgetPercentages;
 }
 
 /** Workspace-wide settings from the `[workspace]` table. */

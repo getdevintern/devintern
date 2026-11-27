@@ -55,6 +55,26 @@ test("shows the ad-hoc prompt above the Cancel control", () => {
   expect(html.indexOf("aq-prompt")).toBeLessThan(html.indexOf("Cancel task"));
 });
 
+test("shows the detailed host-memory reason for a PR job held by memory pressure", () => {
+  const html = render({
+    items: [
+      {
+        id: "pr-job:held",
+        kind: "pr-job",
+        title: "CI fix on acme/web#13",
+        repo: "web",
+        createdAt: NOW - 1_000,
+        waitingOn: "memory",
+        message: "Waiting for the host to have enough free memory",
+        blockReason: "only 0.4 GB of host memory is available (need 3.2 GB)",
+      },
+    ],
+  });
+  expect(html).toContain("Waiting for the host to have enough free memory");
+  expect(html).toContain("only 0.4 GB of host memory is available (need 3.2 GB)");
+  expect(html).toContain("<dt>Memory</dt>");
+});
+
 test("renders nothing, and no Cancel control, when nothing is queued or cancelled", () => {
   expect(render({ items: [] })).toBe("");
 });

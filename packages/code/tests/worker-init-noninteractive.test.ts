@@ -510,11 +510,13 @@ describe("runNonInteractiveWorkerInit", () => {
       expect(report.result).toBe("action_required");
       expect(initExitCode(report.result)).toBe(2);
       expect(report.filesWritten).toContain(join(workspaceDir, "workspace.toml"));
-      expect(report.checks.find((check) => check.name === "entitlement")).toMatchObject({
+      const entitlement = report.checks.find((check) => check.name === "entitlement");
+      expect(entitlement).toMatchObject({
         status: "action",
         message: "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
-        hint: expect.stringContaining("devintern worker login"),
       });
+      // Not an asymmetric matcher: bun's toMatchObject writes it back into the report.
+      expect(entitlement?.hint).toContain("devintern worker login");
       expect(report.checks.some((check) => check.status === "fail")).toBe(false);
       const signIn = report.nextSteps[0];
       expect(signIn.id).toBe("sign-in");
@@ -531,6 +533,13 @@ describe("runNonInteractiveWorkerInit", () => {
       );
       expect(text).not.toContain("re-run with --yes");
       expect(text).not.toContain("❌");
+      // A person in a terminal gets the interactive sign-in, never the agent flags.
+      expect(text).not.toContain("--no-wait");
+      expect(text).not.toContain("--json");
+      expect(text).toContain(
+        `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")}\n`,
+      );
+      expect(text).toContain("opens your browser");
     });
 
     test("sign-in missing plus a warning is still action_required", async () => {
@@ -784,8 +793,11 @@ describe("runNonInteractiveWorkerInit", () => {
         expect(report.nextSteps[0].message).toContain(
           "It also pairs the relay and installs and starts the worker service",
         );
-        expect(renderNonInteractiveReport(report).join("\n")).toContain(
-          "that also installs and starts the worker service",
+        const text = renderNonInteractiveReport(report).join("\n");
+        expect(text).toContain("that also installs and starts the worker service");
+        // The person-facing message keeps the relay and service note.
+        expect(text).toContain(
+          "into this command on this host. It also pairs the relay and installs and starts the worker service",
         );
       });
 

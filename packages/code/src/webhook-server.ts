@@ -15,8 +15,11 @@ import { captureError, flushErrorTracking } from "@devintern/utils";
 import { GitHubReviewsClient } from "./lib/code-host/github/reviews";
 import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/state/webhook-queue";
 import { startWorkerFailover } from "./lib/worker/failover";
-import { describeJobMemoryPlan, resolveJobMemoryPlanForStartup } from "./lib/worker/job-memory";
-import { recordJobScopeClaim, stopWebhookJobScopesSync } from "./lib/worker/job-scope-cleanup";
+import {
+  logJobMemoryPlan,
+  recordJobScopeClaim,
+  stopWebhookJobScopesSync,
+} from "./lib/worker/job-scope-cleanup";
 import { claimJobScopeSlice } from "./lib/worker/job-scope-slice";
 import { resolveWorkspaceDir } from "./lib/workspace/paths";
 import { resolveAutoReviewIterationsIfEnabled } from "./lib/review/auto-review-config";
@@ -401,8 +404,7 @@ export async function startWebhookServer(
   // (recovery, CI-fix, auto-merge, resolve-conflicts). The spawn path never
   // blocks on the probe, so without this the first job after a fresh start
   // would run uncapped. Probe the webhook slice this process just claimed.
-  const jobMemoryPlan = await resolveJobMemoryPlanForStartup(process.env, "webhook");
-  console.log(`🧠 ${describeJobMemoryPlan(jobMemoryPlan)}`);
+  await logJobMemoryPlan("webhook");
 
   // Initialize persistent webhook queue
   const dbPath = resolveQueueDbPath();

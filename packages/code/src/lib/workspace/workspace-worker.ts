@@ -69,9 +69,9 @@ import { EstimationAcquirer } from "../automation/estimation-acquirer";
 import { composeScheduledJobActions } from "../automation/scheduled-jobs";
 import { warnUninstalledHarnessPins } from "../agent/selection";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
+import { hostMemorySupervisorOptions } from "../worker/host-memory";
 import type { TaskSupervisor } from "../worker/supervisor";
-import { describeJobMemoryPlan, resolveJobMemoryPlanForStartup } from "../worker/job-memory";
-import { withLeftoverJobScopeCleanup } from "../worker/job-scope-cleanup";
+import { logJobMemoryPlan, withLeftoverJobScopeCleanup } from "../worker/job-scope-cleanup";
 import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover, getWorkerFailover } from "../worker/failover";
@@ -925,8 +925,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
 
   const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
   // Probe off the event loop, including the slice claimed after the lock; log the cap before any job.
-  const jobMemoryPlan = await resolveJobMemoryPlanForStartup(process.env, "worker");
-  console.log(`🧠 ${describeJobMemoryPlan(jobMemoryPlan)}`);
+  await logJobMemoryPlan("worker");
   const initialFleetAutomations = resolveFleetAutomations(config);
   if (initialFleetAutomations.problems.length > 0) {
     throw new Error(`Invalid ${configPath}:\n- ${initialFleetAutomations.problems.join("\n- ")}`);
@@ -953,10 +952,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const notificationDelivery = startNotificationMaintenance(state.dbPath, () => config);
   await startLoggedWorkerFailover(state.queue);
   const repoManager = new RepoManager(workspaceDir);
-  const supervisor = createTaskSupervisor({
-    maxConcurrency: config.workspace.execution.maxConcurrency,
-    maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
-  });
+  const supervisor = createTaskSupervisor(
+    config.workspace.execution,
+    hostMemorySupervisorOptions(),
+  );
   const orphanRecovery = await recoverOrphanedWorkspaceRuns({
     config,
     workspaceDir,
