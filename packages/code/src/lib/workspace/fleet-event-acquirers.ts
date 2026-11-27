@@ -539,6 +539,12 @@ export async function buildFleetEventAcquirers(
         // Throwing variant: a transient permission-API error must be retried by
         // the relay / mention sweep, not treated as a denial.
         gh(`${owner}/${repo}`).userHasPushAccessOrThrow(owner, repo, user),
+      closedPrMentions: {
+        getPrState: (slug: string, prNumber: number) =>
+          gh(slug).getPullRequest(ownerOf(slug), nameOf(slug), prNumber),
+        postPrComment: (slug: string, prNumber: number, body: string) =>
+          gh(slug).postPullRequestComment(ownerOf(slug), nameOf(slug), prNumber, body),
+      },
       verbose,
       supervisor: options.supervisor,
     };
