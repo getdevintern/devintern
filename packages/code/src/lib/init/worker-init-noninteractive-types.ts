@@ -87,7 +87,8 @@ export interface NonInteractiveInitReport {
   warnings: string[];
   /**
    * Where the `GITHUB_TOKEN` this run used came from. Absent when no token was
-   * needed or the token was already saved in the workspace `.env`.
+   * needed. A token from the process environment reports `env`; one from
+   * `--env-file` or already saved in the workspace `.env` reports `env-file`.
    */
   tokenSource?: GitHubTokenSource;
   checks: InitCheck[];

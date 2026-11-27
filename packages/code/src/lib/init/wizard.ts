@@ -54,6 +54,7 @@ import {
   TRACKER_SETUP,
   renderEnvFile,
 } from "./scaffold";
+import type { EnvPromptStep } from "./scaffold";
 import { collectReadinessChecks, renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
 import { describeGitHubCliToken, readGitHubCliToken } from "./github-cli-token";
@@ -327,13 +328,21 @@ export function absolutizeMarkdownTasksDir(
   }
 }
 
+/** Outcome of offering a signed-in `gh` token: absent, declined, rejected, or accepted. */
+export type GitHubCliTokenOffer =
+  | { status: "accepted"; token: string; session: GitHubCliToken }
+  | { status: "declined" }
+  | { status: "rejected"; reason: string }
+  | { status: "unavailable" };
+
 /**
  * Offer a signed-in GitHub CLI token in place of pasting one.
  *
  * The token is probed with the same tracker probe as a pasted token (repo
  * access when a repository is known) before the offer, so a token the API
- * rejects is never written to any env file. Declining returns null so the
- * caller falls back to the normal prompt.
+ * rejects is never written to any env file. The result separates a declined
+ * offer from a rejected token so callers can fall back to the normal prompt
+ * only when the user did not want the token.
  */
 export async function offerGitHubCliToken(options: {
   token: GitHubCliToken | null;
@@ -341,28 +350,25 @@ export async function offerGitHubCliToken(options: {
   log: LogFn;
   probe: ProbeFn;
   repoSlug?: string;
-}): Promise<string | null> {
+}): Promise<GitHubCliTokenOffer> {
   const { token, prompt, log, probe, repoSlug } = options;
-  if (!token) return null;
+  if (!token) return { status: "unavailable" };
   const env: Record<string, string> = { GITHUB_TOKEN: token.token };
   if (repoSlug) env.GITHUB_REPO = repoSlug;
   try {
     await withTimeout(probe("github", env), PROBE_TIMEOUT_MS);
   } catch (error) {
-    log(
-      `⚠️  Not using the GitHub CLI token: ${condenseMessage(
-        error instanceof Error ? error.message : String(error),
-      )}`,
-    );
-    return null;
+    const reason = condenseMessage(error instanceof Error ? error.message : String(error));
+    log(`⚠️  Not using the GitHub CLI token: ${reason}`);
+    return { status: "rejected", reason };
   }
   const answer = (
     await prompt(`Use your GitHub CLI token (${describeGitHubCliToken(token)})? [Y/n]: `)
   )
     .trim()
     .toLowerCase();
-  if (answer === "n" || answer === "no") return null;
-  return token.token;
+  if (answer === "n" || answer === "no") return { status: "declined" };
+  return { status: "accepted", token: token.token, session: token };
 }
 
 /**
@@ -380,7 +386,7 @@ async function reuseGitHubCliToken(options: {
 }): Promise<boolean> {
   if (options.values.GITHUB_TOKEN || process.env.GITHUB_TOKEN) return false;
   const token = options.readGh();
-  const accepted = await offerGitHubCliToken({
+  const offer = await offerGitHubCliToken({
     token,
     prompt: options.prompt,
     log: options.log,
@@ -388,10 +394,71 @@ async function reuseGitHubCliToken(options: {
     repoSlug:
       options.values.GITHUB_REPO || options.stepDefaults?.GITHUB_REPO || process.env.GITHUB_REPO,
   });
-  if (!accepted || !token) return false;
-  options.values.GITHUB_TOKEN = accepted;
-  options.log(`🔑 Using your GitHub CLI token (${describeGitHubCliToken(token)}).`);
+  if (offer.status !== "accepted") return false;
+  options.values.GITHUB_TOKEN = offer.token;
+  options.log(`🔑 Using your GitHub CLI token (${describeGitHubCliToken(offer.session)}).`);
   return true;
+}
+
+/** Turn stored values into Enter-to-keep prompt step defaults. */
+function prefillSteps(steps: EnvPromptStep[], existing: Record<string, string>): EnvPromptStep[] {
+  return steps.map((step) => {
+    const current = existing[step.key];
+    if (!current) return step;
+    return {
+      ...step,
+      defaultValue: current,
+      label: `${step.label} (Enter to keep current)`,
+    };
+  });
+}
+
+/**
+ * Offer the CLI token for a tracker that needs one, then return its prompt
+ * steps without the token step when the offer was accepted.
+ */
+async function trackerTokenSteps(options: {
+  trackerId: string;
+  steps: EnvPromptStep[];
+  existing: Record<string, string>;
+  values: Record<string, string>;
+  readGh: () => GitHubCliToken | null;
+  prompt: PromptFn;
+  log: LogFn;
+  probe: ProbeFn;
+}): Promise<EnvPromptStep[]> {
+  const { existing, values } = options;
+  if (options.trackerId === "github" && !existing.GITHUB_TOKEN) {
+    await reuseGitHubCliToken(options);
+  }
+  const steps = prefillSteps(options.steps, existing);
+  return values.GITHUB_TOKEN ? steps.filter((step) => step.key !== "GITHUB_TOKEN") : steps;
+}
+
+/** Offer the optional PR token, falling back to the pasted-token prompt. */
+async function promptGitHubPrToken(options: {
+  values: Record<string, string>;
+  existing: Record<string, string>;
+  readGh: () => GitHubCliToken | null;
+  prompt: PromptFn;
+  promptSecret: PromptFn;
+  log: LogFn;
+  probe: ProbeFn;
+}): Promise<void> {
+  options.log(
+    "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
+  );
+  options.log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
+  const reused = await reuseGitHubCliToken({ ...options, stepDefaults: options.existing });
+  if (!reused) {
+    await promptSteps(
+      [GITHUB_PR_TOKEN_STEP],
+      options.prompt,
+      options.log,
+      options.values,
+      options.promptSecret,
+    );
+  }
 }
 
 /**
@@ -417,6 +484,12 @@ export async function runTrackerSetup(
     envLabel?: string;
     /** Reads a signed-in GitHub CLI token; defaults to `gh auth token`. */
     githubCliToken?: () => GitHubCliToken | null;
+    /**
+     * Offer the optional PR token when the tracker is not GitHub (default
+     * true). `worker init` sets this false and offers it in its own later step,
+     * so a declined offer is not repeated.
+     */
+    offerPrToken?: boolean;
   },
 ): Promise<{ trackerId: string; values: Record<string, string>; envPath: string } | null> {
   const projectRoot = findProjectRoot({ startDir: cwd });
@@ -509,7 +582,7 @@ export async function runTrackerSetup(
   }
 
   // Optional PR-integration token when the tracker itself is not GitHub.
-  if (trackerId !== "github") {
+  if (trackerId !== "github" && (options.offerPrToken ?? true)) {
     log(
       "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
     );
@@ -551,6 +624,7 @@ export async function runInitUpgrade(
   const cwd = deps.cwd ?? process.cwd();
   const envPath = deps.envPath;
   const envLabel = envPath;
+  const readGh = deps.githubCliToken ?? readGitHubCliToken;
 
   if (!existsSync(envPath)) {
     log(`⚠️  ${envPath} not found — nothing to upgrade.`);
@@ -586,33 +660,35 @@ export async function runInitUpgrade(
       return;
     }
 
-    /** Turn stored values into Enter-to-keep prompt step defaults. */
-    const prefill = (steps: (typeof TRACKER_SETUP)[string]) =>
-      steps.map((step) => {
-        const current = existing[step.key];
-        if (!current) return step;
-        return {
-          ...step,
-          defaultValue: current,
-          label: `${step.label} (Enter to keep current)`,
-        };
-      });
-
     if (choice === "1") {
       const steps = TRACKER_SETUP[currentTracker] ?? [];
       const docs = TRACKER_DOCS[currentTracker];
       if (docs) log(`\n📖 Setup guide: ${docs}`);
       const values: Record<string, string> = {};
-      await promptSteps(prefill(steps), prompt, log, values, promptSecret);
+      const stepsToPrompt = await trackerTokenSteps({
+        trackerId: currentTracker,
+        steps,
+        existing,
+        values,
+        readGh,
+        prompt,
+        log,
+        probe,
+      });
+      await promptSteps(stepsToPrompt, prompt, log, values, promptSecret);
       absolutizeMarkdownTasksDir(values, cwd, log);
 
       // Optional PR-integration token, kept from config when present.
       if (currentTracker !== "github" && !existing.GITHUB_TOKEN) {
-        log(
-          "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
-        );
-        log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-        await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
+        await promptGitHubPrToken({
+          values,
+          existing,
+          readGh,
+          prompt,
+          promptSecret,
+          log,
+          probe,
+        });
       }
 
       if (currentTracker !== "markdown") {
@@ -646,17 +722,31 @@ export async function runInitUpgrade(
     if (docs) log(`\n📖 Setup guide (tokens, permissions, examples): ${docs}`);
 
     const values: Record<string, string> = {};
-    await promptSteps(prefill(steps), prompt, log, values, promptSecret);
+    const stepsToPrompt = await trackerTokenSteps({
+      trackerId,
+      steps,
+      existing,
+      values,
+      readGh,
+      prompt,
+      log,
+      probe,
+    });
+    await promptSteps(stepsToPrompt, prompt, log, values, promptSecret);
     absolutizeMarkdownTasksDir(values, cwd, log);
     if (trackerId !== "github" && existing.GITHUB_TOKEN) {
       // Carry the PR token over so GitHub integration keeps working.
       values.GITHUB_TOKEN = existing.GITHUB_TOKEN;
     } else if (trackerId !== "github") {
-      log(
-        "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
-      );
-      log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-      await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
+      await promptGitHubPrToken({
+        values,
+        existing,
+        readGh,
+        prompt,
+        promptSecret,
+        log,
+        probe,
+      });
     }
 
     if (trackerId !== "markdown") {

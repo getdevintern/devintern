@@ -61,7 +61,7 @@ Status transitions and story-point fields go in `[trackers]` in `workspace.toml`
 
 Set `GITHUB_TOKEN` for CLI runs and for workspace automation. A workspace paired with the hosted [relay](./relay.md) receives events through the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new); the token stays on your machine and you don't create a GitHub App yourself. Unattended runs also need the [Worker Pilot](./worker.md#worker-pilot-and-licenses) or a `LICENSE_KEY` ([pricing](https://devintern.com/pricing/)).
 
-If `GITHUB_TOKEN` is unset and the [GitHub CLI](https://cli.github.com) is signed in, `devintern init` and `devintern worker init` offer to use `gh auth token` instead of asking you to create a token; `worker init --non-interactive` uses it automatically. Setup probes it like a pasted token and never saves one the probe rejects.
+If `GITHUB_TOKEN` is unset and the [GitHub CLI](https://cli.github.com) is signed in, `devintern init` and `devintern worker init` offer to use `gh auth token` instead of asking you to create a token; `worker init --non-interactive` uses it automatically. Setup probes it like a pasted token and never saves one the probe rejects. A rejected token stops non-interactive setup with the `fix-credentials` next step; in the wizard it falls back to asking for a token.
 
 The saved token is a copy for DevIntern alone. It does not change when `gh` re-authenticates or when you sign in to a different GitHub account. To update it, replace `GITHUB_TOKEN` in the workspace `.env` (`~/.devintern/.env`) or the repo's env file under `~/.devintern/env/`, or re-run setup with a fresh token in an env file passed with `--env-file`.
 

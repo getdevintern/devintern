@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -215,20 +215,50 @@ describe("worker init onboarding", () => {
       expect(logs.join("\n")).not.toContain("gho_fake");
     });
 
-    test("a rejected token is not saved and setup continues without it", async () => {
+    test("a rejected token is not saved and falls back to the token prompt", async () => {
       delete process.env.GITHUB_TOKEN;
-      const { deps: d } = deps(() => "", {
-        githubCliToken: () => ({ token: "gho_rejected", account: "octocat" }),
-        githubTokenProbe: async () => {
-          throw new Error("GitHub API error (401): Bad credentials");
+      const { questions, deps: d } = deps(
+        (question) =>
+          question.startsWith("GitHub token for creating pull requests")
+            ? "ghp_pasted_after_reject"
+            : "",
+        {
+          githubCliToken: () => ({ token: "gho_rejected", account: "octocat" }),
+          githubTokenProbe: async () => {
+            throw new Error("GitHub API error (401): Bad credentials");
+          },
         },
-      });
+      );
       const result = await runWorkerInit(d);
       expect(result.ok).toBe(true);
-      const envPath = path.join(workspaceDir, ".env");
-      const env = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+      expect(
+        questions.some((question) =>
+          question.startsWith("GitHub token for creating pull requests"),
+        ),
+      ).toBe(true);
+      const env = readFileSync(path.join(workspaceDir, ".env"), "utf8");
       expect(env).not.toContain("gho_rejected");
+      expect(env).toContain("GITHUB_TOKEN=ghp_pasted_after_reject");
       expect(logs.join("\n")).toContain("Not using the GitHub CLI token");
+    });
+    test("a fresh non-GitHub tracker offers the CLI token only once", async () => {
+      delete process.env.GITHUB_TOKEN;
+      const { questions, deps: d } = deps(
+        (question) => (question.startsWith("Enter a number") ? "markdown" : ""),
+        {
+          ensureTracker: undefined,
+          githubCliToken: () => ({ token: "gho_once", account: "octocat", scopes: "repo" }),
+          githubTokenProbe: async () => {},
+        },
+      );
+      const result = await runWorkerInit(d);
+      expect(result.ok).toBe(true);
+      expect(
+        questions.filter((question) => question.startsWith("Use your GitHub CLI token")),
+      ).toHaveLength(1);
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=gho_once",
+      );
     });
   });
 

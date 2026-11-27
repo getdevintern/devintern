@@ -31,8 +31,11 @@ import { runTrackerSetup } from "../src/lib/init/wizard";
 const TOKEN = "gho_fake_github_cli_token";
 
 /** A fake `gh` binary whose two subcommands answer as told. */
-function fakeGh(options: { token?: string; status?: string; signedOut?: boolean }): string {
-  const dir = mkdtempSync(join(tmpdir(), "fake-gh-"));
+function fakeGh(
+  options: { token?: string; status?: string; signedOut?: boolean },
+  parent = tmpdir(),
+): string {
+  const dir = mkdtempSync(join(parent, "fake-gh-"));
   const script = `#!/bin/sh
 if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
 ${
@@ -332,6 +335,39 @@ describe("non-interactive setup", () => {
     expect(readFileSync(join(workspaceDir, ".env"), "utf8")).toContain(`GITHUB_TOKEN=${TOKEN}`);
   });
 
+  test("a rejected gh token for a GitHub remote fails with fix-credentials", async () => {
+    // The real reader over a fake `gh` on PATH, plus a probe that rejects it.
+    const ghDir = fakeGh({ status: STATUS }, root);
+    const report = await run(
+      {
+        githubCliToken: () =>
+          readGitHubCliToken({ env: { ...process.env, PATH: `${ghDir}:/usr/bin:/bin` } }),
+        probe: async (trackerId, env) => {
+          if (trackerId === "github" && env.GITHUB_TOKEN === TOKEN) {
+            throw new Error("GitHub API error (401): Bad credentials");
+          }
+        },
+      },
+      {
+        JIRA_BASE_URL: "https://acme.atlassian.net",
+        JIRA_EMAIL: "bot@acme.test",
+        JIRA_API_TOKEN: "ATATT-test-token",
+      },
+      { tracker: "jira", taskQuery: "project = APP" },
+    );
+    expect(report.result).toBe("failure");
+    expect(report.code).toBe("credentials_rejected");
+    expect(report.persisted).toBe(false);
+    expect(report.tokenSource).toBe("gh");
+    expect(report.nextSteps.map((step) => step.id)).toContain("fix-credentials");
+    expect(
+      report.warnings.some((warning) => warning.includes("GitHub CLI token was rejected")),
+    ).toBe(true);
+    const envPath = join(workspaceDir, ".env");
+    const saved = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+    expect(saved).not.toContain(TOKEN);
+  });
+
   test("a rejected gh token is not saved and fails with fix-credentials", async () => {
     const report = await run(
       {
@@ -408,6 +444,24 @@ describe("non-interactive setup", () => {
     expect(reads).toBe(0);
     expect(readFileSync(join(workspaceDir, ".env"), "utf8")).toContain(
       "GITHUB_TOKEN=ghp_from_file",
+    );
+  });
+
+  test("a token already saved in the workspace .env reports tokenSource env-file", async () => {
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, ".env"), "GITHUB_TOKEN=ghp_workspace\n", { mode: 0o600 });
+    let reads = 0;
+    const report = await run({
+      githubCliToken: () => {
+        reads += 1;
+        return { token: TOKEN };
+      },
+    });
+    expect(report.result).toBe("success");
+    expect(report.tokenSource).toBe("env-file");
+    expect(reads).toBe(0);
+    expect(readFileSync(join(workspaceDir, ".env"), "utf8")).toContain(
+      "GITHUB_TOKEN=ghp_workspace",
     );
   });
 });

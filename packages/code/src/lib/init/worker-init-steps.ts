@@ -15,7 +15,12 @@
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
-import { condenseMessage, defaultProbe, parseEnvContent } from "@devintern/task-trackers";
+import {
+  condenseMessage,
+  defaultProbe,
+  parseEnvContent,
+  promptSteps,
+} from "@devintern/task-trackers";
 import { findProjectRoot } from "@devintern/utils";
 
 import {
@@ -62,6 +67,7 @@ import {
 } from "./worker-init-activation";
 import { describeGitHubCliToken, readGitHubCliToken } from "./github-cli-token";
 import type { GitHubCliToken } from "./github-cli-token";
+import { GITHUB_PR_TOKEN_STEP } from "./scaffold";
 import { errorMessage } from "./worker-init-fs";
 import {
   applyPlan,
@@ -297,6 +303,7 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
  * Pull-request token. A workspace with a GitHub remote needs `GITHUB_TOKEN`
  * for PRs even when the tracker is elsewhere; when it is not set, offer the
  * signed-in `gh` session. Flags mode resolved it while planning the query.
+ * A rejected `gh` token falls back to the same prompt as a pasted one.
  */
 async function githubTokenStep(run: SetupRun): Promise<boolean> {
   if (run.input === "flags" || run.trackerType === "github") return true;
@@ -312,17 +319,25 @@ async function githubTokenStep(run: SetupRun): Promise<boolean> {
   } catch {
     token = null;
   }
-  const accepted = await offerGitHubCliToken({
+  const offer = await offerGitHubCliToken({
     token,
     prompt: run.prompt,
     log: run.log,
     probe: run.deps.githubTokenProbe ?? defaultProbe,
     repoSlug,
   });
-  if (!accepted || !token) return true;
-
-  run.log(`🔑 Using your GitHub CLI token (${describeGitHubCliToken(token)}).`);
-  saveGitHubToken(envPath, accepted, run.log);
+  if (offer.status === "accepted") {
+    run.log(`🔑 Using your GitHub CLI token (${describeGitHubCliToken(offer.session)}).`);
+    saveGitHubToken(envPath, offer.token, run.log);
+    return true;
+  }
+  if (offer.status === "rejected") {
+    // The rejection warning is already logged; ask for a token that works
+    // instead of silently finishing without one.
+    const values: Record<string, string> = {};
+    await promptSteps([GITHUB_PR_TOKEN_STEP], run.prompt, run.log, values, run.promptSecret);
+    if (values.GITHUB_TOKEN) saveGitHubToken(envPath, values.GITHUB_TOKEN, run.log);
+  }
   return true;
 }
 
@@ -685,6 +700,20 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
     // when nobody is signed in yet, `fail` for anything else.
     checks.push(mapped);
   }
+  // A non-GitHub tracker only needs GITHUB_TOKEN for PRs, which no tracker
+  // probe covers; report the rejected CLI token as a credentials failure so
+  // the run stops with the same `fix-credentials` next step.
+  if (plan.githubTokenRejected && plan.tracker !== "github") {
+    checks.push({
+      name: "credentials",
+      label: "GitHub credential probe",
+      status: "fail",
+      message: plan.githubTokenRejection
+        ? `GitHub CLI token rejected: ${plan.githubTokenRejection}`
+        : "GitHub CLI token rejected",
+      hint: "Use a GITHUB_TOKEN that can open pull requests, or pass one with --env-file",
+    });
+  }
   return checks;
 }
 
@@ -758,6 +787,9 @@ export async function defaultEnsureTracker(
     promptSecret,
     envLabel: sharedEnvPath,
     stepDefaults: originSlug ? { GITHUB_REPO: originSlug } : undefined,
+    // The worker's own GitHub-token step offers this after the workspace is
+    // known, so a declined offer is not repeated here.
+    offerPrToken: false,
     ...(githubCliToken ? { githubCliToken } : {}),
     writeEnv: async (envContent) => {
       mergeIntoSharedEnv(sharedEnvPath, envContent, log);

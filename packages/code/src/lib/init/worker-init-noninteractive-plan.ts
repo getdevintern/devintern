@@ -155,6 +155,8 @@ export interface Plan {
   tokenSource?: GitHubTokenSource;
   /** A GitHub CLI token the probe rejected and this run therefore will not save. */
   githubTokenRejected?: boolean;
+  /** Why the probe rejected it, for the failed-check message. */
+  githubTokenRejection?: string;
   /** One-line notes for the text output (for example a path made absolute). */
   notes: string[];
   /** Snapshot of workspace.toml when validated (null when absent). */
@@ -411,9 +413,9 @@ function credentialTokenSource(
 
 /**
  * Resolve and probe `gh`'s token when this setup needs a GitHub token and none
- * is set. A rejected token is reported but only kept in the credentials when
- * the GitHub tracker requires one: the readiness check then fails it with the
- * existing `fix-credentials` step instead of saving it.
+ * is set. A rejected token is reported but never kept in the saved
+ * credentials: the readiness step fails with the existing `fix-credentials`
+ * step, whether the GitHub tracker or a GitHub remote for PRs needs the token.
  */
 async function githubCliTokenForPlan(
   tracker: string | undefined,
@@ -421,7 +423,12 @@ async function githubCliTokenForPlan(
   credentialEnv: Env,
   deps: PlanQueryDeps,
   notes: string[],
-): Promise<{ token?: string; source?: GitHubTokenSource; rejected: boolean }> {
+): Promise<{
+  token?: string;
+  source?: GitHubTokenSource;
+  rejected: boolean;
+  rejection?: string;
+}> {
   if (!needsGitHubToken(tracker, draft, credentialEnv) || credentialEnv.GITHUB_TOKEN) {
     return { rejected: false };
   }
@@ -443,17 +450,11 @@ async function githubCliTokenForPlan(
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (tracker === "github") {
-      notes.push(
-        `⚠️  The GitHub CLI token was rejected (${message}); it will not be saved. ` +
-          "Use a token with repository access, or re-run with --env-file.",
-      );
-      return { token: token.token, source: "gh", rejected: true };
-    }
     notes.push(
-      `⚠️  The GitHub CLI token was rejected (${message}); continuing without a GitHub PR token.`,
+      `⚠️  The GitHub CLI token was rejected (${message}); it will not be saved. ` +
+        "Use a token with repository access, or re-run with --env-file.",
     );
-    return { rejected: false };
+    return { token: token.token, source: "gh", rejected: true, rejection: message };
   }
   notes.push(
     `🔑 Using the GitHub CLI token${token.account ? ` for ${token.account}` : ""} ` +
@@ -525,6 +526,7 @@ export async function planQuery(
       envUpdates,
       ...(tokenSource ? { tokenSource } : {}),
       ...(githubCli.rejected ? { githubTokenRejected: true } : {}),
+      ...(githubCli.rejection ? { githubTokenRejection: githubCli.rejection } : {}),
       notes,
       configSnapshot,
       writeRecommendedPolicy: false,
