@@ -16,7 +16,7 @@
 # It never runs sudo. As root it installs missing system packages (unzip,
 # curl, bash) itself; otherwise it prints the sudo command and exits.
 #
-# Testing (from the repo root):
+# Testing (from the repo root; use ubuntu:latest the same way):
 #   docker run --rm -v "$PWD/scripts:/s:ro" debian:stable-slim \
 #     sh -c 'apt-get update && apt-get install -y curl ca-certificates && sh /s/install.sh'
 #   docker run --rm -u 1000 -e HOME=/tmp -v "$PWD/scripts:/s:ro" debian:stable-slim \
@@ -155,6 +155,15 @@ persist_path() {
   say "Added $bin_dir to PATH in $profile"
 }
 
+# True when any coding-agent CLI DevIntern can drive is on PATH. Keep in sync
+# with the harnesses' `defaultPath` in packages/agent-harness/src/harnesses.
+have_agent_cli() {
+  for agent in claude codex cursor-agent opencode agy cline reasonix goose grok kilo kimi muse pi qwen; do
+    have "$agent" && return 0
+  done
+  return 1
+}
+
 path_contains() {
   case ":$2:" in
     *":$1:"*) return 0 ;;
@@ -222,7 +231,7 @@ main() {
     say "  export PATH=\"$global_bin:\$PATH\""
     say ""
   fi
-  if ! have claude && ! have codex && ! have cursor-agent && ! have opencode; then
+  if ! have_agent_cli; then
     say "Install and sign in to a coding agent, for example Claude Code:"
     say ""
     say "  curl -fsSL https://claude.ai/install.sh | bash && claude"
