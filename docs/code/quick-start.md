@@ -72,9 +72,8 @@ In a checkout that is not set up yet, it first asks how you want to run tickets.
 1. Your tracker and its token. It links to the page where you create the token and checks the connection.
 2. The ready-tasks query: which tickets the worker picks up. Press Enter to pick up open tickets labeled `devintern` (for example `is:open label:devintern` on GitHub Issues), or type your own query; keep it narrow at first. On GitHub and GitLab it offers to create the `devintern` label if it is missing.
 3. Nothing about worker settings: a new workspace gets the recommended ones (no CI repair, automatic conflict resolution, task pickup at any hour, no Sentry project). Change them in `~/.devintern/workspace.toml`, or run `devintern worker init --customize` to choose each one and add a Sentry project.
-4. Sign-in, which starts the [14-day free Worker Pilot](./worker.md#worker-pilot-and-licenses) (no card required) when you have no license. While it waits for the browser, press Enter to skip and sign in later with `devintern worker login github`.
-5. [Relay](./relay.md) pairing when you are signed in, so PR reviews reach the worker in seconds. Without it the worker polls.
-6. Installing the background service (step 3 below).
+4. "Sign in with GitHub to start your 14-day Worker Pilot": one question that starts the [14-day free Worker Pilot](./worker.md#worker-pilot-and-licenses) (no card required) and pairs the [relay](./relay.md), so PR reviews reach the worker in seconds. For a GitHub repository it opens the DevIntern AI App install page and waits for you to approve it. Press Enter during either wait to skip; `devintern worker login github` signs you in later, and `devintern worker connect github --status` finishes an App approval you gave after skipping. To sign in with Google, X or email instead, skip the step and run `devintern worker login <method>`. You are not asked when you are already signed in or have a `LICENSE_KEY`. Add `--no-relay` to keep polling only.
+5. Installing the background service (step 3 below).
 
 Your answers are saved in `~/.devintern/`; nothing is written into your checkout. Re-run `devintern worker init` at any time: it keeps your answers as defaults and finishes a setup that stopped partway, including one you stopped with Ctrl+C.
 

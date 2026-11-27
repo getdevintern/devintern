@@ -49,6 +49,7 @@ import {
   serviceExitCode,
 } from "../src/lib/worker/service-command";
 import type { ServiceCommandArgs } from "../src/lib/worker/service-command";
+import { loadWorkerStartIntent, saveWorkerStartIntent } from "../src/lib/worker/start-intent";
 import {
   WORKER_CONFIG_EXIT_CODE,
   isPermanentLicenseDenial,
@@ -647,6 +648,50 @@ describe("devintern worker service", () => {
     expect(waits).toEqual([1_000]);
     expect(commands).toContainEqual(["systemctl", "--user", "enable", "--now", "devintern-worker"]);
     expect(readFileSync(systemdUnitPath(home), "utf8")).toContain("RestartPreventExitStatus=78");
+  });
+
+  test("re-running install on the running current service does not restart it", async () => {
+    const { deps, commands } = freshLinux();
+    const run = deps.run as RunCommandFn;
+    // Once enabled, systemd reports the unit active; the live lock is the worker.
+    deps.run = async (command, args) => {
+      const result = await run(command, args);
+      if (args.includes("show") && commands.some((c) => c.includes("enable"))) {
+        return {
+          status: 0,
+          stdout: "ActiveState=active\nSubState=running\nMainPID=4242\n",
+          stderr: "",
+        };
+      }
+      return result;
+    };
+    const install = {
+      workspaceDir,
+      service: deps,
+      execPath: "/usr/local/bin/devintern",
+      runtimePath: "/usr/local/bin/bun",
+      environmentPath: "/usr/bin",
+      waitForStart: async () => ({ state: "running" as const, pid: 4242 }),
+    };
+    const first = await runServiceAction(baseArgs(), install);
+    expect(first.result).toBe("running");
+    writeLiveLock();
+    const before = commands.length;
+    const again = await runServiceAction(baseArgs(), install);
+    expect(again).toMatchObject({ result: "running", unchanged: true, updated: false });
+    const after = commands.slice(before);
+    expect(after.some((c) => c.includes("restart") || c.includes("enable"))).toBe(false);
+  });
+
+  test("uninstall forgets a pending `worker init --start` request", async () => {
+    saveWorkerStartIntent(workspaceDir, { requestedAt: new Date().toISOString(), relay: true });
+    const { deps } = linuxService(() => undefined);
+    const report = await runServiceAction(baseArgs({ action: "uninstall" }), {
+      workspaceDir,
+      service: deps,
+    });
+    expect(report.result).toBe("uninstalled");
+    expect(loadWorkerStartIntent(workspaceDir)).toBeNull();
   });
 
   test("a start that does not finish within --wait exits 3", async () => {

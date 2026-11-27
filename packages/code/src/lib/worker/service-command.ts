@@ -51,6 +51,7 @@ import {
 } from "./service-control";
 import type { ServiceActionResult, StartCheck, WorkerServiceStatus } from "./service-control";
 import { renderServiceStatus, renderStartCheck } from "./service-report";
+import { clearWorkerStartIntent } from "./start-intent";
 
 export const WORKER_SERVICE_JSON_SCHEMA = "devintern.worker-service";
 export const WORKER_SERVICE_JSON_VERSION = 1;
@@ -459,6 +460,8 @@ export async function runServiceAction(
     case "uninstall": {
       const outcome = await uninstallWorkerService(deps.service);
       if (!outcome.ok) return { ...base, result: "error", error: outcome.error };
+      // No pending `worker init --start` may reinstall it at the next sign-in.
+      clearWorkerStartIntent(workspaceDir);
       return { ...base, result: outcome.unchanged ? "not_installed" : "uninstalled" };
     }
     case "status": {
@@ -599,7 +602,7 @@ async function printServiceLogs(
 }
 
 /** Default readiness preflight: the same checks and environment as `worker doctor`. */
-async function defaultCollectReadiness(workspaceDir: string): Promise<ReadinessCheck[]> {
+export async function collectServiceReadiness(workspaceDir: string): Promise<ReadinessCheck[]> {
   const [{ collectWorkerDoctorChecks }, { applyWorkspaceProcessEnv }, { checkLicense }, bootstrap] =
     await Promise.all([
       import("../observability/worker-readiness"),
@@ -668,7 +671,7 @@ export async function runWorkerServiceCommand(
   const report = await runServiceAction(args, {
     ...deps,
     workspaceDir,
-    collectReadiness: deps.collectReadiness ?? defaultCollectReadiness,
+    collectReadiness: deps.collectReadiness ?? collectServiceReadiness,
   });
   if (report.result === "error" && !report.code) report.code = "service_command_failed";
   if (args.json) {

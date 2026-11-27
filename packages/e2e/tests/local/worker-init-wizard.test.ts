@@ -38,7 +38,7 @@ const TRACKER_PROMPT = /Enter a number \(1-\d+\) or tracker id: $/;
 const QUERY_PROMPT = /Ready-tasks query: $/;
 
 const TOKEN_PROMPT = /GitHub token for creating pull requests[^\n]*: $/;
-const SIGN_IN_PROMPT = /Sign in now to start the Worker Pilot\? \[Y\/n\]: $/;
+const SIGN_IN_PROMPT = /Sign in with GitHub now to start the Worker Pilot\? \[Y\/n\]: $/;
 const CONTINUE_PROMPT = /Continue setup without the agent CLI\?[^\n]*\[Y\/n\]: $/;
 
 interface AnswerOptions {
@@ -46,13 +46,16 @@ interface AnswerOptions {
   tasksDir?: string;
   /** Typed at the hidden GitHub token prompt (default: Enter to skip). */
   token?: string;
-  /** False when the license check is skipped, so there is no sign-in prompt. */
-  licensing?: boolean;
   /**
    * Run with `--customize` and walk the CI, conflict, active-hours, and
    * Sentry questions (default: the recommended settings, no question).
    */
   expandedSettings?: boolean;
+  /**
+   * False when the run skips the license check (`licensing: false`): the check
+   * passes, so the wizard does not ask for a Pilot sign-in.
+   */
+  licensing?: boolean;
 }
 
 /** Every wizard prompt for the Markdown path, answered with defaults or "no". */
@@ -73,8 +76,10 @@ function markdownAnswers(fixture: WorkerInitFixture, options: AnswerOptions = {}
           [/Watch a Sentry project[^\n]*\[y\/N\]: $/, "n\r"],
         ] as Answer[])
       : []),
+    // One sign-in step: declining it also leaves relay pairing out, with no
+    // second sign-in question. It is asked only when the license check needs a
+    // sign-in; a skipped check passes, so there is nothing to start.
     ...(options.licensing === false ? [] : ([[SIGN_IN_PROMPT, "n\r"]] as Answer[])),
-    [/React in seconds through the DevIntern relay[^\n]*\[Y\/n\]: $/, "n\r"],
   ];
 }
 
@@ -211,7 +216,7 @@ ptyTest(
   "worker init wizard: markdown happy path (license check skipped) reports ready with every readiness check passing",
   async () => {
     await withWizardFixture(async (fixture, proxy) => {
-      const answers = markdownAnswers(fixture, { licensing: false, expandedSettings: true });
+      const answers = markdownAnswers(fixture, { expandedSettings: true, licensing: false });
       const run = await runWizard(fixture, proxy, answers, {
         licensing: false,
         args: ["--customize"],
@@ -219,14 +224,16 @@ ptyTest(
       expect(run.exitCode, run.output).toBe(0);
       expect(run.answered).toHaveLength(answers.length);
       for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
-      expect(run.output).not.toMatch(SIGN_IN_PROMPT);
       expect(run.output).toContain("✅ Query works: 1 task(s) match right now.");
       expect(run.output).toContain("📦 DevIntern opens pull requests on GitHub.");
       expect(run.output).toContain(
         "Token permissions and GitHub App setup: https://devintern.com/docs/code/github-integration",
       );
       expect(run.output).toContain("Sentry auto-fixes skipped");
-      expect(run.output).toContain("Relay skipped.");
+      expect(run.output).toContain(
+        "5️⃣  Sign in with GitHub to start your 14-day Worker Pilot (also connects instant events)",
+      );
+      expect(run.output).toContain("Relay needs sign-in; skipped.");
       expect(run.output).toContain("📋 Readiness (the same checks as `devintern worker doctor`):");
       expect(run.output).not.toContain("❌");
       expect(run.output).toContain("🎉 Worker setup complete — the worker is ready.");
@@ -285,11 +292,9 @@ ptyTest(
   "worker init wizard: declining the sign-in saves the setup and says signing in is the one step left",
   async () => {
     await withWizardFixture(async (fixture, proxy) => {
-      // Accept the relay so the test sees it skip without a second sign-in question.
-      const answers = markdownAnswers(fixture).map(([prompt, keys]): Answer => [
-        prompt,
-        /relay/.test(prompt.source) ? "y\r" : keys,
-      ]);
+      // The relay follows the sign-in step: declining it also skips pairing,
+      // with no second sign-in question.
+      const answers = markdownAnswers(fixture);
       const run = await runWizard(fixture, proxy, answers);
       expect(run.answered).toHaveLength(answers.length);
       for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
@@ -338,12 +343,11 @@ ptyTest(
       // Drop the tracker and tasks-directory prompts (already configured); the
       // PR token is still optional and unset, so skip it. The query prompt
       // shows the saved query as its default: keep it.
+      const allAnswers = markdownAnswers(fixture, { licensing: false });
       const answers: Answer[] = [
         [TOKEN_PROMPT, "\r"],
         [/Ready-tasks query[^\n]*: $/, "\r"],
-        ...markdownAnswers(fixture, { licensing: false }).slice(
-          markdownAnswers(fixture).findIndex(([prompt]) => prompt === QUERY_PROMPT) + 1,
-        ),
+        ...allAnswers.slice(allAnswers.findIndex(([prompt]) => prompt === QUERY_PROMPT) + 1),
       ];
       const run = await runWizard(fixture, proxy, answers, { licensing: false });
       expect(run.exitCode, run.output).toBe(0);

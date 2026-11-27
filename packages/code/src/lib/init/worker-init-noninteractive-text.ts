@@ -39,20 +39,34 @@ function hostProblemsFirst<T>(items: readonly T[], isHostProblem: (item: T) => b
 
 /** Last line of the text report: ready, only sign-in left, or failed checks to fix. */
 function closingLine(report: NonInteractiveInitReport, failed: InitCheck[]): string {
+  const started = report.start?.result === "installed";
+  const running = report.service?.result === "running";
+  const serviceNote = started
+    ? running
+      ? " The worker is running as a background service."
+      : " The background service is installed; the worker is still starting."
+    : " Nothing was started or installed.";
   if (report.result === "success") {
-    return "✅ Worker setup complete. Nothing was started or installed.";
+    return `✅ Worker setup complete.${serviceNote}`;
   }
   if (report.result === "unchanged") {
-    return "✅ Worker setup unchanged: the workspace already had this setup and every check passed.";
+    return (
+      "✅ Worker setup unchanged: the workspace already had this setup and every check passed." +
+      (started ? serviceNote : "")
+    );
   }
   if (report.result === "action_required") {
     const signIn = report.nextSteps.find((step) => step.id === "sign-in");
     const how = report.signIn
       ? `open the address above, then run \`${report.signIn.complete}\` on this host`
       : `run \`${signIn?.command ?? signInCommand()}\``;
+    const then =
+      report.start?.result === "after_sign_in"
+        ? "; that also installs and starts the worker service"
+        : ", then `devintern worker doctor`";
     return (
       `👉 Configuration saved. One step left: sign in to begin your ${WORKER_PILOT_OFFER}: ` +
-      `${how}, then \`devintern worker doctor\`.`
+      `${how}${then}.`
     );
   }
   return `❌ Worker setup incomplete: ${failed.length} check(s) failed${report.persisted ? "" : "; nothing was saved"}. Follow the next steps above, then re-run the same command.`;

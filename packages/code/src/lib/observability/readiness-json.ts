@@ -92,6 +92,8 @@ export function failureCodeFor(
       return "workspace_config_invalid";
     case "sign-in":
       return "sign_in_failed";
+    case "service":
+      return "service_start_failed";
     default:
       return "check_failed";
   }
@@ -199,8 +201,8 @@ export function installAgentStep(
 }
 
 /** `devintern worker login github --no-wait --json` for a workspace. */
-export function signInNoWaitCommand(workspaceDir: string, home?: string): string {
-  return `${workerLoginCommandFor(workspaceConfigPath(workspaceDir), home)} github --no-wait --json`;
+export function signInNoWaitCommand(workspaceDir: string, home?: string, noRelay = false): string {
+  return `${workerLoginCommandFor(workspaceConfigPath(workspaceDir), home)} github --no-wait --json${noRelay ? " --no-relay" : ""}`;
 }
 
 /** `devintern worker service install --json` for a workspace. */
@@ -219,14 +221,18 @@ export function doctorCommand(workspaceDir: string, home?: string): string {
 }
 
 /** The sign-in step: the same id, message, and command form in every document. */
-export function signInStep(workspaceDir: string, home?: string): NextStep {
+export function signInStep(
+  workspaceDir: string,
+  home?: string,
+  options: { noRelay?: boolean } = {},
+): NextStep {
   return {
     id: "sign-in",
     message:
       `${WORKER_PILOT_NOT_STARTED}. The command prints a sign-in url for a person to open and ` +
       `the --complete command to finish on this host. Other methods: ${OTHER_LOGIN_METHODS}. ` +
       "A paid LICENSE_KEY in the workspace .env works instead",
-    command: signInNoWaitCommand(workspaceDir, home),
+    command: signInNoWaitCommand(workspaceDir, home, options.noRelay),
   };
 }
 
@@ -319,6 +325,14 @@ function fixStep(
         ...(github ? { url: GITHUB_TOKEN_SETTINGS_URL } : {}),
       };
     }
+    case "service":
+      // `--start` could not install or start the service: retrying the
+      // install (or running in a terminal) is the fix, not a re-check.
+      return {
+        id: "fix-service",
+        message: `${summary}. Fix the cause, then install and start the service again`,
+        command: serviceInstallCommand(options.workspaceDir, options.home),
+      };
     case "sandbox":
       return {
         id: "fix-sandbox",
@@ -347,6 +361,8 @@ export function blockerNextSteps(
     home?: string;
     fixes?: FixCommands;
     which?: InstallAgentOptions["which"];
+    /** Carry `--no-relay` into the reported sign-in command (init `--no-relay`). */
+    noRelay?: boolean;
   },
 ): NextStep[] {
   const fixes = { ...defaultFixCommands(options.workspaceDir, options.home), ...options.fixes };
@@ -359,7 +375,7 @@ export function blockerNextSteps(
   for (const check of checks) {
     if (check.status !== "action" && check.status !== "fail") continue;
     if (check.id === "entitlement" && check.status === "action") {
-      add(signInStep(options.workspaceDir, options.home));
+      add(signInStep(options.workspaceDir, options.home, { noRelay: options.noRelay }));
     } else if (check.id === "harness" && check.status === "fail") {
       add(installAgentStep(options.env, { which: options.which, thenCommand: fixes.recheck }));
     } else {

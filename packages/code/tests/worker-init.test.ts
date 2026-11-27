@@ -17,6 +17,7 @@ import { PromptAttemptsExceededError } from "@devintern/task-trackers";
 
 import { isPromptAbort } from "../src/lib/cli/prompt-abort";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { loadWorkerStartIntent, saveWorkerStartIntent } from "../src/lib/worker/start-intent";
 import { parseEnvFileContent } from "../src/lib/workspace/env";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/code-host/github/app-setup";
 import { readGitHubCliToken } from "../src/lib/init/github-cli-token";
@@ -1117,6 +1118,324 @@ describe("runWorkerInit", () => {
     );
     expect(isPromptAbort(error)).toBe(true);
     expect(logs.join("\n")).not.toContain("Sign-in failed");
+  });
+
+  describe("one sign-in step (Worker Pilot, relay, GitHub App)", () => {
+    const pairing = {
+      id: "pair-1",
+      installUrl: "https://github.com/apps/devintern-ai/installations/new?state=pair-1",
+      pairingStatusUrl: "https://relay.devintern.test/v1/github/pairings/pair-1",
+      expiresAt: Date.now() + 10 * 60_000,
+      repos: ["acme/app"],
+      relayUrl: "https://relay.devintern.test",
+    };
+    /** Relay connect stub: GitHub starts a pairing that waits for the App install. */
+    const pendingGitHub = async (
+      target: string,
+      connectDeps: { noWait?: boolean; onOutcome?: (outcome: never) => void },
+    ) => {
+      if (target === "github") {
+        expect(connectDeps.noWait).toBe(true);
+        connectDeps.onOutcome?.({ kind: "pending", target: "github", pairing } as never);
+      }
+      return 0;
+    };
+    /** A complete-poll state whose verified GitHub repositories are `repos`. */
+    const verifiedState = (repos: string[]) => ({
+      relayUrl: pairing.relayUrl,
+      customerId: "cust-1",
+      connectedAt: new Date().toISOString(),
+      registrations: [],
+      githubRepositories: repos.map((repo, index) => ({
+        repo,
+        installationId: 1,
+        repositoryId: index + 1,
+      })),
+    });
+    const signInQuestions = (questions: string[]) =>
+      questions.filter((question) => /sign in|relay/i.test(question));
+
+    test("asks one sign-in question, then pairs the relay without asking", async () => {
+      const questions: string[] = [];
+      const paired: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          checkAutomationLicense: async () => (paired.length > 0 ? null : "No license."),
+          getUser: async () => null,
+          signIn: async () => ({ id: "u1", email: "pilot@example.com" }),
+          connectRelay: async ({ workspaceDir: dir }) => {
+            paired.push(dir);
+            return true;
+          },
+          prompt: async (question) => {
+            questions.push(question);
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            if (question.startsWith("Sign in with GitHub")) return "";
+            return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(signInQuestions(questions)).toEqual([
+        "Sign in with GitHub now to start the Worker Pilot? [Y/n]: ",
+      ]);
+      expect(paired).toEqual([workspaceDir]);
+      const all = logs.join("\n");
+      expect(all).toContain(
+        "5️⃣  Sign in with GitHub to start your 14-day Worker Pilot (also connects instant events)",
+      );
+      expect(all).toContain("Relay pairing stored");
+      expect(all).not.toContain("7️⃣");
+    });
+
+    test("signed-in and LICENSE_KEY users are not asked to sign in", async () => {
+      for (const setup of ["signed-in", "license-key"] as const) {
+        logs = [];
+        const questions: string[] = [];
+        if (setup === "license-key") process.env.LICENSE_KEY = "lic_test";
+        else delete process.env.LICENSE_KEY;
+        const result = await runWorkerInit(
+          deps([], {
+            checkAutomationLicense: async () => null,
+            getUser: async () => (setup === "signed-in" ? { id: "u1", email: "me@x.test" } : null),
+            connectRelay: async () => true,
+            prompt: async (question) => {
+              questions.push(question);
+              if (question.startsWith("Ready-tasks")) return "status=todo";
+              return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+            },
+          }),
+        );
+        expect(result.ok).toBe(true);
+        expect(signInQuestions(questions)).toEqual([]);
+        expect(logs.join("\n")).toContain(
+          setup === "signed-in" ? "Relay pairing stored" : "Relay needs sign-in; skipped",
+        );
+      }
+    });
+
+    test("a license that is already OK is not followed by a Pilot sign-in question", async () => {
+      const questions: string[] = [];
+      let signIns = 0;
+      const result = await runWorkerInit(
+        deps([], {
+          checkAutomationLicense: async () => null,
+          getUser: async () => null,
+          signIn: async () => {
+            signIns += 1;
+            return { id: "u1", email: "me@x.test" };
+          },
+          connectRelay: async () => true,
+          prompt: async (question) => {
+            questions.push(question);
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(signInQuestions(questions)).toEqual([]);
+      expect(signIns).toBe(0);
+      expect(logs.join("\n")).toContain("✅ Automation license OK.");
+    });
+
+    test("the wizard forgets an earlier `worker init --start` request", async () => {
+      saveWorkerStartIntent(workspaceDir, { requestedAt: new Date().toISOString(), relay: true });
+      const result = await runWorkerInit(
+        deps([], {
+          checkAutomationLicense: async () => null,
+          getUser: async () => null,
+          connectRelay: async () => true,
+          prompt: async (question) => {
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(loadWorkerStartIntent(workspaceDir)).toBeNull();
+    });
+
+    test("--no-relay keeps the sign-in but does not pair", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          noRelay: true,
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          connectRelay: async () => {
+            throw new Error("connectRelay must not run with --no-relay");
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).toContain("Instant events skipped (--no-relay)");
+    });
+
+    test("waits for the GitHub App installation and continues once it is verified", async () => {
+      const opened: string[] = [];
+      let polls = 0;
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          githubAppWait: {
+            openUrl: async (url) => {
+              opened.push(url);
+            },
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => {
+              polls += 1;
+              return polls < 2
+                ? { kind: "pending" }
+                : { kind: "complete", state: verifiedState(["acme/app"]) as never };
+            },
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(opened).toEqual([pairing.installUrl]);
+      expect(polls).toBe(2);
+      const all = logs.join("\n");
+      expect(all).toContain("Press Enter to skip");
+      expect(all).toContain("DevIntern GitHub App installed and verified");
+      expect(all).toContain("Relay pairing stored");
+    });
+
+    test("a poll that throws is retried until the App is installed", async () => {
+      let polls = 0;
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => {
+              polls += 1;
+              if (polls === 1) throw new Error("fetch failed");
+              return { kind: "complete", state: verifiedState(["acme/app"]) as never };
+            },
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(polls).toBe(2);
+      const all = logs.join("\n");
+      expect(all).toContain("Could not check the pairing (fetch failed); retrying");
+      expect(all).toContain("DevIntern GitHub App installed and verified");
+      expect(all).not.toContain("Relay setup failed");
+    });
+
+    test("a complete pairing that granted another repository is not reported as installed", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => ({ kind: "complete", state: verifiedState(["acme/other"]) as never }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).not.toContain("installed and verified");
+      expect(all).not.toContain("Relay pairing stored");
+      expect(all).toContain("The App installation did not grant: acme/app");
+      expect(all).toContain(
+        "Add them to the App installation, then run `devintern worker connect github` again.",
+      );
+    });
+
+    test("after a skipped App wait the other GitHub repositories are not paired", async () => {
+      writeFileSync(
+        path.join(workspaceDir, "workspace.toml"),
+        '[defaults]\ntracker = "markdown"\n\n[[repos]]\nname = "other"\nremote = "git@github.com:acme/other.git"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n',
+      );
+      const githubConnects: string[] = [];
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          bootstrapWorkspace: async () => ({ workspaceDir, repoName: "app" }),
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: (async (
+            target: string,
+            connectDeps: { repo?: string; onOutcome?: (outcome: never) => void },
+          ) => {
+            if (target === "github") {
+              githubConnects.push(connectDeps.repo ?? "");
+              connectDeps.onOutcome?.({ kind: "pending", target: "github", pairing } as never);
+            }
+            return 0;
+          }) as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: Promise.resolve(), stop: () => {} }),
+            sleep: () => new Promise(() => {}),
+            poll: async () => ({ kind: "pending" }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(githubConnects).toEqual(["acme/other"]);
+      expect(logs.join("\n")).toContain("Not pairing acme/app yet: finish acme/other first");
+    });
+
+    test("an expired GitHub App pairing points at a fresh connect, not --status", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => ({ kind: "expired" }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).toContain("The GitHub App pairing expired");
+      // The recorded pairing is gone, so the App step sends a fresh connect.
+      expect(all).toMatch(
+        /No verified GitHub App pairing was recorded\.\n\s+Run `devintern worker connect github`:/,
+      );
+      expect(all).not.toContain(`Approve the App at ${pairing.installUrl}`);
+    });
+
+    test("Enter skips the GitHub App wait and the App step says how to finish", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: Promise.resolve(), stop: () => {} }),
+            sleep: () => new Promise(() => {}),
+            poll: async () => ({ kind: "pending" }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).toContain("Skipped. Finish later");
+      expect(all).toContain("devintern worker connect github --status");
+      expect(all).toContain("Relay pairing is not finished yet");
+      expect(all).not.toContain("Run: devintern worker connect github");
+      // The App step follows the relay path with the printed install address.
+      expect(all).toContain("Approve the App at");
+      expect(all).not.toContain("advanced no-relay mode");
+      // The closing summary routes back to the same pairing, not a re-run.
+      expect(all).toContain(`Approve the App at ${pairing.installUrl}`);
+      expect(all).not.toContain("then re-run `devintern worker init`");
+    });
   });
 
   test("passes the workspace to the license check (DEV-126)", async () => {

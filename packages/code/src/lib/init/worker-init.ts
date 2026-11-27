@@ -137,12 +137,22 @@ function logWorkerNextSteps(ctx: PromptRun): void {
 
   if (relayConnected) {
     ctx.log("\n⚠️  Central GitHub App events are not enabled:");
-    ctx.log(
-      `   @mentions on PRs this worker did not create will not fire. Install ${GITHUB_APP_INSTALL_URL}`,
-    );
-    ctx.log(
-      "   on your repositories, then re-run `devintern worker init` (or `devintern worker connect`).",
-    );
+    ctx.log("   @mentions on PRs this worker did not create will not fire.");
+    if (ctx.githubAppMissing && ctx.githubAppMissing.length > 0) {
+      ctx.log(`   The App installation did not grant: ${ctx.githubAppMissing.join(", ")}.`);
+      ctx.log(
+        "   Add them to the App installation, then run `devintern worker connect github` again.",
+      );
+    } else if (ctx.githubAppUrl && ctx.githubAppWait === "skipped") {
+      ctx.log(
+        `   Approve the App at ${ctx.githubAppUrl}, then run \`devintern worker connect github --status\`.`,
+      );
+    } else {
+      ctx.log(
+        `   Run \`devintern worker connect github\` to print the App install address and wait for it, ` +
+          `or install ${GITHUB_APP_INSTALL_URL} on your repositories.`,
+      );
+    }
   } else {
     ctx.log("\nℹ️  Running without relay or a custom GitHub App:");
     ctx.log("   GITHUB_TOKEN polling still handles the worker's own PRs.");
