@@ -141,8 +141,15 @@ jobs:
             } > "$body"
             gh label create npm-propagation --color FBCA04 \
               --description "Published version not visible on npm yet" 2>/dev/null || true
-            gh issue create --label npm-propagation \
-              --title "Post-release smoke test could not run: ${CLI_SOURCE#npm:} not visible on npm" --body-file "$body"
+            # One issue per version: re-runs comment on it instead of opening another.
+            export ISSUE_TITLE="Post-release smoke test could not run: ${CLI_SOURCE#npm:} not visible on npm"
+            existing="$(gh issue list --label npm-propagation --state open --json number,title \
+              --jq '[.[] | select(.title == env.ISSUE_TITLE) | .number][0] // empty')"
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body-file "$body"
+            else
+              gh issue create --label npm-propagation --title "$ISSUE_TITLE" --body-file "$body"
+            fi
             exit 0
           fi
           failed="$(grep -E '^\(fail\)' "$log" | grep -v 'Not run: the earlier step' | head -n 1 | sed -E 's/^\(fail\) onboarding golden path > //; s/ \[[0-9.]+m?s\]$//')"

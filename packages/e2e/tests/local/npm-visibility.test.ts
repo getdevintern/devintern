@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  NPM_NOT_VISIBLE_MARKER,
   NpmNotVisibleError,
   registryFetchPackument,
   waitForNpmVersion,
@@ -168,4 +169,10 @@ test("a dist-tag resolves once and is not waited for", async () => {
     }),
   ).rejects.toThrow('has no "next" dist-tag');
   expect(clock.sleeps).toEqual([]);
+});
+
+test("the not-visible marker matches what the workflow greps for", () => {
+  // .github/workflows/onboarding-golden-path.yml greps the suite log for this
+  // exact string to report a propagation delay instead of a regression.
+  expect(NPM_NOT_VISIBLE_MARKER).toBe("npm-not-visible:");
 });
