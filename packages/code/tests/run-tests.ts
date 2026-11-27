@@ -151,6 +151,9 @@ const child = Bun.spawn(["bun", "test", "--timeout=30000", ...GUARD_PRELOADS, ..
     WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
     DEVINTERN_WORKSPACE_DIR: join(queueDbTempDir, "workspace"),
     SENTRY_DISABLED: "1",
+    // Per-job systemd scopes are a host concern; tests that need one pass an
+    // explicit limit plan, and every other spawned child stays unwrapped.
+    DEVINTERN_JOB_MEMORY_MAX: "off",
     // Test dashboards never shell out to the developer's real `tailscale`.
     DASHBOARD_TAILSCALE_AUTODETECT: "0",
   },

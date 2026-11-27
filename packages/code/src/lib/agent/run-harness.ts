@@ -60,6 +60,11 @@ import { withImplementationSummary } from "./implementation-summary";
 import { readImplementationReport } from "./implementation-report";
 import { primeAgentCommitIdentity } from "../utils/git-identity";
 import { Utils } from "../utils";
+import {
+  jobMemoryExceededSince,
+  jobMemoryLimitReason,
+  jobMemoryOomSnapshot,
+} from "../worker/job-memory";
 
 interface RunAgentHarnessOptions {
   taskFile: string;
@@ -188,6 +193,9 @@ export async function runAgentSession(
       // check out an existing remote branch). Publishing may rewrite exactly
       // this branch and commit with a lease if the agent rebases or amends it.
       const publishedBeforeRun = enableGit ? await readPublishedBranch() : undefined;
+      // Kernel OOM kills inside this job's cgroup are counted before the agent
+      // starts, so an earlier unrelated kill is never blamed on this run.
+      const oomBefore = jobMemoryOomSnapshot();
 
       // Spawn agent process with enhanced permissions and max turns
       const spawnArgs = [
@@ -301,6 +309,17 @@ export async function runAgentSession(
             console.log(`   Matched output: ${usage.matchedLine}`);
           }
           reject(new UsageLimitError(usage.resetsAt, usage.period));
+          return;
+        }
+
+        // The job's memory limit is the most actionable cause when the run
+        // failed: the agent (or a test it started) was killed inside the job's
+        // cgroup. A zero exit keeps the run successful even if a descendant
+        // was killed and the agent handled it (mirrors `classifyAgentFailure`).
+        if (code !== 0 && jobMemoryExceededSince(oomBefore)) {
+          const reason = jobMemoryLimitReason();
+          console.error(`\n🛑 ${harness.displayName}: ${reason}`);
+          reject(tagOutcomeClass(new Error(reason), "agent"));
           return;
         }
 

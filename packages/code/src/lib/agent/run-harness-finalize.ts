@@ -41,6 +41,7 @@ import type { FinalizeContext } from "./run-harness-git";
 import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
 import { createHarnessLogSink } from "../observability/harness-logs";
+import { jobMemoryExitReason, jobMemoryOomSnapshot } from "../worker/job-memory";
 import { runTaskSteps } from "../task/step-runner";
 import type { TaskStep, TaskStepResult } from "../task/step-runner";
 import type { ReviewFeedback, ReviewPriority } from "../../types/auto-review";
@@ -145,6 +146,7 @@ async function implementPlan(
     effort: resolveAgentEffort(),
   });
   const spawnArgs = [...args, ...buildPromptArgs(ctx.harness, prompt)];
+  const oomBefore = jobMemoryOomSnapshot();
   const { child, cleanup } = await spawnAgent({
     resolvedPath,
     args: spawnArgs,
@@ -176,6 +178,12 @@ async function implementPlan(
     child.on("close", (code: number | null) => {
       cleanup().catch(() => {});
       console.log("\n" + "=".repeat(60));
+      const memoryReason = jobMemoryExitReason(code, oomBefore);
+      if (memoryReason) {
+        console.error(`🛑 ${ctx.harness.displayName}: ${memoryReason}`);
+        resolve(undefined);
+        return;
+      }
       if (code !== 0) {
         console.log("⚠️  Plan implementation failed");
         resolve(undefined);

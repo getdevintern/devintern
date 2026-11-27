@@ -263,6 +263,22 @@ poll_interval = 15
     expect(config.defaults.pollIntervalSeconds).toBe(15);
   });
 
+  test("parses and validates [defaults].job_memory_max", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+job_memory_max = "8GB"
+`);
+    expect(config.defaults.jobMemoryMax).toBe("8GB");
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+job_memory_max = "lots"
+`),
+    ).toThrow(/job_memory_max/);
+  });
+
   test("parses an explicit best-effort host concurrency opt-in", () => {
     const config = parseWorkspaceConfig(`
 [workspace.execution]

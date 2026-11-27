@@ -27,6 +27,10 @@ import { join } from "path";
 const workspaceRoot = mkdtempSync(join(tmpdir(), "devintern-test-workspace-"));
 
 process.env.DEVINTERN_WORKSPACE_DIR = workspaceRoot;
+// Per-job systemd scopes are a host/runtime concern. Tests that exercise the
+// limiter resolve an explicit plan; everything else must not wrap its child
+// processes in scopes (a CI container may have systemd, this sandbox may not).
+process.env.DEVINTERN_JOB_MEMORY_MAX = "off";
 
 process.on("exit", () => {
   try {

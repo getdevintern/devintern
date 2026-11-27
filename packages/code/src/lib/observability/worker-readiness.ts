@@ -48,6 +48,7 @@ import {
   redactGitCredentials,
 } from "../utils/git-credentials";
 import { collectHarnessPreflight } from "../agent/sandbox";
+import { describeJobMemoryPlan, resolveJobMemoryPlanForStartup } from "../worker/job-memory";
 import { resolveWorkerStatus } from "./dashboard-api";
 import type { WorkerStatusView } from "./dashboard-api";
 import type { ReadinessCheck } from "./readiness";
@@ -931,6 +932,29 @@ export async function collectWorkerDoctorChecks(
         hint: "Run `devintern sandbox` for details",
       });
     }
+  }
+
+  // 6a. Job memory limit: show the effective cap (or why there is none), so a
+  // configured `job_memory_max` that silently resolves to no cap is visible.
+  try {
+    const plan = await resolveJobMemoryPlanForStartup({
+      ...workspaceEnv,
+      DEVINTERN_WORKSPACE_DIR: workspaceDir,
+    });
+    checks.push({
+      id: "job-memory",
+      label: "Job memory limit",
+      status: "ok",
+      detail: describeJobMemoryPlan(plan).replace(/^Job memory limit: /, ""),
+    });
+  } catch (error) {
+    checks.push({
+      id: "job-memory",
+      label: "Job memory limit",
+      status: "warn",
+      detail: errorMessage(error),
+      hint: "Check `[defaults].job_memory_max` in workspace.toml",
+    });
   }
 
   // 6b. Relay pairing (local state only; runs under --offline too)

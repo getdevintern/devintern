@@ -155,6 +155,13 @@ export interface WorkspaceDefaults {
    * repos, `merged` elsewhere).
    */
   dependencyMode?: DependencyMode;
+  /**
+   * Per-job memory cap as written (`8GB`, `50%`, `off`). Unset uses 50% of
+   * the memory budget (RAM, or a smaller cgroup limit) divided by
+   * `max_concurrency`. Applied to each worker job's systemd scope; see
+   * `worker/job-memory.ts`.
+   */
+  jobMemoryMax?: string;
 }
 
 /**

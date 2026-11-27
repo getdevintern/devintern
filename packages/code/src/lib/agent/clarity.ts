@@ -20,6 +20,11 @@ import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
 import { resolveOutputDir } from "../config/output-dir";
 import { createHarnessLogSink } from "../observability/harness-logs";
+import {
+  jobMemoryExceededSince,
+  jobMemoryLimitReason,
+  jobMemoryOomSnapshot,
+} from "../worker/job-memory";
 import type { TaskTrackerClient } from "../trackers/client";
 
 export interface ClarityAssessment {
@@ -88,6 +93,7 @@ export async function runClarityCheck(
       let stderrOutput = "";
       let timedOut = false;
       let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
+      const oomBefore = jobMemoryOomSnapshot();
 
       // Spawn agent process for clarity check
       const spawnArgs = [...clarityArgs, ...buildPromptArgs(harness, clarityContent)];
@@ -180,6 +186,10 @@ export async function runClarityCheck(
         const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
         if (usage.limited) {
           reject(new UsageLimitError(usage.resetsAt, usage.period));
+          return;
+        }
+        if (code !== 0 && jobMemoryExceededSince(oomBefore)) {
+          reject(new Error(jobMemoryLimitReason()));
           return;
         }
         if (code !== 0) {

@@ -35,6 +35,11 @@ import type { MentionTrigger } from "./mention-trigger";
 import { GIT_CLEAN_ARGS, Utils } from "../utils";
 import { hasUncommittedWork } from "../utils/git-stage";
 import { WorktreeBusyError } from "../worker/usage-limit-protocol";
+import {
+  jobMemoryExceededSince,
+  jobMemoryLimitReason,
+  jobMemoryOomSnapshot,
+} from "../worker/job-memory";
 import { restoreWorktreeGitIdentity, setWorktreeGitIdentity } from "../utils/worktree-setup";
 import type { GitIdentityRestore } from "../utils/worktree-setup";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "../agent/git-hook-fixer";
@@ -84,10 +89,12 @@ export interface AgentRunResult {
 /**
  * Explain why an agent run did not succeed, if it did not.
  *
- * Precedence matters: a timed-out run is also killed by a signal, and a
+ * Precedence matters: a job that hit its memory limit is the most specific and
+ * actionable cause; a timed-out run is also killed by a signal, and a
  * max-turns run also exits non-zero, so the most specific cause wins.
  *
- * @param outcome - Exit code (null when killed by a signal) plus run flags
+ * @param outcome - Exit code (null when killed by a signal) plus run flags,
+ *   including whether the job's memory limit was hit
  * @returns The failure reason, or undefined when the run succeeded
  */
 export function classifyAgentFailure(outcome: {
@@ -95,9 +102,11 @@ export function classifyAgentFailure(outcome: {
   timedOut: boolean;
   maxTurnsReached: boolean;
   timeoutMinutes: number;
+  memoryLimitExceeded?: boolean;
 }): string | undefined {
-  const { code, timedOut, maxTurnsReached, timeoutMinutes } = outcome;
+  const { code, timedOut, maxTurnsReached, timeoutMinutes, memoryLimitExceeded } = outcome;
   if (code === 0 && !maxTurnsReached && !timedOut) return undefined;
+  if (memoryLimitExceeded) return jobMemoryLimitReason();
   if (timedOut) return `timed out after ${timeoutMinutes} minutes`;
   if (maxTurnsReached) return "reached max turns limit";
   if (code === null) return "agent process was terminated by a signal";
@@ -156,6 +165,9 @@ export async function runAgent(
       let stderrOutput = "";
       let timedOut = false;
       let usageLimited = false;
+      // Kernel OOM kills inside this job's cgroup are counted before the agent
+      // starts, so an unrelated earlier kill cannot be blamed on this run.
+      const oomBefore = jobMemoryOomSnapshot();
 
       const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
@@ -250,6 +262,7 @@ export async function runAgent(
           timedOut,
           maxTurnsReached,
           timeoutMinutes,
+          memoryLimitExceeded: jobMemoryExceededSince(oomBefore),
         });
 
         resolve({

@@ -61,7 +61,7 @@ export interface ResolveConflictsOptions {
     prompt: string,
     workDir: string,
     verbose: boolean,
-  ) => Promise<{ success: boolean; output: string }>;
+  ) => Promise<{ success: boolean; output: string; failureReason?: string }>;
   /** Injected PR fetch (tests). Defaults to the GitHub API. */
   fetchPr?: (owner: string, repo: string, prNumber: number) => Promise<PullRequestInfo>;
   /**
@@ -421,6 +421,21 @@ function isTransientPushRejection(message: string): boolean {
 }
 
 type AgentRunner = NonNullable<ResolveConflictsOptions["agentRunner"]>;
+
+/**
+ * Name an agent failure in an aborted merge message, including the specific
+ * reason (a memory-limit kill names the cap; a generic exit stays short).
+ */
+function agentFailureMessage(
+  base: string,
+  suffix: string,
+  agentResult: { success: boolean; failureReason?: string },
+  leftUnresolved: string,
+): string {
+  if (agentResult.success) return leftUnresolved;
+  return `${base}${agentResult.failureReason ? `: ${agentResult.failureReason}` : ""}${suffix}`;
+}
+
 type PushResult = Awaited<ReturnType<typeof Utils.pushCurrentBranch>>;
 
 /** Result of merging the base into the PR branch within one attempt. */
@@ -451,7 +466,7 @@ async function finishReplayedMergeWithAgent(params: {
   console.log(
     `⚠️  Commit hooks rejected the replayed resolution of origin/${params.baseRef}; handing to the agent`,
   );
-  let agentResult: { success: boolean; output: string };
+  let agentResult: { success: boolean; output: string; failureReason?: string };
   try {
     agentResult = await params.agentRunner(
       buildReplayedResolutionFixPrompt({
@@ -475,9 +490,12 @@ async function finishReplayedMergeWithAgent(params: {
     await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
     return {
       kind: "aborted",
-      message: !agentResult.success
-        ? "agent run failed after commit hooks rejected the replayed merge resolution; merge aborted"
-        : "agent left unresolved conflicts; merge aborted",
+      message: agentFailureMessage(
+        "agent run failed",
+        " after commit hooks rejected the replayed merge resolution; merge aborted",
+        agentResult,
+        "agent left unresolved conflicts; merge aborted",
+      ),
     };
   }
 
@@ -784,7 +802,7 @@ async function attemptMerge(params: {
   }
 
   console.log(`⚔️  ${conflictedFiles.length} conflicted file(s); handing to the agent`);
-  let agentResult: { success: boolean; output: string };
+  let agentResult: { success: boolean; output: string; failureReason?: string };
   try {
     agentResult = await params.agentRunner(
       buildConflictPrompt({
@@ -814,9 +832,12 @@ async function attemptMerge(params: {
     await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
     return {
       kind: "aborted",
-      message: !agentResult.success
-        ? "agent run failed; merge aborted"
-        : "agent left unresolved conflicts; merge aborted",
+      message: agentFailureMessage(
+        "agent run failed",
+        "; merge aborted",
+        agentResult,
+        "agent left unresolved conflicts; merge aborted",
+      ),
     };
   }
 
@@ -932,7 +953,7 @@ async function pushWithHookFixLoop(params: {
     console.log(
       `⚠️  Pre-push hook failed (attempt ${hookFixAttempt}/${MAX_HOOK_FIX_ATTEMPTS}); handing to the agent`,
     );
-    let fixResult: { success: boolean; output: string };
+    let fixResult: { success: boolean; output: string; failureReason?: string };
     try {
       fixResult = await params.agentRunner(
         buildHookFixPrompt({ branch: params.branch, hookError: push.hookError }),

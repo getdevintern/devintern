@@ -18,6 +18,11 @@ import { harnessSpawnEnv } from "../agent/spawn";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolveOutputDir } from "../config/output-dir";
 import { getStoryPointsFieldForProject, resolveProjectKey } from "../config/project-settings";
+import {
+  jobMemoryExceededSince,
+  jobMemoryLimitReason,
+  jobMemoryOomSnapshot,
+} from "../worker/job-memory";
 import type { TaskTrackerClient } from "../trackers/client";
 import type { ProjectSettings } from "../../types/settings";
 
@@ -145,6 +150,7 @@ export async function runEstimation(
       let stderrOutput = "";
       let timedOut = false;
       let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
+      const oomBefore = jobMemoryOomSnapshot();
 
       const estimationSpawnArgs = [
         ...estimationArgs,
@@ -234,6 +240,11 @@ export async function runEstimation(
             console.log(`   Matched output: ${usage.matchedLine}`);
           }
           reject(new UsageLimitError(usage.resetsAt, usage.period));
+          return;
+        }
+
+        if (code !== 0 && jobMemoryExceededSince(oomBefore)) {
+          reject(new Error(jobMemoryLimitReason()));
           return;
         }
 

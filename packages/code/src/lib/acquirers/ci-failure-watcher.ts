@@ -48,6 +48,7 @@ import { classifyAgentPrState, resolveAgentPrMerge } from "../review/agent-pr-re
 import { serializePrRun } from "./review-polling";
 import { childOutputMode, forwardChildOutput } from "../observability/child-output";
 import { runWithFailover } from "../worker/failover";
+import { jobMemoryLimitReason, jobMemorySpawn } from "../worker/job-memory";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
 import type {
@@ -235,6 +236,7 @@ export function runCiFixViaCli(
       (env) =>
         new Promise<number>((resolve) => {
           let settled = false;
+          let interrupted = false;
           let killTimer: ReturnType<typeof setTimeout> | undefined;
           let abort: (() => void) | undefined;
           const finish = (code: number) => {
@@ -250,7 +252,7 @@ export function runCiFixViaCli(
             return;
           }
           const detached = process.platform !== "win32";
-          const child = spawn(
+          const job = jobMemorySpawn(
             process.execPath,
             [
               process.argv[1],
@@ -260,16 +262,18 @@ export function runCiFixViaCli(
               feedbackPath,
               ...(opts.expectedHeadSha ? ["--expected-head", opts.expectedHeadSha] : []),
             ],
-            {
-              stdio: ["inherit", childOutputMode(), childOutputMode()],
-              cwd: opts.cwd,
-              env,
-              detached,
-            },
+            env,
           );
+          const child = spawn(job.command, job.args, {
+            stdio: ["inherit", childOutputMode(), childOutputMode()],
+            cwd: opts.cwd,
+            env: job.env,
+            detached,
+          });
           forwardChildOutput(child, `ci-fix ${prUrl}`);
           abort = () => {
             if (child.pid === undefined) return;
+            interrupted = true;
             try {
               if (detached) process.kill(-child.pid, "SIGTERM");
               else child.kill("SIGTERM");
@@ -288,6 +292,10 @@ export function runCiFixViaCli(
           };
           opts.signal?.addEventListener("abort", abort, { once: true });
           child.on("close", (code) => {
+            const memory = job.onClose(code);
+            if (memory.exceeded && !interrupted) {
+              console.warn(`⚠️  ci-fix for ${prUrl}: ${jobMemoryLimitReason(memory.label)}`);
+            }
             finish(code ?? 1);
           });
           child.on("error", (error) => {

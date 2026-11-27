@@ -86,6 +86,9 @@ tracker = "jira"
 # task_query = "sprint in openSprints() AND labels = devintern"
 # Extra CLI flags per task run.
 worker_task_args = "--create-pr"
+# Per-job memory cap (systemd Linux): "off", "8GB", or a share of RAM ("50%").
+# Default: 50% of RAM split across max_concurrency. A runaway agent fails its own job, not the worker.
+# job_memory_max = "8GB"
 # Labels applied to created PRs (GitHub only). Override per repo.
 # pr_labels = ["devintern", "auto-pr"]
 # Seconds between tracker polls.

@@ -15,6 +15,7 @@ import { parseEnvInteger } from "../config/env-integer";
 import { childOutputMode, forwardChildOutput } from "../observability/child-output";
 import { formatMentionArg } from "../review/mention-trigger";
 import type { MentionTrigger } from "../review/mention-trigger";
+import { jobMemoryLimitReason, jobMemorySpawn } from "../worker/job-memory";
 import type { TaskExecutionResult } from "./task-polling";
 import {
   cliResultToTaskResult,
@@ -388,16 +389,18 @@ function spawnResolveOnce(
     // Detached so the whole process group (agent harnesses included) can be
     // signalled on timeout.
     const output = childOutputMode(opts.outputStdio);
-    const child = spawn(
+    const childEnv = { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" };
+    const job = jobMemorySpawn(
       process.execPath,
       [opts.entrypoint ?? process.argv[1], "resolve-conflicts", prUrl, ...extraArgs],
-      {
-        detached: true,
-        stdio: ["inherit", output, output, "pipe"],
-        cwd: opts.cwd,
-        env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" },
-      },
+      childEnv,
     );
+    const child = spawn(job.command, job.args, {
+      detached: true,
+      stdio: ["inherit", output, output, "pipe"],
+      cwd: opts.cwd,
+      env: job.env,
+    });
     forwardChildOutput(child, `resolve-conflicts ${prUrl}`);
     let aborted = false;
     abort = () => {
@@ -454,17 +457,22 @@ function spawnResolveOnce(
           }
         }
       }
+      const memory = job.onClose(code);
+      const fallback = result ?? {
+        outcome: code === 0 ? "skipped" : code === 2 ? "deferred" : "failed",
+        message:
+          code === 0
+            ? "resolver completed"
+            : code === 2
+              ? "resolver deferred"
+              : `resolver exited with code ${code}`,
+      };
+      const hitMemoryLimit = memory.exceeded && fallback.outcome === "failed";
       finish({
         code: code ?? 1,
-        result: result ?? {
-          outcome: code === 0 ? "skipped" : code === 2 ? "deferred" : "failed",
-          message:
-            code === 0
-              ? "resolver completed"
-              : code === 2
-                ? "resolver deferred"
-                : `resolver exited with code ${code}`,
-        },
+        result: hitMemoryLimit
+          ? { outcome: "failed", message: jobMemoryLimitReason(memory.label) }
+          : fallback,
       });
     });
     child.on("error", (error) => {
@@ -505,16 +513,17 @@ async function runSubcommandViaCli(
           return;
         }
         const output = childOutputMode(opts.outputStdio);
-        const child = spawn(
+        const job = jobMemorySpawn(
           process.execPath,
           [opts.entrypoint ?? process.argv[1], subcommand, prUrl, ...(opts.extraArgs ?? [])],
-          {
-            stdio: ["inherit", output, output],
-            cwd: opts.cwd,
-            env,
-            detached: process.platform !== "win32",
-          },
+          env,
         );
+        const child = spawn(job.command, job.args, {
+          stdio: ["inherit", output, output],
+          cwd: opts.cwd,
+          env: job.env,
+          detached: process.platform !== "win32",
+        });
         forwardChildOutput(child, `${subcommand} ${prUrl}`);
         const abort = () => {
           interrupted = true;
@@ -529,6 +538,10 @@ async function runSubcommandViaCli(
         };
         opts.signal?.addEventListener("abort", abort, { once: true });
         child.on("close", (code) => {
+          const memory = job.onClose(code);
+          if (memory.exceeded && !interrupted) {
+            console.warn(`⚠️  ${subcommand} for ${prUrl}: ${jobMemoryLimitReason(memory.label)}`);
+          }
           finish(code ?? 1);
         });
         child.on("error", (error) => {

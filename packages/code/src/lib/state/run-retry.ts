@@ -18,6 +18,7 @@ import { basename } from "path";
 import type { RunRecord, RunStatus } from "./run-recorder";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
+import { jobMemorySpawn } from "../worker/job-memory";
 
 /** Terminal, non-success statuses a support engineer can re-run. */
 export const RETRIABLE_RUN_STATUSES: readonly RunStatus[] = ["failed", "escalated", "abandoned"];
@@ -520,13 +521,17 @@ export function spawnCliForceRetry(options: {
     throw new Error("could not determine the devintern entry point to invoke");
   }
   const args = [script, options.taskKey, "--force"];
-  const child = Bun.spawn([process.execPath, ...args], {
+  const job = jobMemorySpawn(process.execPath, args, process.env);
+  const child = Bun.spawn([job.command, ...job.args], {
     cwd: options.workingDir,
-    env: process.env,
+    env: job.env,
     // Outlive the dashboard request/process so long agent runs survive.
     detached: true,
   });
   child.unref();
+  // Remove the scope markers when the retry ends in this process; a detached
+  // run that outlives the dashboard leaves only its small temp files behind.
+  void child.exited.then((code) => job.onClose(code)).catch(() => job.onClose(null));
   const command = `${basename(process.execPath)} devintern ${options.taskKey} --force`;
   return { pid: child.pid, command };
 }

@@ -16,6 +16,7 @@ import { AUTO_MERGE_OUTCOMES } from "../review/auto-merge";
 import type { AutoMergeOutcome, AutoMergePolicy, AutoMergeResult } from "../review/auto-merge";
 import type { CiChecksProblem } from "../review/ci-checks";
 import { getWorkerFailover, runWithFailover } from "../worker/failover";
+import { jobMemoryLimitReason, jobMemorySpawn } from "../worker/job-memory";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
   HARNESS_UNAVAILABLE_EXIT_CODE,
@@ -153,28 +154,35 @@ function spawnOnce(
     }
     let output = "";
     let settled = false;
+    let timedOut = false;
+    let aborted = false;
     const stdout = childOutputMode();
-    const child = spawn(
+    const job = jobMemorySpawn(
       process.execPath,
       [opts.entrypoint ?? (process.argv[1] as string), "auto-merge", prUrl, ...args],
       {
-        detached: true,
-        stdio: ["inherit", stdout, stdout, "pipe"],
-        cwd: opts.cwd,
-        env: {
-          ...opts.env,
-          DEVINTERN_RESULT_FD: "3",
-          ...(opts.runId !== undefined ? harnessLogRunEnv(opts.runId) : {}),
-        },
+        ...opts.env,
+        DEVINTERN_RESULT_FD: "3",
+        ...(opts.runId !== undefined ? harnessLogRunEnv(opts.runId) : {}),
       },
     );
+    const child = spawn(job.command, job.args, {
+      detached: true,
+      stdio: ["inherit", stdout, stdout, "pipe"],
+      cwd: opts.cwd,
+      env: job.env,
+    });
     forwardChildOutput(child, `auto-merge ${prUrl}`);
-    const abort = () => killTree(child.pid);
+    const abort = () => {
+      aborted = true;
+      killTree(child.pid);
+    };
     opts.signal?.addEventListener("abort", abort, { once: true });
     const timeoutMs = opts.timeoutMs ?? DEFAULT_AUTO_MERGE_TIMEOUT_MS;
     const timer =
       timeoutMs > 0
         ? setTimeout(() => {
+            timedOut = true;
             console.warn(`⏱️  auto-merge for ${prUrl} exceeded ${timeoutMs / 1000}s; killing`);
             killTree(child.pid);
           }, timeoutMs)
@@ -182,15 +190,27 @@ function spawnOnce(
     child.stdio[3]?.on("data", (chunk: Buffer) => {
       if (output.length < 64 * 1024) output += chunk.toString();
     });
-    const finish = (code: number) => {
+    const finish = (code: number, override?: AutoMergeResult) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", abort);
       // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
-      resolve({ code, result: parseAutoMergeResultLine(output) });
+      resolve({ code, result: override ?? parseAutoMergeResultLine(output) });
     };
-    child.on("close", (code) => finish(code ?? 1));
+    child.on("close", (code) => {
+      const exitCode = code ?? 1;
+      const memory = job.onClose(code);
+      if (memory.exceeded && !timedOut && !aborted) {
+        console.warn(`⚠️  auto-merge for ${prUrl}: ${jobMemoryLimitReason(memory.label)}`);
+      }
+      finish(
+        exitCode,
+        memory.exceeded && !timedOut && !aborted && exitCode !== 0
+          ? { outcome: "failed", message: jobMemoryLimitReason(memory.label), reviewed: false }
+          : undefined,
+      );
+    });
     child.on("error", (error) => {
       console.error(`❌ Failed to spawn auto-merge for ${prUrl}: ${error.message}`);
       finish(1);

@@ -684,6 +684,15 @@ describe("renderers keep self-capture semantics", () => {
     expect(unit).toContain("KillMode=mixed\nTimeoutStopSec=120\n");
   });
 
+  test("systemd unit stays uncapped but makes unit-level OOM a clean stop", () => {
+    const unit = renderSystemdUnit({ execPath: "devintern", projectDir: "/srv/app" });
+    expect(unit).toContain("MemoryAccounting=yes\nOOMPolicy=stop");
+    // Per-job scopes carry the limits; the daemon itself must not be capped so
+    // it is the last process systemd-oomd considers.
+    expect(unit).not.toContain("MemoryMax=");
+    expect(unit).not.toContain("MemoryHigh=");
+  });
+
   test("launchd agent keeps RunAtLoad and KeepAlive and logs to its own file", () => {
     const plist = renderLaunchdPlist({ execPath: "devintern", workingDir: "/srv/app" });
     expect(plist).toContain("<key>RunAtLoad</key>");

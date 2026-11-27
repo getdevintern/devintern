@@ -28,6 +28,11 @@ import {
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { loadPrompt } from "../prompts/loader";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
+import {
+  jobMemoryExceededSince,
+  jobMemoryLimitReason,
+  jobMemoryOomSnapshot,
+} from "../worker/job-memory";
 import { validateReviewFeedback, validateReviewFeedbackStructure } from "./feedback";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
@@ -355,6 +360,7 @@ export async function runAgentPrompt(
       let stderr = "";
       let timedOut = false;
       let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
+      const oomBefore = jobMemoryOomSnapshot();
 
       const stopOnUsageLimit = (): void => {
         if (usageLimit?.limited) {
@@ -401,6 +407,8 @@ export async function runAgentPrompt(
           reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
         } else if (usageLimit?.limited) {
           reject(new UsageLimitError(usageLimit.resetsAt, usageLimit.period));
+        } else if (code !== 0 && jobMemoryExceededSince(oomBefore)) {
+          reject(new Error(jobMemoryLimitReason()));
         } else if (code !== 0) {
           reject(new Error(`${harness.displayName} exited with code ${code}: ${stderr}`));
         } else {

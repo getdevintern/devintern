@@ -21,6 +21,7 @@ import { Utils } from "../utils";
 import { headOnlyRemovesPublishedCommit } from "../utils/git-commit-push";
 import { hasUncommittedWork, stageWorkTreeChanges } from "../utils/git-stage";
 import { resolveOutputDir } from "../config/output-dir";
+import { jobMemoryExitReason, jobMemoryOomSnapshot } from "../worker/job-memory";
 
 /**
  * Check whether the working tree is clean after a hook-fix attempt.
@@ -403,6 +404,7 @@ export async function runAgentHarnessToFixGitHook(
       // resolved (and waited on through any auto-update swap) above. Prompt
       // goes on argv (`-p` / positional); stdin is ignored so TUI-first CLIs
       // do not try to attach a terminal.
+      const oomBefore = jobMemoryOomSnapshot();
       const { child: agent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: agentArgs,
@@ -485,6 +487,14 @@ export async function runAgentHarnessToFixGitHook(
         if (usageLimited) {
           const usage = detectUsageLimit(stdoutOutput, stderrOutput);
           reject(new UsageLimitError(usage.resetsAt, usage.period));
+          return;
+        }
+        // A hook-fix agent killed by the job's memory cap is not a hook that
+        // can be retried: name the limit so the caller stops retrying.
+        const memoryReason = jobMemoryExitReason(code, oomBefore);
+        if (memoryReason) {
+          console.error(`🛑 ${harness.displayName}: ${memoryReason}`);
+          resolve(false);
           return;
         }
         if (code === 0) {

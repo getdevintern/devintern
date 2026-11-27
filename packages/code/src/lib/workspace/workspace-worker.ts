@@ -70,6 +70,8 @@ import { composeScheduledJobActions } from "../automation/scheduled-jobs";
 import { warnUninstalledHarnessPins } from "../agent/selection";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
+import { describeJobMemoryPlan, resolveJobMemoryPlanForStartup } from "../worker/job-memory";
+import { withLeftoverJobScopeCleanup } from "../worker/job-scope-cleanup";
 import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover, getWorkerFailover } from "../worker/failover";
@@ -922,6 +924,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   assertWorkerHasRepos(config, configPath);
 
   const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
+  // Probe job-memory support off the event loop; log the cap before any job.
+  const jobMemoryPlan = await resolveJobMemoryPlanForStartup(process.env);
+  console.log(`🧠 ${describeJobMemoryPlan(jobMemoryPlan)}`);
   const initialFleetAutomations = resolveFleetAutomations(config);
   if (initialFleetAutomations.problems.length > 0) {
     throw new Error(`Invalid ${configPath}:\n- ${initialFleetAutomations.problems.join("\n- ")}`);
@@ -1370,7 +1375,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       // Capture logs in the workspace home: one daemon serves many repos, and
       // the dashboard's log tailer already searches this directory.
       logDir: workspaceDir,
-      beforeAcquirersStart: injectedStartup.hook,
+      beforeAcquirersStart: withLeftoverJobScopeCleanup(injectedStartup.hook),
       accessCheck: options.accessCheck,
       beginShutdown: () => supervisor.drain(),
       onShutdown: () => {

@@ -22,6 +22,7 @@ import { parseAgentSelection } from "../agent/selection";
 import type { HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
 import { parseNotificationsSection } from "../notifications/delivery/config";
+import { jobMemoryMaxProblem } from "../worker/job-memory-format";
 import type {
   ConflictResolutionMode,
   GitAuthorSetting,
@@ -462,6 +463,9 @@ function parseDefaultsSection(
   defaultsTable: Record<string, unknown>,
   errors: string[],
 ): WorkspaceDefaults {
+  const jobMemoryMax = readString(defaultsTable, "job_memory_max", "[defaults]", errors);
+  const jobMemoryProblem = jobMemoryMaxProblem(jobMemoryMax);
+  if (jobMemoryProblem) errors.push(jobMemoryProblem);
   return {
     tracker: readString(defaultsTable, "tracker", "[defaults]", errors) ?? "",
     taskQuery: readString(defaultsTable, "task_query", "[defaults]", errors),
@@ -477,6 +481,7 @@ function parseDefaultsSection(
         message: "[defaults].poll_interval must be a positive integer (seconds).",
       }) ?? DEFAULT_POLL_INTERVAL_SECONDS,
     dependencyMode: readDependencyMode(defaultsTable, errors),
+    jobMemoryMax,
   };
 }
 

@@ -34,6 +34,7 @@ import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import type { Acquirer } from "../../worker";
 import { cliResultToTaskResult, harnessBlockedReason, runWithFailover } from "../worker/failover";
+import { jobMemoryLimitReason, jobMemorySpawn } from "../worker/job-memory";
 
 export interface ReadyTask {
   key: string;
@@ -220,10 +221,11 @@ export async function runTaskViaCli(
           return;
         }
         const detached = process.platform !== "win32";
-        const child = spawn(process.execPath, [process.argv[1], taskKey, ...extraArgs], {
+        const job = jobMemorySpawn(process.execPath, [process.argv[1], taskKey, ...extraArgs], env);
+        const child = spawn(job.command, job.args, {
           stdio: "inherit",
           cwd: opts.cwd,
-          env,
+          env: job.env,
           detached,
         });
         if (child.pid !== undefined) {
@@ -256,8 +258,15 @@ export async function runTaskViaCli(
         };
         opts.signal?.addEventListener("abort", abort, { once: true });
         child.on("close", (code, signal) => {
+          const memory = job.onClose(code);
+          // Classify a drain before logging the memory hit: a service-manager
+          // SIGTERM reaches the child as 143/SIGTERM and must not be reported
+          // as a memory-limit kill.
           if (!interrupted && opts.isDraining?.() && exitedOnTermination(code, signal)) {
             interrupted = true;
+          }
+          if (memory.exceeded && !interrupted) {
+            console.warn(`⚠️  ${taskKey}: ${jobMemoryLimitReason(memory.label)}`);
           }
           finish(code ?? 1);
         });

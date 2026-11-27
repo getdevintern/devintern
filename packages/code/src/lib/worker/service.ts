@@ -33,6 +33,7 @@ import {
 } from "fs";
 import { homedir as osHomedir, userInfo } from "os";
 import { dirname, join, resolve } from "path";
+import { jobScopeSliceName } from "./job-scope-slice";
 import { WORKER_CONFIG_EXIT_CODE } from "./startup";
 
 export type RunCommandResult = {
@@ -302,6 +303,19 @@ export function commandDetail(result: RunCommandResult): string {
  * still SIGKILLed. `TimeoutStopSec=` leaves room for that bounded graceful
  * shutdown (`DEFAULT_SHUTDOWN_DEADLINE_MS`).
  *
+ * Memory: jobs run in their own transient scopes with a per-job `MemoryMax`
+ * (see `worker/job-memory.ts`), so one runaway agent is killed inside its job
+ * instead of by systemd-oomd taking down this whole unit. `OOMPolicy=stop`
+ * keeps any remaining unit-level OOM a clean stop of the service rather than
+ * an unrelated process kill; the daemon itself is never capped here, so it is
+ * the last thing to be killed. Job scopes are deliberately not bound to this
+ * unit: a bound scope stops in the same transaction as the service, before the
+ * daemon's bounded drain can let in-flight jobs finish. The daemon stops its
+ * remaining jobs itself after the drain grace period. They live in a
+ * per-workspace slice instead, which `ExecStopPost=` stops once the daemon has
+ * exited (after the drain, or after a crash or SIGKILL), so no job outlives
+ * its worker. The `-` prefix ignores a slice that was never started.
+ *
  * @param options - Binary path, working directory, and whether to run the direct webhook service
  */
 export function renderSystemdUnit(options: {
@@ -325,7 +339,8 @@ export function renderSystemdUnit(options: {
     (options.environmentPath ? `Environment=${quote(`PATH=${options.environmentPath}`)}\n` : "") +
     (options.workspaceDirEnv
       ? `Environment=${quote(`DEVINTERN_WORKSPACE_DIR=${options.workspaceDirEnv}`)}\n`
-      : "");
+      : "") +
+    "Environment=DEVINTERN_SERVICE=1\n";
   return `# ${SERVICE_MANAGED_MARKER}
 [Unit]
 Description=devintern ${options.listen ? "webhook server" : "worker"} (${options.projectDir})
@@ -341,6 +356,9 @@ RestartSec=30
 RestartPreventExitStatus=${WORKER_CONFIG_EXIT_CODE}
 KillMode=mixed
 TimeoutStopSec=120
+ExecStopPost=-systemctl --user stop ${jobScopeSliceName(options.projectDir)}
+MemoryAccounting=yes
+OOMPolicy=stop
 
 [Install]
 WantedBy=default.target
