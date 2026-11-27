@@ -60,6 +60,8 @@ import {
   relayStep,
   serviceStep,
 } from "./worker-init-activation";
+import { describeGitHubCliToken, readGitHubCliToken } from "./github-cli-token";
+import type { GitHubCliToken } from "./github-cli-token";
 import { errorMessage } from "./worker-init-fs";
 import {
   applyPlan,
@@ -86,7 +88,7 @@ import type { LogFn, PromptFn } from "./worker-init-policy";
 import { DEFAULT_PROBE_TIMEOUT_MS, secretValues, withTimeout } from "./worker-init-run";
 import type { FlagsRun, PromptRun, ReadinessBlocker, SetupRun } from "./worker-init-run";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
-import { runTrackerSetup } from "./wizard";
+import { offerGitHubCliToken, runTrackerSetup } from "./wizard";
 
 /** One setup step. Returns false to stop setup (the step has said why). */
 export interface WorkerInitStep {
@@ -98,6 +100,7 @@ export interface WorkerInitStep {
 export const WORKER_INIT_STEPS: readonly WorkerInitStep[] = [
   { id: "tracker", run: trackerStep },
   { id: "workspace", run: workspaceStep },
+  { id: "github-token", run: githubTokenStep },
   { id: "query", run: queryStep },
   { id: "settings", run: settingsStep },
   { id: "save", run: saveStep },
@@ -196,7 +199,13 @@ async function trackerStep(run: SetupRun): Promise<boolean> {
         promptSecret: run.promptSecret,
         log: run.log,
       })
-    : await defaultEnsureTracker(run.cwd, run.prompt, run.promptSecret, run.log);
+    : await defaultEnsureTracker(
+        run.cwd,
+        run.prompt,
+        run.promptSecret,
+        run.log,
+        run.deps.githubCliToken,
+      );
   if (!trackerType) {
     run.log("❌ Tracker setup did not finish. Re-run `devintern worker init`.");
     trackWorkerInitFailed("tracker_setup_incomplete");
@@ -285,15 +294,90 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
 }
 
 /**
+ * Pull-request token. A workspace with a GitHub remote needs `GITHUB_TOKEN`
+ * for PRs even when the tracker is elsewhere; when it is not set, offer the
+ * signed-in `gh` session. Flags mode resolved it while planning the query.
+ */
+async function githubTokenStep(run: SetupRun): Promise<boolean> {
+  if (run.input === "flags" || run.trackerType === "github") return true;
+  const envPath = workspaceEnvPath(run.workspaceDir);
+  const existing = existsSync(envPath) ? parseEnvContent(readFileSync(envPath, "utf8")) : {};
+  if (existing.GITHUB_TOKEN || process.env.GITHUB_TOKEN) return true;
+  const repoSlug = await githubSlugForWorkspace(run);
+  if (!repoSlug) return true;
+
+  let token: GitHubCliToken | null;
+  try {
+    token = (run.deps.githubCliToken ?? readGitHubCliToken)();
+  } catch {
+    token = null;
+  }
+  const accepted = await offerGitHubCliToken({
+    token,
+    prompt: run.prompt,
+    log: run.log,
+    probe: run.deps.githubTokenProbe ?? defaultProbe,
+    repoSlug,
+  });
+  if (!accepted || !token) return true;
+
+  run.log(`🔑 Using your GitHub CLI token (${describeGitHubCliToken(token)}).`);
+  saveGitHubToken(envPath, accepted, run.log);
+  return true;
+}
+
+/** `owner/repo` of this workspace's GitHub remote, for the PR-token probe. */
+async function githubSlugForWorkspace(run: PromptRun): Promise<string | undefined> {
+  const origin = await originGitHubSlug(run.cwd);
+  if (origin) return origin;
+  try {
+    const config = loadWorkspaceConfig(workspaceConfigPath(run.workspaceDir));
+    for (const repo of config.repos) {
+      const slug = gitHubSlugFromRemote(repo.remote);
+      if (slug) return slug;
+    }
+  } catch {
+    // An unreadable workspace is reported by the workspace step.
+  }
+  return undefined;
+}
+
+/** Append `GITHUB_TOKEN` to the workspace `.env` with owner-only permissions. */
+function saveGitHubToken(envPath: string, token: string, log: LogFn): void {
+  const existingText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
+  const separator = existingText === "" || existingText.endsWith("\n") ? "" : "\n";
+  writeSecretFile(envPath, `${existingText}${separator}GITHUB_TOKEN=${token}\n`);
+  process.env.GITHUB_TOKEN = token;
+  log(`💾 Saved GITHUB_TOKEN to ${envPath}`);
+}
+
+/**
  * Ready-tasks query. The wizard prompts (a re-run offers the saved query as
  * the Enter default), validates it with a live dry run, and writes it; flags
  * mode takes `--task-query` and completes the plan with the credentials.
  */
 async function queryStep(run: SetupRun): Promise<boolean> {
   if (run.input === "flags") {
-    const planned = planQuery(run.args, run.draft!, run);
+    // Read `gh` with the run's environment (tests pin PATH here); an injected
+    // reader keeps a test hermetic when the developer host is signed in.
+    const processEnv = run.deps.processEnv ?? process.env;
+    const githubCliToken =
+      run.deps.githubCliToken ?? (() => readGitHubCliToken({ env: processEnv }));
+    const planned = await planQuery(run.args, run.draft!, run, {
+      probe: run.deps.probe ?? defaultProbe,
+      githubCliToken,
+      ...(run.deps.probeTimeoutMs ? { probeTimeoutMs: run.deps.probeTimeoutMs } : {}),
+    });
     if (!planned.ok) return failFlags(run, planned);
     run.plan = planned.plan;
+    if (planned.plan.tokenSource) run.report.tokenSource = planned.plan.tokenSource;
+    if (planned.plan.githubTokenRejected) {
+      run.report.warnings.push(
+        "The GitHub CLI token was rejected, so it was not saved; use a token with repository " +
+          "access or pass one with --env-file.",
+      );
+    }
     return true;
   }
   const { workspaceDir } = run;
@@ -630,6 +714,7 @@ export async function defaultEnsureTracker(
   prompt: PromptFn,
   promptSecret: PromptFn,
   log: LogFn,
+  githubCliToken?: () => GitHubCliToken | null,
 ): Promise<string | null> {
   // A legacy checkout `.env` is reused once; `add-repo` merges it into the
   // workspace env in the next step.
@@ -673,6 +758,7 @@ export async function defaultEnsureTracker(
     promptSecret,
     envLabel: sharedEnvPath,
     stepDefaults: originSlug ? { GITHUB_REPO: originSlug } : undefined,
+    ...(githubCliToken ? { githubCliToken } : {}),
     writeEnv: async (envContent) => {
       mergeIntoSharedEnv(sharedEnvPath, envContent, log);
       return sharedEnvPath;

@@ -21,7 +21,7 @@ Prefer to set up from a chat? Install the [devintern-setup skill](agent-skills.m
 - A Linux or macOS machine that will run the worker, with `git`
 - A clone of your project's repository on that machine
 - A task tracker account with API access, or a folder of markdown tasks
-- A token for your source-control host so the worker can push and open PRs. For GitHub, see [GitHub authentication](./configuration.md#github-authentication)
+- A token for your source-control host so the worker can push and open PRs. For GitHub, see [GitHub authentication](./configuration.md#github-authentication); a signed-in GitHub CLI (`gh`) is reused when `GITHUB_TOKEN` is unset
 
 ## 1. Install
 

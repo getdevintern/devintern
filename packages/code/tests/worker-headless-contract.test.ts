@@ -110,6 +110,7 @@ describe("worker init --non-interactive (headless contract)", () => {
         probe: async () => {},
         probeTimeoutMs: 2_000,
         which: () => null,
+        githubCliToken: () => null,
         doctor: doctorStubs(doctorOverrides),
         ...rest,
       },
@@ -318,6 +319,7 @@ describe("worker init --non-interactive (headless contract)", () => {
         processEnv: { ...GITHUB_ENV },
         probe: async () => {},
         which: () => null,
+        githubCliToken: () => null,
         doctor: stubs,
       },
     );

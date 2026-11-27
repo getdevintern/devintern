@@ -65,6 +65,7 @@ function testDeps(overrides: Record<string, unknown> = {}) {
   return {
     getUser: () => Promise.resolve(null),
     listInstalledAgents: () => [{ name: "claude-code", displayName: "Claude Code" }],
+    githubCliToken: () => null,
     ...overrides,
   };
 }

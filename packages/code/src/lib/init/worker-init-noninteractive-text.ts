@@ -19,6 +19,12 @@ const STATUS_ICON: Record<CheckStatus, string> = {
   skipped: "⏭️ ",
 };
 
+const TOKEN_SOURCE_LABEL = {
+  env: "the environment (GITHUB_TOKEN)",
+  "env-file": "an env file",
+  gh: "the GitHub CLI (`gh auth token`)",
+} as const;
+
 /** Last line of the text report: ready, only sign-in left, or failed checks to fix. */
 function closingLine(report: NonInteractiveInitReport, failed: InitCheck[]): string {
   if (report.result === "success") {
@@ -52,6 +58,9 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
   for (const check of report.checks) {
     lines.push(`  ${STATUS_ICON[check.status]} ${check.name}: ${check.message}`);
     if (check.hint) lines.push(`     → ${check.hint}`);
+  }
+  if (report.tokenSource) {
+    lines.push("", `🔑 GitHub token from ${TOKEN_SOURCE_LABEL[report.tokenSource]}.`);
   }
   if (report.signIn) {
     lines.push("", `🔑 Sign in to begin your ${WORKER_PILOT_OFFER}:`);

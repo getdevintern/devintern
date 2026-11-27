@@ -195,6 +195,7 @@ describe("runWorkerInit", () => {
       ensureTracker: async () => "markdown",
       bootstrapWorkspace: async () => ({ workspaceDir }),
       configureOperatingPolicy: async () => {},
+      githubCliToken: () => null,
       // Detection is real otherwise: PRManager inspects the *runner's* cwd.
       detectGithubRepo: async () => null,
       // Hermetic service step: detection stays in the temp home and never
@@ -1267,6 +1268,7 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
         async () => "n",
         async () => "",
         log,
+        () => null,
       );
       expect(tracker).toBe("github");
       const all = logs.join("\n");
@@ -1279,7 +1281,7 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
       const stop = async (): Promise<string> => {
         throw new Error("tracker prompt reached");
       };
-      await expect(defaultEnsureTracker(tempDir, stop, stop, log)).rejects.toThrow(
+      await expect(defaultEnsureTracker(tempDir, stop, stop, log, () => null)).rejects.toThrow(
         "tracker prompt reached",
       );
       const all = logs.join("\n");

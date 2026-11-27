@@ -87,6 +87,7 @@ describe("worker init parity: interactive and non-interactive write the same wor
       log: () => {},
       prompt: async (question) => (question.startsWith("Ready-tasks query") ? query : ""),
       ensureTracker: async () => tracker,
+      githubCliToken: () => null,
       detectGithubRepo: async () => null,
       checkAutomationLicense: async () => null,
       getUser: async () => null,
@@ -112,6 +113,7 @@ describe("worker init parity: interactive and non-interactive write the same wor
         processEnv: { ...env },
         probe: async () => {},
         probeTimeoutMs: 2_000,
+        githubCliToken: () => null,
         doctor: {
           dryRunQuery: async () => 1,
           checkRepoAccess: async () => ({ ok: true, detail: "readable" }),

@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -76,6 +76,7 @@ describe("worker init onboarding", () => {
         },
         ensureTracker: async () => "markdown",
         bootstrapWorkspace: async () => ({ workspaceDir, repoName: "app" }),
+        githubCliToken: () => null,
         detectGithubRepo: async () => null,
         noService: true,
         getUser: async () => null,
@@ -191,6 +192,46 @@ describe("worker init onboarding", () => {
     });
   });
 
+  describe("GitHub CLI token", () => {
+    test("offers a signed-in token for PRs on a GitHub remote and saves it", async () => {
+      delete process.env.GITHUB_TOKEN;
+      const { questions, deps: d } = deps(() => "", {
+        githubCliToken: () => ({
+          token: "gho_fake",
+          account: "octocat",
+          scopes: "repo",
+        }),
+        githubTokenProbe: async () => {},
+      });
+      const result = await runWorkerInit(d);
+      expect(result.ok).toBe(true);
+      expect(
+        questions.some((question) =>
+          question.startsWith("Use your GitHub CLI token (account octocat, scopes repo)? [Y/n]"),
+        ),
+      ).toBe(true);
+      const env = readFileSync(path.join(workspaceDir, ".env"), "utf8");
+      expect(env).toContain("GITHUB_TOKEN=gho_fake");
+      expect(logs.join("\n")).not.toContain("gho_fake");
+    });
+
+    test("a rejected token is not saved and setup continues without it", async () => {
+      delete process.env.GITHUB_TOKEN;
+      const { deps: d } = deps(() => "", {
+        githubCliToken: () => ({ token: "gho_rejected", account: "octocat" }),
+        githubTokenProbe: async () => {
+          throw new Error("GitHub API error (401): Bad credentials");
+        },
+      });
+      const result = await runWorkerInit(d);
+      expect(result.ok).toBe(true);
+      const envPath = path.join(workspaceDir, ".env");
+      const env = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+      expect(env).not.toContain("gho_rejected");
+      expect(logs.join("\n")).toContain("Not using the GitHub CLI token");
+    });
+  });
+
   describe("tracker settings from devintern init", () => {
     function gitCheckout(): string {
       const checkout = path.join(tempDir, "app");
@@ -224,7 +265,13 @@ describe("worker init onboarding", () => {
       const stop = async (): Promise<string> => {
         throw new Error("tracker prompt reached");
       };
-      const tracker = await defaultEnsureTracker(checkout, stop, stop, (m) => logs.push(m));
+      const tracker = await defaultEnsureTracker(
+        checkout,
+        stop,
+        stop,
+        (m) => logs.push(m),
+        () => null,
+      );
       expect(tracker).toBe("github");
       const all = logs.join("\n");
       expect(all).toContain(`from ${path.join(workspaceDir, "env", "app.env")}`);
@@ -241,9 +288,15 @@ describe("worker init onboarding", () => {
       const stop = async (): Promise<string> => {
         throw new Error("tracker prompt reached");
       };
-      await expect(defaultEnsureTracker(checkout, stop, stop, (m) => logs.push(m))).rejects.toThrow(
-        "tracker prompt reached",
-      );
+      await expect(
+        defaultEnsureTracker(
+          checkout,
+          stop,
+          stop,
+          (m) => logs.push(m),
+          () => null,
+        ),
+      ).rejects.toThrow("tracker prompt reached");
       expect(logs.join("\n")).toContain("No tracker config yet");
     });
   });

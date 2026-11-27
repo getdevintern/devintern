@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "fs";
 import { isAbsolute, resolve } from "path";
 
+import { PROBE_TIMEOUT_MS, defaultProbe, withTimeout } from "@devintern/task-trackers";
 import { upsertEnvVars } from "@devintern/utils";
 
 import { redactUrlCredentials } from "../observability/dashboard-workspace";
@@ -32,6 +33,8 @@ import {
   workspaceConfigPath,
   workspaceEnvPath,
 } from "../workspace/paths";
+import { readGitHubCliToken } from "./github-cli-token";
+import type { GitHubCliToken, GitHubTokenSource } from "./github-cli-token";
 import { TRACKER_SETUP } from "./scaffold";
 import { acquireWorkspaceInitLock, errorMessage, writeFileAtomic } from "./worker-init-fs";
 import { RECOMMENDED_WORKER_POLICY } from "./worker-init-policy";
@@ -148,6 +151,10 @@ export interface Plan {
   credentialEnv: Env;
   /** Keys to save to the workspace `.env`. */
   envUpdates: Record<string, string>;
+  /** Where this run's `GITHUB_TOKEN` came from (absent when none was used). */
+  tokenSource?: GitHubTokenSource;
+  /** A GitHub CLI token the probe rejected and this run therefore will not save. */
+  githubTokenRejected?: boolean;
   /** One-line notes for the text output (for example a path made absolute). */
   notes: string[];
   /** Snapshot of workspace.toml when validated (null when absent). */
@@ -358,15 +365,113 @@ export async function planWorkspace(
   return null;
 }
 
+/** Injectable inputs of {@link planQuery} that touch the network for a GitHub CLI token. */
+export interface PlanQueryDeps {
+  /** Tracker credential probe; defaults to the wizard's probe. */
+  probe?: (trackerId: string, env: Record<string, string>) => Promise<void>;
+  /** Reads a signed-in GitHub CLI token; defaults to `gh`. */
+  githubCliToken?: () => GitHubCliToken | null;
+  /** Probe timeout (the run's own probe timeout). */
+  probeTimeoutMs?: number;
+}
+
+/** `owner/repo` of a GitHub remote this setup knows about, if any. */
+function githubSlugForToken(draft: PlanDraft, credentialEnv: Env): string | undefined {
+  if (credentialEnv.GITHUB_REPO) return credentialEnv.GITHUB_REPO;
+  if (draft.repo?.slug) return draft.repo.slug;
+  for (const repo of draft.existing?.repos ?? []) {
+    const slug = gitHubSlugFromRemote(repo.remote);
+    if (slug) return slug;
+  }
+  return undefined;
+}
+
+/** Whether this setup needs a `GITHUB_TOKEN`: the GitHub tracker, or a GitHub remote for PRs. */
+function needsGitHubToken(
+  tracker: string | undefined,
+  draft: PlanDraft,
+  credentialEnv: Env,
+): boolean {
+  if (!tracker) return false;
+  if (tracker === "github") return true;
+  return Boolean(githubSlugForToken(draft, credentialEnv));
+}
+
+/** Where a token already present in the composed credentials came from. */
+function credentialTokenSource(
+  draft: PlanDraft,
+  ctx: { processEnv: Env },
+  workspaceEnv: Record<string, string>,
+): GitHubTokenSource | undefined {
+  if (draft.envFileValues.GITHUB_TOKEN) return "env-file";
+  if (ctx.processEnv.GITHUB_TOKEN) return "env";
+  if (workspaceEnv.GITHUB_TOKEN) return "env-file";
+  return undefined;
+}
+
+/**
+ * Resolve and probe `gh`'s token when this setup needs a GitHub token and none
+ * is set. A rejected token is reported but only kept in the credentials when
+ * the GitHub tracker requires one: the readiness check then fails it with the
+ * existing `fix-credentials` step instead of saving it.
+ */
+async function githubCliTokenForPlan(
+  tracker: string | undefined,
+  draft: PlanDraft,
+  credentialEnv: Env,
+  deps: PlanQueryDeps,
+  notes: string[],
+): Promise<{ token?: string; source?: GitHubTokenSource; rejected: boolean }> {
+  if (!needsGitHubToken(tracker, draft, credentialEnv) || credentialEnv.GITHUB_TOKEN) {
+    return { rejected: false };
+  }
+  let token: GitHubCliToken | null;
+  try {
+    token = (deps.githubCliToken ?? readGitHubCliToken)();
+  } catch {
+    token = null;
+  }
+  if (!token) return { rejected: false };
+
+  const slug = githubSlugForToken(draft, credentialEnv);
+  const probeEnv: Record<string, string> = { GITHUB_TOKEN: token.token };
+  if (slug) probeEnv.GITHUB_REPO = slug;
+  try {
+    await withTimeout(
+      (deps.probe ?? defaultProbe)("github", probeEnv),
+      deps.probeTimeoutMs ?? PROBE_TIMEOUT_MS,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (tracker === "github") {
+      notes.push(
+        `⚠️  The GitHub CLI token was rejected (${message}); it will not be saved. ` +
+          "Use a token with repository access, or re-run with --env-file.",
+      );
+      return { token: token.token, source: "gh", rejected: true };
+    }
+    notes.push(
+      `⚠️  The GitHub CLI token was rejected (${message}); continuing without a GitHub PR token.`,
+    );
+    return { rejected: false };
+  }
+  notes.push(
+    `🔑 Using the GitHub CLI token${token.account ? ` for ${token.account}` : ""} ` +
+      "(saved to the workspace .env).",
+  );
+  return { token: token.token, source: "gh", rejected: false };
+}
+
 /**
  * Query step: the query and the credentials it runs with complete the plan
  * (every missing flag and variable is reported at once). Touches nothing on disk.
  */
-export function planQuery(
+export async function planQuery(
   args: NonInteractiveInitArgs,
   draft: PlanDraft,
   ctx: { cwd: string; processEnv: Env; workspaceDir: string },
-): { ok: true; plan: Plan } | PlanFailure {
+  deps: PlanQueryDeps = {},
+): Promise<{ ok: true; plan: Plan } | PlanFailure> {
   const { flagTracker, configSnapshot, existing, repo, envFilePath } = draft;
   let { envFileValues } = draft;
   const tracker = flagTracker ?? existing?.defaults.tracker;
@@ -383,6 +488,10 @@ export function planQuery(
     envFileValues = absoluteMarkdownDir(envFileValues, credentialEnv, ctx, notes);
   }
 
+  const githubCli = await githubCliTokenForPlan(tracker, draft, credentialEnv, deps, notes);
+  if (githubCli.token) credentialEnv.GITHUB_TOKEN = githubCli.token;
+  const tokenSource = githubCli.source ?? credentialTokenSource(draft, ctx, workspaceEnv);
+
   const missing = missingInputs(tracker, taskQuery, credentialEnv);
   if (missing.length > 0) return missingInputFailure(tracker, missing);
 
@@ -392,6 +501,7 @@ export function planQuery(
   }
 
   const envUpdates = computeEnvUpdates(tracker!, credentialEnv, workspaceEnv, envFileValues);
+  if (githubCli.rejected) delete envUpdates.GITHUB_TOKEN;
   if (repo) {
     // Same import as `worker add-repo`: the checkout's project env fills keys
     // the workspace `.env` lacks; differing values stay repo-local. Compared
@@ -413,6 +523,8 @@ export function planQuery(
       repo,
       credentialEnv,
       envUpdates,
+      ...(tokenSource ? { tokenSource } : {}),
+      ...(githubCli.rejected ? { githubTokenRejected: true } : {}),
       notes,
       configSnapshot,
       writeRecommendedPolicy: false,

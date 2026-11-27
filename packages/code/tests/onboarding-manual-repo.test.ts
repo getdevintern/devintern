@@ -173,6 +173,7 @@ describe("devintern init wizard", () => {
       getUser: () => Promise.resolve(null),
       signIn: () => Promise.reject(new LoginSkippedError()),
       listInstalledAgents: agents,
+      githubCliToken: () => null,
       cwd: checkout,
       log,
     });
@@ -193,6 +194,7 @@ describe("devintern init wizard", () => {
       getUser: () => Promise.resolve(null),
       signIn: () => Promise.reject(promptInterruptedError()),
       listInstalledAgents: agents,
+      githubCliToken: () => null,
       cwd: checkout,
       log,
     });
@@ -214,7 +216,11 @@ describe("devintern init wizard", () => {
       log,
       () => Promise.reject(new Error("401")),
       checkout,
-      { writeEnv: async () => "/somewhere/.env", envLabel: "/somewhere/.env" },
+      {
+        writeEnv: async () => "/somewhere/.env",
+        envLabel: "/somewhere/.env",
+        githubCliToken: () => null,
+      },
     );
     expect(logs.join("\n")).toContain("verify them in /somewhere/.env");
   });

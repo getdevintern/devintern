@@ -21,6 +21,7 @@ import type {
   ServiceState,
 } from "../worker/service";
 import type { StartCheck } from "../worker/service-control";
+import type { GitHubCliToken } from "./github-cli-token";
 import type { AppliedWrite, Plan, PlanDraft } from "./worker-init-noninteractive-plan";
 import type {
   Env,
@@ -67,6 +68,10 @@ export interface WorkerInitDeps {
     promptSecret: PromptFn;
     log: LogFn;
   }) => Promise<string | null>;
+  /** Reads a signed-in GitHub CLI token for tracker setup; defaults to `gh`. */
+  githubCliToken?: () => GitHubCliToken | null;
+  /** Probes a reused GitHub CLI token; defaults to the tracker credential probe. */
+  githubTokenProbe?: (trackerId: string, env: Record<string, string>) => Promise<void>;
   /**
    * Readiness checks shown at the end (the `worker doctor` checks). Without
    * it the closing line relies on the license step alone.

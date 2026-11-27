@@ -9,6 +9,7 @@ import type { LicenseCheckOptions } from "@devintern/license-check";
 import type { PendingSignIn } from "../account/cli";
 import type { NextStep, ReadinessResult, ReportCheck } from "../observability/readiness-json";
 import type { WorkerDoctorDeps, WorkerEntitlementLike } from "../observability/worker-readiness";
+import type { GitHubCliToken, GitHubTokenSource } from "./github-cli-token";
 
 /** `schema` value of the `--json` document. Bump `version` on breaking changes. */
 export const WORKER_INIT_JSON_SCHEMA = "devintern.worker-init";
@@ -84,6 +85,11 @@ export interface NonInteractiveInitReport {
   persisted: boolean;
   /** Things to know that are not failures (e.g. the `--env-file` still holds the credentials). */
   warnings: string[];
+  /**
+   * Where the `GITHUB_TOKEN` this run used came from. Absent when no token was
+   * needed or the token was already saved in the workspace `.env`.
+   */
+  tokenSource?: GitHubTokenSource;
   checks: InitCheck[];
   nextSteps: InitNextStep[];
   /** Set when `--sign-in` started a sign-in: open `url`, then run `complete` on this host. */
@@ -112,6 +118,8 @@ export interface NonInteractiveInitDeps {
   workspaceDir?: string;
   /** Tracker credential probe; defaults to the wizard's probe. */
   probe?: (trackerId: string, env: Record<string, string>) => Promise<void>;
+  /** Reads a signed-in GitHub CLI token when `GITHUB_TOKEN` is missing; defaults to `gh`. */
+  githubCliToken?: () => GitHubCliToken | null;
   /** Overrides for the `worker doctor` checks (tests). */
   doctor?: WorkerDoctorDeps;
   /** License validator behind the default entitlement check; defaults to `checkLicense` (tests). */

@@ -23,6 +23,8 @@ import {
 } from "@devintern/auth";
 import type { SupabaseAuthConfig } from "@devintern/auth";
 import {
+  PROBE_TIMEOUT_MS,
+  condenseMessage,
   defaultProbe,
   extractExistingTrackerConfig,
   isInteractive,
@@ -31,6 +33,7 @@ import {
   promptReuseExistingConfig,
   promptSteps,
   validateConnection,
+  withTimeout,
 } from "@devintern/task-trackers";
 import { findProjectRoot, upsertEnvVars } from "@devintern/utils";
 import { signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
@@ -53,6 +56,8 @@ import {
 } from "./scaffold";
 import { collectReadinessChecks, renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
+import { describeGitHubCliToken, readGitHubCliToken } from "./github-cli-token";
+import type { GitHubCliToken } from "./github-cli-token";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 import { gitHubSlugFromRemote } from "../workspace/env";
 import { workspaceCodeStateDir, workspaceConfigPath } from "../workspace/paths";
@@ -90,6 +95,8 @@ export interface InitWizardDeps {
   signIn?: () => Promise<InitWizardUserLike | null>;
   /** Installed agent CLIs; defaults to PATH probing of every harness. */
   listInstalledAgents?: () => Array<{ name: string; displayName: string }>;
+  /** Reads a signed-in GitHub CLI token; defaults to `gh auth token` (tests inject null). */
+  githubCliToken?: () => GitHubCliToken | null;
   /**
    * Which entry point opened the wizard — `init` command or the first-run
    * rescue offer — recorded on setup analytics events.
@@ -266,6 +273,7 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
       writeEnv,
       promptSecret,
       stepDefaults: originSlug ? { GITHUB_REPO: originSlug } : undefined,
+      ...(deps.githubCliToken ? { githubCliToken: deps.githubCliToken } : {}),
     });
     if (!result) {
       trackSetupFailed("scaffold_refused");
@@ -320,6 +328,73 @@ export function absolutizeMarkdownTasksDir(
 }
 
 /**
+ * Offer a signed-in GitHub CLI token in place of pasting one.
+ *
+ * The token is probed with the same tracker probe as a pasted token (repo
+ * access when a repository is known) before the offer, so a token the API
+ * rejects is never written to any env file. Declining returns null so the
+ * caller falls back to the normal prompt.
+ */
+export async function offerGitHubCliToken(options: {
+  token: GitHubCliToken | null;
+  prompt: PromptFn;
+  log: LogFn;
+  probe: ProbeFn;
+  repoSlug?: string;
+}): Promise<string | null> {
+  const { token, prompt, log, probe, repoSlug } = options;
+  if (!token) return null;
+  const env: Record<string, string> = { GITHUB_TOKEN: token.token };
+  if (repoSlug) env.GITHUB_REPO = repoSlug;
+  try {
+    await withTimeout(probe("github", env), PROBE_TIMEOUT_MS);
+  } catch (error) {
+    log(
+      `⚠️  Not using the GitHub CLI token: ${condenseMessage(
+        error instanceof Error ? error.message : String(error),
+      )}`,
+    );
+    return null;
+  }
+  const answer = (
+    await prompt(`Use your GitHub CLI token (${describeGitHubCliToken(token)})? [Y/n]: `)
+  )
+    .trim()
+    .toLowerCase();
+  if (answer === "n" || answer === "no") return null;
+  return token.token;
+}
+
+/**
+ * Offer a signed-in `gh` token in place of the `GITHUB_TOKEN` prompt.
+ *
+ * @returns true when the token was accepted and written into `values`
+ */
+async function reuseGitHubCliToken(options: {
+  values: Record<string, string>;
+  stepDefaults?: Record<string, string>;
+  readGh: () => GitHubCliToken | null;
+  prompt: PromptFn;
+  log: LogFn;
+  probe: ProbeFn;
+}): Promise<boolean> {
+  if (options.values.GITHUB_TOKEN || process.env.GITHUB_TOKEN) return false;
+  const token = options.readGh();
+  const accepted = await offerGitHubCliToken({
+    token,
+    prompt: options.prompt,
+    log: options.log,
+    probe: options.probe,
+    repoSlug:
+      options.values.GITHUB_REPO || options.stepDefaults?.GITHUB_REPO || process.env.GITHUB_REPO,
+  });
+  if (!accepted || !token) return false;
+  options.values.GITHUB_TOKEN = accepted;
+  options.log(`🔑 Using your GitHub CLI token (${describeGitHubCliToken(token)}).`);
+  return true;
+}
+
+/**
  * Tracker-only subset of `devintern init`: pick a tracker, collect credentials,
  * validate, and scaffold `.devintern-code/`. Used by `devintern init` and by
  * `devintern worker init` when the repo has no tracker config yet.
@@ -340,10 +415,13 @@ export async function runTrackerSetup(
     stepDefaults?: Record<string, string>;
     /** Where the values are saved, named when validation is skipped. */
     envLabel?: string;
+    /** Reads a signed-in GitHub CLI token; defaults to `gh auth token`. */
+    githubCliToken?: () => GitHubCliToken | null;
   },
 ): Promise<{ trackerId: string; values: Record<string, string>; envPath: string } | null> {
   const projectRoot = findProjectRoot({ startDir: cwd });
   const promptSecret = options.promptSecret ?? prompt;
+  const readGh = options.githubCliToken ?? readGitHubCliToken;
   const values: Record<string, string> = {};
   let trackerId: string | undefined;
 
@@ -399,7 +477,22 @@ export async function runTrackerSetup(
       : step;
   });
   if (!reusedExisting) {
-    await promptSteps(prompted, prompt, log, values, promptSecret);
+    // The GitHub tracker needs a token; offer a signed-in `gh` session before
+    // asking them to create one. A rejected token falls back to the prompt.
+    if (trackerId === "github") {
+      await reuseGitHubCliToken({
+        values,
+        stepDefaults: options.stepDefaults,
+        readGh,
+        prompt,
+        log,
+        probe,
+      });
+    }
+    const stepsToPrompt = values.GITHUB_TOKEN
+      ? prompted.filter((step) => step.key !== "GITHUB_TOKEN")
+      : prompted;
+    await promptSteps(stepsToPrompt, prompt, log, values, promptSecret);
   }
 
   if (trackerId === "markdown") {
@@ -421,7 +514,17 @@ export async function runTrackerSetup(
       "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
     );
     log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-    await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
+    const reused = await reuseGitHubCliToken({
+      values,
+      stepDefaults: options.stepDefaults,
+      readGh,
+      prompt,
+      log,
+      probe,
+    });
+    if (!reused) {
+      await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
+    }
   }
 
   const envContent = renderEnvFile(trackerId, values);

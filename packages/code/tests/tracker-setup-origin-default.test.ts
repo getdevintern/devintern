@@ -32,6 +32,7 @@ describe("runTrackerSetup step defaults", () => {
       {
         stepDefaults,
         promptSecret: async () => "ghp_test_token",
+        githubCliToken: () => null,
         writeEnv: async (content) => {
           written = content;
           return join(dir, ".env");
