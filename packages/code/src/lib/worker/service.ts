@@ -672,6 +672,10 @@ async function installSystemd(
     if (reload.status !== 0) {
       throw new Error(`systemctl --user daemon-reload failed: ${commandDetail(reload)}`);
     }
+    // Rewriting a unit does not clear `start-limit-hit`, and reinstalling is
+    // the documented way out of a crash loop. Without this, the restart below
+    // would be refused and install would roll the new unit back.
+    await d.run("systemctl", ["--user", "reset-failed", "devintern-worker"]);
     const start = await d.run("systemctl", [
       "--user",
       ...(wasEnabled ? ["restart"] : ["enable", "--now"]),

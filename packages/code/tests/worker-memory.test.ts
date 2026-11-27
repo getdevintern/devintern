@@ -335,7 +335,9 @@ describe("supervisor memory backpressure", () => {
     );
 
     expect(started).toBe(false);
-    expect(supervisor.queuedJobs?.()).toMatchObject([{ id: "held", waitingOn: "memory" }]);
+    expect(supervisor.queuedJobs?.()).toMatchObject([
+      { id: "held", waitingOn: "memory", blockReason: "host memory is low" },
+    ]);
 
     blocked = false;
     await Promise.race([
@@ -346,6 +348,28 @@ describe("supervisor memory backpressure", () => {
     ]);
     expect(started).toBe(true);
     expect(supervisor.queuedJobs?.()).toEqual([]);
+  });
+
+  test("a probe that clears between pumps still starts the queued job", async () => {
+    let calls = 0;
+    const supervisor = createTaskSupervisor(
+      { maxConcurrency: 2, maxConcurrencyPerRepo: 2 },
+      { backpressure: () => (++calls === 1 ? "host memory is low" : null), backpressureRetryMs: 5 },
+    );
+
+    let started = false;
+    await Promise.race([
+      supervisor.schedule(
+        request("held", async () => {
+          started = true;
+        }),
+      ),
+      Bun.sleep(500).then(() => {
+        throw new Error("the queued job did not start after the probe reported clear");
+      }),
+    ]);
+    expect(started).toBe(true);
+    expect(calls).toBeGreaterThanOrEqual(2);
   });
 
   test("a throwing probe fails open", async () => {

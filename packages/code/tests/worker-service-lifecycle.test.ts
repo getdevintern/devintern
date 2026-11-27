@@ -19,6 +19,8 @@ import { RunStore } from "../src/lib/state/run-recorder";
 import { WorkerState } from "../src/lib/state/worker-state";
 import { workspaceDbPath, workspaceStateDir } from "../src/lib/workspace/paths";
 import { runWorkerReadCommand } from "../src/lib/worker/dashboard-read-cli";
+import { hostTotalMemoryBytes } from "../src/lib/worker/host-memory";
+import { DEFAULT_MEMORY_BUDGET, memoryBudgetBytes } from "../src/lib/worker/memory-budget";
 import {
   parseWorkerLifecycleRecord,
   readWorkerLifecycle,
@@ -648,6 +650,80 @@ describe("devintern worker service", () => {
     expect(commands).toContainEqual(["systemctl", "--user", "enable", "--now", "devintern-worker"]);
     expect(readFileSync(systemdUnitPath(home), "utf8")).toContain("RestartPreventExitStatus=78");
   });
+
+  test.skipIf(process.platform !== "linux")(
+    "install writes the workspace memory budget into the generated unit",
+    async () => {
+      const total = hostTotalMemoryBytes();
+      expect(total).toBeDefined();
+      writeFileSync(
+        join(workspaceDir, "workspace.toml"),
+        `
+[workspace.execution]
+memory_high_percent = 40
+memory_max_percent = 60
+memory_swap_max_percent = 0
+
+[defaults]
+tracker = "markdown"
+`,
+      );
+      const { deps } = freshLinux();
+      const report = await runServiceAction(baseArgs(), {
+        workspaceDir,
+        service: deps,
+        collectReadiness: async () => [],
+        execPath: "/usr/local/bin/devintern",
+        runtimePath: "/usr/local/bin/bun",
+        environmentPath: "/usr/bin",
+        waitForStart: async () => ({ state: "running", pid: 4242 }),
+      });
+      expect(report.result).toBe("running");
+      const expected = memoryBudgetBytes(
+        { highPercent: 40, maxPercent: 60, swapMaxPercent: 0 },
+        total!,
+      );
+      const unit = readFileSync(systemdUnitPath(home), "utf8");
+      expect(unit).toContain(`MemoryHigh=${expected.memoryHighBytes}`);
+      expect(unit).toContain(`MemoryMax=${expected.memoryMaxBytes}`);
+      expect(unit).toContain(`MemorySwapMax=${expected.memorySwapMaxBytes}`);
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "an invalid workspace memory budget falls back to the defaults in the unit",
+    async () => {
+      const total = hostTotalMemoryBytes();
+      expect(total).toBeDefined();
+      writeFileSync(
+        join(workspaceDir, "workspace.toml"),
+        `
+[workspace.execution]
+memory_high_percent = 90
+memory_max_percent = 60
+
+[defaults]
+tracker = "markdown"
+`,
+      );
+      const { deps } = freshLinux();
+      const report = await runServiceAction(baseArgs(), {
+        workspaceDir,
+        service: deps,
+        collectReadiness: async () => [],
+        execPath: "/usr/local/bin/devintern",
+        runtimePath: "/usr/local/bin/bun",
+        environmentPath: "/usr/bin",
+        waitForStart: async () => ({ state: "running", pid: 4242 }),
+      });
+      expect(report.result).toBe("running");
+      const expected = memoryBudgetBytes(DEFAULT_MEMORY_BUDGET, total!);
+      const unit = readFileSync(systemdUnitPath(home), "utf8");
+      expect(unit).toContain(`MemoryHigh=${expected.memoryHighBytes}`);
+      expect(unit).toContain(`MemoryMax=${expected.memoryMaxBytes}`);
+      expect(unit).toContain(`MemorySwapMax=${expected.memorySwapMaxBytes}`);
+    },
+  );
 
   test("a start that does not finish within --wait exits 3", async () => {
     const report = await runServiceAction(baseArgs(), {

@@ -201,6 +201,7 @@ function QueuedDetails({
             {item.message}
           </Fact>
         ) : null}
+        {item.blockReason ? <Fact label="Memory">{item.blockReason}</Fact> : null}
         {item.lastError ? (
           <Fact label="Last error">
             <span className="text-danger">{item.lastError}</span>
