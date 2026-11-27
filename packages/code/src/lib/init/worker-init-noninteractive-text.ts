@@ -19,6 +19,19 @@ const STATUS_ICON: Record<CheckStatus, string> = {
   skipped: "⏭️ ",
 };
 
+/** Checks about this machine rather than the input: the agent CLI and its sandbox. */
+const HOST_CHECKS = new Set(["harness", "sandbox"]);
+/** Next steps that fix a host check. */
+const HOST_STEPS = new Set(["install-agent", "fix-sandbox"]);
+
+/**
+ * `items` with the host problems first, the rest in their original order.
+ * Text only: the `--json` document keeps the report's order.
+ */
+function hostProblemsFirst<T>(items: readonly T[], isHostProblem: (item: T) => boolean): T[] {
+  return [...items.filter(isHostProblem), ...items.filter((item) => !isHostProblem(item))];
+}
+
 /** Last line of the text report: ready, only sign-in left, or failed checks to fix. */
 function closingLine(report: NonInteractiveInitReport, failed: InitCheck[]): string {
   if (report.result === "success") {
@@ -49,7 +62,11 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
     return lines;
   }
   lines.push("", "Checks:");
-  for (const check of report.checks) {
+  const checks = hostProblemsFirst(
+    report.checks,
+    (check) => HOST_CHECKS.has(check.name) && (check.status === "fail" || check.status === "warn"),
+  );
+  for (const check of checks) {
     lines.push(`  ${STATUS_ICON[check.status]} ${check.name}: ${check.message}`);
     if (check.hint) lines.push(`     → ${check.hint}`);
   }
@@ -59,10 +76,12 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
   }
   if (report.nextSteps.length > 0) {
     lines.push("", "Next steps:");
-    report.nextSteps.forEach((step, index) => {
-      lines.push(`  ${index + 1}. ${step.message}:`);
-      lines.push(`     ${step.command}`);
-    });
+    hostProblemsFirst(report.nextSteps, (step) => HOST_STEPS.has(step.id)).forEach(
+      (step, index) => {
+        lines.push(`  ${index + 1}. ${step.message}:`);
+        lines.push(`     ${step.command}`);
+      },
+    );
   }
   for (const warning of report.warnings) lines.push("", `⚠️  ${warning}`);
   const failed = report.checks.filter((check) => check.status === "fail");

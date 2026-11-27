@@ -569,9 +569,12 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
       const wizard = await runWizard();
       const output = wizard.output;
       expect(wizard.seen, output).toEqual(
-        expect.arrayContaining(["tracker", "tasks-dir", "query", "settings", "sign-in", "relay"]),
+        expect.arrayContaining(["tracker", "tasks-dir", "query", "sign-in", "relay"]),
       );
       expect(output).toContain("✅ Query works: 1 task(s) match right now.");
+      // No settings question: the recommended settings are written.
+      expect(wizard.seen).not.toContain("ci-repair");
+      expect(output).toContain("💾 Wrote the recommended worker settings to workspace.toml (");
       expect(output).toContain("📋 Readiness (the same checks as `devintern worker doctor`):");
       expect(output).toContain(
         "👉 Worker setup saved. One step left: sign in to begin your 14-day free Worker Pilot, no card required.",
@@ -635,7 +638,6 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
       ],
       ["token", /GitHub token for creating pull requests[^\n]*: $/, "\r"],
       ["query", /Ready-tasks query[^\n]*: $/, "status=todo\r"],
-      ["settings", /Use the recommended worker settings[^\n]*\]: $/, "\r"],
       ["relay-sign-in", /Sign in now to connect the relay[^\n]*\]: $/, "n\r"],
       ["ci-repair", /Automatically repair failing CI[^\n]*\]: $/, "n\r"],
       ["hours", /Limit new-task pickup to active hours[^\n]*\]: $/, "n\r"],
