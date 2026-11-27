@@ -11,6 +11,8 @@
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
+import { parseEnvText, repoCredentialEnv } from "@devintern/workspace";
+
 import {
   gitHubSlugFromRemote,
   resolveFleetEventTeam,
@@ -57,9 +59,10 @@ export const WORKSPACE_PIPELINE_DEFAULT_ENV = "DEVINTERN_WORKSPACE_PIPELINE_DEFA
 export const ACTIONED_SOURCE_ENV = "DEVINTERN_ACTIONED_SOURCE";
 
 /**
- * Parse a dotenv-style file into a record (same semantics as the tracker
- * config loader: `KEY=value`, `#` comments, optional single/double quotes,
- * and an optional shell `export ` prefix). Missing files yield an empty record.
+ * Parse a dotenv-style file into a record (`KEY=value`, `#` comments,
+ * optional single/double quotes, and an optional shell `export ` prefix; the
+ * syntax is shared with `devpm` through `@devintern/workspace`). Missing files
+ * yield an empty record; an unreadable file throws.
  */
 export function parseEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) {
@@ -69,28 +72,7 @@ export function parseEnvFile(path: string): Record<string, string> {
 }
 
 /** {@link parseEnvFile} over already-read text. */
-export function parseEnvFileContent(content: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim().replace(/^export\s+/, "");
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    const [key, ...valueParts] = trimmed.split("=");
-    if (!key || valueParts.length === 0) {
-      continue;
-    }
-    let value = valueParts.join("=").trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    env[key.trim()] = value;
-  }
-  return env;
-}
+export const parseEnvFileContent = parseEnvText;
 
 /** Apply shared workspace values to the worker process before its license gate. */
 export function applyWorkspaceProcessEnv(workspaceDir: string): void {
@@ -104,14 +86,7 @@ export function buildRepoCredentialEnv(
   repo: RepoConfig,
   workspaceDir: string,
 ): Record<string, string> {
-  const repoFileEnv = repo.envFile
-    ? parseEnvFile(isAbsolute(repo.envFile) ? repo.envFile : join(workspaceDir, repo.envFile))
-    : {};
-  return {
-    ...parseEnvFile(workspaceEnvPath(workspaceDir)),
-    ...repoFileEnv,
-    ...repo.env,
-  };
+  return repoCredentialEnv(repo, workspaceDir, parseEnvFile);
 }
 
 // Defined next to the config parser (which validates `sync_team_prs`

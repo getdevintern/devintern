@@ -376,13 +376,17 @@ export function fleetAutoMergePolicyFingerprint(
  * Build the fleet auto-merge runner: the repo's live policy (repo path lists
  * replace the workspace's), its checkout and env, and the shared supervisor.
  */
-export function createFleetAutoMerge(
-  deps: FleetEventDeps,
-): (
+export function createFleetAutoMerge(deps: FleetEventDeps): (
   slug: string,
   prNumber: number,
   expectedHeadSha: string,
-  options?: { lastAttempt: boolean; onStart?: () => void; runId?: number; ciWaitPosted?: string },
+  options?: {
+    lastAttempt: boolean;
+    onStart?: () => void;
+    runId?: number;
+    ciWaitPosted?: string;
+    team?: boolean;
+  },
 ) => Promise<AutoMergeResult> {
   const { config, workspaceDir, repoManager } = deps;
   const runAutoMerge = deps.runAutoMerge ?? runAutoMergeViaCli;
@@ -411,6 +415,9 @@ export function createFleetAutoMerge(
           reviewLabel: settings.reviewLabel,
           recheckOnPush: settings.recheckOnPush,
           ...(autoMergeRequireChecksFor(settings, repo) ? { requireChecks: true } : {}),
+          // Teammates' PRs: never rely on GitHub to refuse a merge that
+          // skips required reviews (an admin credential may bypass them).
+          ...(options?.team ? { requireApproval: true } : {}),
         },
         expectedHeadSha,
         lastAttempt: options?.lastAttempt ?? false,

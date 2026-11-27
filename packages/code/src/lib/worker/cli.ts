@@ -255,14 +255,19 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
 }
 
 const WORKER_INIT_USAGE = [
-  "Usage: devintern worker init [--no-service]",
+  "Usage: devintern worker init [--customize] [--no-service]",
   "       devintern worker init --non-interactive --tracker <id> [--task-query <query>]",
   "                             [--repo-from-cwd] [--env-file <path>] [--yes]",
   "                             [--sign-in <method>] [--remove-env-file] [--create-label] [--json]",
   "",
   "Interactively configure unattended automation and a native user service.",
   "",
+  "Checks this host (agent CLI, git, service manager) first, then writes the",
+  "recommended worker settings to a new workspace without asking.",
+  "",
   "Options:",
+  "  --customize         Ask each worker setting (CI repair, conflicts, active hours)",
+  "                      and offer Sentry auto-fixes instead of the recommended settings",
   "  --no-service        Skip the install-and-launch offer for the systemd/launchd service",
   "",
   "Non-interactive mode (coding agents, scripts, SSH without a TTY):",
@@ -408,8 +413,14 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
   const trackerManager = new TaskTrackerManager();
   let exitCode = 1;
   try {
+    const noService = args.some((arg) => arg === "--no-service");
     const result = await runWorkerInit({
-      noService: args.some((arg) => arg === "--no-service"),
+      noService,
+      customize: args.includes("--customize"),
+      checkHost: async () => {
+        const { defaultCheckHost } = await import("../init/worker-init-host");
+        return defaultCheckHost({ noService });
+      },
       devinternLabelOps: defaultDevinternLabelOps,
       dryRunQuery: async (query) => {
         const result = await trackerManager.getClient().searchTasks(query);

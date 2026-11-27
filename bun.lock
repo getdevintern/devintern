@@ -59,6 +59,7 @@
         "@devintern/task-trackers": "workspace:*",
         "@devintern/text-formatter": "workspace:*",
         "@devintern/utils": "workspace:*",
+        "@devintern/workspace": "workspace:*",
         "@types/bun": "^1.4.0",
         "@types/node": "^20.10.0",
         "bun-types": "1.4.0",
@@ -149,6 +150,7 @@
         "@devintern/task-trackers": "workspace:*",
         "@devintern/text-formatter": "workspace:*",
         "@devintern/utils": "workspace:*",
+        "@devintern/workspace": "workspace:*",
         "@types/bun": "1.4.0",
       },
       "peerDependencies": {
@@ -163,6 +165,7 @@
         "@devintern/agent-harness": "workspace:*",
         "@devintern/task-trackers": "workspace:*",
         "@devintern/utils": "workspace:*",
+        "@devintern/workspace": "workspace:*",
         "@getdevintern/pm": "workspace:*",
         "@mdxeditor/editor": "^4.5.0",
         "@sentry/node": "10.70.0",
@@ -223,6 +226,17 @@
       "version": "0.1.0",
       "dependencies": {
         "@sentry/node": "^10.70.0",
+      },
+      "devDependencies": {
+        "@types/bun": "1.4.0",
+        "typescript": "^5.3.0",
+      },
+    },
+    "packages/workspace": {
+      "name": "@devintern/workspace",
+      "version": "0.1.0",
+      "dependencies": {
+        "smol-toml": "1.9.1",
       },
       "devDependencies": {
         "@types/bun": "1.4.0",
@@ -397,6 +411,8 @@
     "@devintern/text-formatter": ["@devintern/text-formatter@workspace:packages/text-formatter"],
 
     "@devintern/utils": ["@devintern/utils@workspace:packages/utils"],
+
+    "@devintern/workspace": ["@devintern/workspace@workspace:packages/workspace"],
 
     "@dotenvx/dotenvx": ["@dotenvx/dotenvx@1.75.1", "", { "dependencies": { "@dotenvx/primitives": "^0.8.0", "commander": "^11.1.0", "conf": "^10.2.0", "dotenv": "^17.2.1", "enquirer": "^2.4.1", "env-paths": "^2.2.1", "execa": "^5.1.1", "fdir": "^6.2.0", "ignore": "^5.3.0", "object-treeify": "1.1.33", "open": "^8.4.2", "picomatch": "^4.0.4", "systeminformation": "^5.22.11", "undici": "^7.11.0", "which": "^4.0.0", "yocto-spinner": "^1.1.0" }, "bin": { "dotenvx": "src/cli/dotenvx.js" } }, "sha512-/BITOC9dmS/edY2zQwZNicQ059O6RKabtQfyEafV0nGtfYRNHYy1DIPiYVcov40+tob9hfmBnbR963dS+EQ1DQ=="],
 
@@ -2103,6 +2119,8 @@
     "slice-ansi": ["slice-ansi@8.0.0", "", { "dependencies": { "ansi-styles": "^6.2.3", "is-fullwidth-code-point": "^5.1.0" } }, "sha512-stxByr12oeeOyY2BlviTNQlYV5xOj47GirPr4yA1hE9JCtxfQN0+tVbkxwCtYDQWhEKWFHsEK48ORg5jrouCAg=="],
 
     "smart-buffer": ["smart-buffer@4.2.0", "", {}, "sha512-94hK0Hh8rPqQl2xXc3HsaBoOXKV20MToPkcXvwbISWLEs+64sBq5kFgn2kJDHb1Pry9yrP0dxrCI9RRci7RXKg=="],
+
+    "smol-toml": ["smol-toml@1.9.1", "", {}, "sha512-j7WyPdf0CJoutMzMoPLF/bVXHtKZIT9Rb4eGeEbWw8X2t5oirjPgpL+OpaENZrILYaXqYwnVH+qgUwVbl+pUJQ=="],
 
     "socks": ["socks@2.8.10", "", { "dependencies": { "ip-address": "^10.1.1", "smart-buffer": "^4.2.0" } }, "sha512-e0VyvkVTwVYViNovRkZ9aodhxVlyoMn7eJhVUPxZ+eK9P/7CBkxvvsBOHqFPEH416726W8tLXXXjKwqgTErrCQ=="],
 

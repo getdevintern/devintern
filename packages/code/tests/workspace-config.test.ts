@@ -26,6 +26,7 @@ import {
   workspaceEnvPath,
   worktreesDir,
 } from "../src/lib/workspace/paths";
+import { teamAutoMergeSlugs } from "../src/lib/workspace/team-pr-sync";
 
 const VALID_CONFIG = `
 [workspace]
@@ -176,6 +177,50 @@ remote = "https://gitlab.com/acme/widgets.git"
 sync_team_prs = false
 `);
     expect(findRepo(config, "widgets")?.syncTeamPrs).toBe(false);
+  });
+
+  test("auto_merge_team_prs is off by default and parses as a per-repo boolean", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+auto_merge_team_prs = true
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
+`);
+    expect(findRepo(config, "backend")?.autoMergeTeamPrs).toBe(true);
+    expect(findRepo(config, "frontend")?.autoMergeTeamPrs).toBeUndefined();
+    expect(teamAutoMergeSlugs(config)).toEqual(["acme/backend"]);
+  });
+
+  test("rejects a non-boolean or non-GitHub auto_merge_team_prs", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+auto_merge_team_prs = "yes"
+`),
+    ).toThrow(/\[\[repos\]\]\[0\]\.auto_merge_team_prs must be a boolean/);
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "widgets"
+remote = "https://gitlab.com/acme/widgets.git"
+auto_merge_team_prs = true
+`),
+    ).toThrow(/auto_merge_team_prs is GitHub-only; "widgets"/);
   });
 
   test("rejects an empty pipeline_file value", () => {

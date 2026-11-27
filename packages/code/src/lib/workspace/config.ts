@@ -13,6 +13,7 @@ import { parseWorkerScheduleSection } from "../worker/schedule";
 import { parseEstimationEntries } from "../automation/estimation-config";
 import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
+import { readTeamPrFlags } from "./config-team-prs";
 import { parseTrackerSettings } from "./tracker-settings";
 import { validateManualOnlyReferences, workerWorkspaceView } from "./manual-only";
 import { DEPENDENCY_MODES, isDependencyMode } from "../dependencies/gate";
@@ -567,19 +568,9 @@ function parseReposSection(
       continue;
     }
     const env = readEnvTable(table, label, errors);
-    const syncTeamPrs = readOptionalBoolean(table, "sync_team_prs", label, errors);
     const manualOnly = readOptionalBoolean(table, "manual_only", label, errors);
     const requireChecks = readOptionalBoolean(table, "auto_merge_require_checks", label, errors);
     const gitAuthor = readGitAuthor(table, label, errors) ?? inherited.gitAuthor;
-    // Team-PR discovery uses GitHub's open-PR list and author_association;
-    // there is no GitLab/Bitbucket equivalent wired, so reject instead of
-    // silently doing nothing.
-    if (syncTeamPrs === true && !(env.GITHUB_REPO ?? gitHubSlugFromRemote(remote ?? ""))) {
-      errors.push(
-        `${label}.sync_team_prs is GitHub-only; "${name}" does not use a github.com remote ` +
-          "(or an inline GITHUB_REPO).",
-      );
-    }
     repos.push({
       name,
       remote: remote ?? "",
@@ -605,7 +596,13 @@ function parseReposSection(
       ...repoAutoMergeReview(table, label, errors),
       ...(requireChecks === undefined ? {} : { autoMergeRequireChecks: requireChecks }),
       envFile: readString(table, "env_file", label, errors),
-      ...(syncTeamPrs === undefined ? {} : { syncTeamPrs }),
+      ...readTeamPrFlags(
+        table,
+        label,
+        name,
+        Boolean(env.GITHUB_REPO ?? gitHubSlugFromRemote(remote ?? "")),
+        errors,
+      ),
       ...(manualOnly === true ? { manualOnly } : {}),
       env,
     });

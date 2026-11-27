@@ -81,6 +81,7 @@
     "@devintern/license-check": "workspace:*",
     "@devintern/task-trackers": "workspace:*",
     "@devintern/utils": "workspace:*",
+    "@devintern/workspace": "workspace:*",
     "@devintern/text-formatter": "workspace:*",
     "@types/bun": "^1.4.0",
     "@types/node": "^20.10.0",

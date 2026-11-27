@@ -553,9 +553,12 @@ async function offerService(ctx: PromptRun): Promise<ServiceStepResult> {
     },
     deps: { platform, homedir: deps.homedir, uid: deps.uid, run: deps.run },
   };
-  const manager = await (deps.checkServiceManager ?? (() => checkServiceManager(runtime.deps)))();
+  // The host step already asked the service manager; do not ask (or say it) twice.
+  const checked = ctx.host?.checks.serviceManager;
+  const manager =
+    checked ?? (await (deps.checkServiceManager ?? (() => checkServiceManager(runtime.deps)))());
   if (!manager.available) {
-    ctx.log(`   A background service is not available here: ${manager.reason}.`);
+    if (!checked) ctx.log(`   A background service is not available here: ${manager.reason}.`);
     ctx.log("   Run the worker in the foreground instead: `devintern worker`");
     ctx.log("   (inside tmux or screen to keep it running after you disconnect).");
     return { serviceRunning: false, serviceInstall: "unavailable" };
