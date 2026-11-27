@@ -294,29 +294,20 @@ async function runWorkerInitNonInteractive(args: string[]): Promise<never> {
     parseNonInteractiveInitArgs,
     runNonInteractiveWorkerInit,
     unexpectedFailureReport,
-    WORKER_INIT_JSON_SCHEMA,
-    WORKER_INIT_JSON_VERSION,
+    emptyInitReport,
   } = await import("../init/worker-init-noninteractive");
   const { renderNonInteractiveReport } = await import("../init/worker-init-noninteractive-text");
   const parsed = parseNonInteractiveInitArgs(args);
   if (!parsed.ok) {
     if (parsed.json) {
+      const { schema, version, result, ...rest } = emptyInitReport(resolveWorkspaceDir());
       const doc = {
-        schema: WORKER_INIT_JSON_SCHEMA,
-        version: WORKER_INIT_JSON_VERSION,
-        result: "failure",
+        schema,
+        version,
+        result,
         error: parsed.error,
         code: "invalid_arguments",
-        workspaceDir: resolveWorkspaceDir(),
-        tracker: null,
-        taskQuery: null,
-        repo: null,
-        filesWritten: [],
-        changed: false,
-        persisted: false,
-        warnings: [],
-        checks: [],
-        nextSteps: [],
+        ...rest,
       };
       process.stdout.write(`${JSON.stringify(doc, null, 2)}\n`);
     } else {
@@ -398,7 +389,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     process.exit(1);
   }
   loadEnvironment();
-  const { runWorkerInit } = await import("../init/worker-init");
+  const { checkWorkerEntitlement, runWorkerInit } = await import("../init/worker-init");
   const { isInteractive } = await import("../init/wizard");
   if (!isInteractive(args, process.stdin)) {
     console.log("❌ 'devintern worker init' needs a terminal for its prompts.");
@@ -410,17 +401,6 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     process.exit(1);
   }
   const trackerManager = new TaskTrackerManager();
-  // Worded for someone setting up the worker in a terminal, and naming the
-  // workspace sign-in command (the worker reads the workspace session).
-  const checkEntitlement = (workspaceDir: string) =>
-    checkLicense({
-      productKey: "devintern/code",
-      supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
-      requireAutomation: true,
-      allowTrial: true,
-      setup: true,
-      loginCommand: "devintern worker login",
-    });
   let exitCode = 1;
   try {
     const result = await runWorkerInit({
@@ -430,7 +410,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
         return result.tasks.length;
       },
       checkAutomationLicense: async (workspaceDir) => {
-        const license = await checkEntitlement(workspaceDir);
+        const license = await checkWorkerEntitlement(workspaceDir);
         return license.valid ? null : license.message;
       },
       collectReadiness: async (workspaceDir) => {
@@ -444,7 +424,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
         }
         return collectWorkerDoctorChecks(
           { workspacePath: workspaceConfigPath(workspaceDir) },
-          { processEnv, checkEntitlement },
+          { processEnv, checkEntitlement: checkWorkerEntitlement },
         );
       },
     });

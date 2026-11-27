@@ -14,7 +14,7 @@ import {
   writeSentryErrorMonitor,
 } from "../workspace/init";
 import { workspaceConfigPath } from "../workspace/paths";
-import { readEnvFile } from "./worker-init-noninteractive";
+import { readEnvFile } from "./worker-init-noninteractive-plan";
 import { defaultValidateSentry } from "./worker-sentry-setup";
 import type { SentryValidationOptions } from "./worker-sentry-setup";
 
