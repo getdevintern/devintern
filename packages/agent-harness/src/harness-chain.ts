@@ -28,7 +28,12 @@
  */
 
 import { DEFAULT_HARNESS_NAME, getHarness, HARNESS_ALIASES, listHarnesses } from "./registry.js";
-import { getHarnessCliCommand, isHarnessCliAvailable, resolveExecutablePath } from "./resolver.js";
+import {
+  deepseekReasonixMigrationHint,
+  getHarnessCliCommand,
+  isHarnessCliAvailable,
+  resolveExecutablePath,
+} from "./resolver.js";
 import { detectSandboxProviders } from "./sandbox/detect.js";
 import type { DetectedSandboxProvider } from "./sandbox/detect.js";
 import { probeHarnessForDecision } from "./sandbox/harness-probe.js";
@@ -256,13 +261,28 @@ export function resolveHarnessChainSync(options: HarnessChainOptions = {}): Reso
       ? options.isInstalled({ name: harness.name, path })
       : isHarnessCliAvailable(path);
 
+    // A stale deepseek path can still point at the community Reasonix CLI.
+    // Since it is executable, installability does not catch the mismatch;
+    // emit the same migration guidance used by single-harness resolution.
+    if (installed && harness.name === "deepseek") {
+      deepseekReasonixMigrationHint(harness.name, path, warnDeprecated !== false);
+    }
+
     if (enforceInstalled && checkInstalled && !installed) {
       if (reportIssues) {
         const envKey = harness.name.toUpperCase().replace(/-/g, "_");
+        const migrationHint = deepseekReasonixMigrationHint(
+          harness.name,
+          path,
+          warnDeprecated !== false,
+        );
         issues.push({
           requested: canonical,
           reason: "not-installed",
-          message: `Harness "${canonical}" is not installed (looked for "${path}"); skipping it. Install its CLI or set ${envKey}_CLI_PATH to the executable.`,
+          message:
+            `Harness "${canonical}" is not installed (looked for "${path}"); skipping it. ` +
+            `Install its CLI or set ${envKey}_CLI_PATH to the executable.` +
+            (migrationHint ? ` ${migrationHint}` : ""),
         });
       }
       return null;
