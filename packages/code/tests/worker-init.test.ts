@@ -202,6 +202,9 @@ describe("runWorkerInit", () => {
       platform: "linux" as NodeJS.Platform,
       homedir: tempDir,
       checkServiceManager: async () => ({ available: true as const }),
+      // Never run the real systemctl/launchctl/loginctl: the unit name is fixed,
+      // so a real call would restart the developer's live worker.
+      run: async () => ({ status: 0, stdout: "", stderr: "" }),
       // The honest start check would wait for a real worker lock.
       verifyServiceStart: async () => ({ state: "running" as const, pid: 4242 }),
       ...overrides,
