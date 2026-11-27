@@ -298,6 +298,7 @@ export async function runNonInteractiveWorkerInit(
 const INPUT_CHECKS = new Set([
   "tracker-auth",
   "credentials",
+  "github-token",
   "query",
   "repo",
   "workspace-config",
@@ -350,6 +351,9 @@ function restoreWrites(run: FlagsRun): void {
   report.filesWritten = [];
   report.changed = false;
   report.persisted = problems.length > 0;
+  // The token went into the same rolled-back `.env`, so the report must not
+  // name a source for a token that is no longer saved.
+  delete report.tokenSource;
   report.warnings.push(
     problems.length === 0
       ? "Nothing was saved: the tracker or repository checks failed, so the files this run wrote were restored."
@@ -429,6 +433,20 @@ function nextStepsFor(options: {
       },
     }),
   );
+  // A non-GitHub tracker still runs without the optional PR token, so the
+  // warning comes with the same fix step a required credential failure uses.
+  if (
+    !failed &&
+    options.checks.some((check) => check.name === "github-token" && check.status === "warn")
+  ) {
+    steps.push({
+      id: "fix-credentials",
+      message:
+        "Optional: the GitHub CLI token was not saved. Add a GITHUB_TOKEN that can open pull " +
+        "requests to the workspace .env, or pass one with --env-file",
+      command: initRerunCommand(args, ctx, { envFile: options.envFilePath ?? "<path>" }),
+    });
+  }
   // Warn-only, so not a blocker above: a label the query names is missing.
   const missingLabel = options.checks.find(
     (check) => check.name === QUERY_LABELS_CHECK && check.status === "warn",
