@@ -47,7 +47,7 @@ import type { CiFailureFeedback } from "../review/formatter";
 import { classifyAgentPrState, resolveAgentPrMerge } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
 import { childOutputMode, forwardChildOutput } from "../observability/child-output";
-import { WORKTREE_BUSY_EXIT_CODE } from "../worker/usage-limit-protocol";
+import { runWithFailover } from "../worker/failover";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
 import type {
@@ -216,75 +216,83 @@ export function runCiFixViaCli(
   } = {},
 ): Promise<CiFixResult> {
   const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
-  return serializePrRun<CiFixResult>(
-    opts.serializationKey ?? repo,
-    prNumber,
-    () =>
-      new Promise((resolve) => {
-        let settled = false;
-        let killTimer: ReturnType<typeof setTimeout> | undefined;
-        let abort: (() => void) | undefined;
-        const finish = (ok: CiFixResult) => {
-          if (settled) return;
-          settled = true;
-          if (abort) opts.signal?.removeEventListener("abort", abort);
-          if (killTimer) clearTimeout(killTimer);
-          // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
-          resolve(ok);
-        };
-        if (opts.signal?.aborted) {
-          finish(false);
-          return;
-        }
-        const detached = process.platform !== "win32";
-        const child = spawn(
-          process.execPath,
-          [
-            process.argv[1],
-            "address-review",
-            prUrl,
-            "--ci-feedback",
-            feedbackPath,
-            ...(opts.expectedHeadSha ? ["--expected-head", opts.expectedHeadSha] : []),
-          ],
-          {
-            stdio: ["inherit", childOutputMode(), childOutputMode()],
-            cwd: opts.cwd,
-            env: opts.env ?? process.env,
-            detached,
-          },
-        );
-        forwardChildOutput(child, `ci-fix ${prUrl}`);
-        abort = () => {
-          if (child.pid === undefined) return;
-          try {
-            if (detached) process.kill(-child.pid, "SIGTERM");
-            else child.kill("SIGTERM");
-          } catch {
-            // The child may already have exited.
+  return serializePrRun<CiFixResult>(opts.serializationKey ?? repo, prNumber, async () => {
+    // CI repair is an agent job like any other, so it must run through the
+    // shared failover: the worker's active harness is pinned into the child,
+    // a usage limit fails over to the next chain entry, and an exhausted
+    // chain defers instead of burning the PR's retry budget on a harness that
+    // is still limited.
+    const status = await runWithFailover(
+      (env) =>
+        new Promise<number>((resolve) => {
+          let settled = false;
+          let killTimer: ReturnType<typeof setTimeout> | undefined;
+          let abort: (() => void) | undefined;
+          const finish = (code: number) => {
+            if (settled) return;
+            settled = true;
+            if (abort) opts.signal?.removeEventListener("abort", abort);
+            if (killTimer) clearTimeout(killTimer);
+            // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
+            resolve(code);
+          };
+          if (opts.signal?.aborted) {
+            finish(1);
+            return;
           }
-          killTimer = setTimeout(() => {
+          const detached = process.platform !== "win32";
+          const child = spawn(
+            process.execPath,
+            [
+              process.argv[1],
+              "address-review",
+              prUrl,
+              "--ci-feedback",
+              feedbackPath,
+              ...(opts.expectedHeadSha ? ["--expected-head", opts.expectedHeadSha] : []),
+            ],
+            {
+              stdio: ["inherit", childOutputMode(), childOutputMode()],
+              cwd: opts.cwd,
+              env,
+              detached,
+            },
+          );
+          forwardChildOutput(child, `ci-fix ${prUrl}`);
+          abort = () => {
+            if (child.pid === undefined) return;
             try {
-              if (detached) process.kill(-child.pid!, "SIGKILL");
-              else child.kill("SIGKILL");
+              if (detached) process.kill(-child.pid, "SIGTERM");
+              else child.kill("SIGTERM");
             } catch {
               // The child may already have exited.
             }
-          }, 5_000);
-          killTimer.unref?.();
-        };
-        opts.signal?.addEventListener("abort", abort, { once: true });
-        child.on("close", (code) => {
-          // Worktree held by another PR job on the same head branch: defer so
-          // the watcher keeps its retry budget and posts no escalation.
-          finish(code === WORKTREE_BUSY_EXIT_CODE ? "deferred" : code === 0);
-        });
-        child.on("error", (error) => {
-          console.error(`❌ Failed to spawn ci-fix for ${prUrl}: ${error.message}`);
-          finish(false);
-        });
-      }),
-  );
+            killTimer = setTimeout(() => {
+              try {
+                if (detached) process.kill(-child.pid!, "SIGKILL");
+                else child.kill("SIGKILL");
+              } catch {
+                // The child may already have exited.
+              }
+            }, 5_000);
+            killTimer.unref?.();
+          };
+          opts.signal?.addEventListener("abort", abort, { once: true });
+          child.on("close", (code) => {
+            finish(code ?? 1);
+          });
+          child.on("error", (error) => {
+            console.error(`❌ Failed to spawn ci-fix for ${prUrl}: ${error.message}`);
+            finish(1);
+          });
+        }),
+      opts.env ?? process.env,
+    );
+    // `runWithFailover` already maps a worktree held by another PR job (exit 4)
+    // to `deferred`, so the watcher keeps its retry budget in that case too.
+    if (status === "deferred") return "deferred";
+    return status === "ok";
+  });
 }
 
 interface CachedCiSnapshot {

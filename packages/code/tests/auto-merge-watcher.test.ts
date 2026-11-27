@@ -14,11 +14,11 @@ import {
   autoMergeCliArgs,
   parseAutoMergeResultLine,
   runAutoMergeViaCli,
-  usageLimitRetryAt,
 } from "../src/lib/acquirers/auto-merge-cli";
 import type { AutoMergeResult } from "../src/lib/review/auto-merge";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
+import { usageLimitRetryAt } from "../src/lib/worker/usage-limit-protocol";
 
 const REPO = "acme/widgets";
 const HEAD = "a".repeat(40);

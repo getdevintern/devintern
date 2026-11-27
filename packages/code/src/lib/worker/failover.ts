@@ -17,6 +17,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import {
+  parseHarnessList,
   resetHarnessSandboxProbeCache,
   resetHintToMs,
   resolveHarnessChain,
@@ -416,6 +417,24 @@ export async function startWorkerFailover(
 /** The process-wide controller, or null when failover has not been started. */
 export function getWorkerFailover(): WorkerFailover | null {
   return instance;
+}
+
+/**
+ * Harness to record on a run the worker opens before its CLI child resolves
+ * one (conflict resolution, auto-merge review).
+ *
+ * The run row is written by the parent, so the child's own harness choice is
+ * not known yet: use the harness a pinned job will run, otherwise the failover
+ * entry that is active now, otherwise the configured primary. Reading
+ * `AGENT_HARNESS[0]` alone mislabels runs that failed over to a fallback.
+ *
+ * @param pinned - Harness explicitly pinned by the job, when it has one
+ * @returns Harness id for the run record
+ */
+export function runHarnessForRecording(pinned?: string): string {
+  return (
+    pinned ?? getWorkerFailover()?.activeName ?? parseHarnessList(process.env.AGENT_HARNESS)[0]
+  );
 }
 
 /**

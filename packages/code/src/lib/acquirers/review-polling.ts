@@ -36,8 +36,7 @@
 import { startFirstTickInBackground } from "./background-tick";
 import { captureError } from "@devintern/utils";
 
-import { parseHarnessList } from "@devintern/agent-harness";
-
+import { runHarnessForRecording } from "../worker/failover";
 import {
   agentPrKey,
   agentPrStateCursorSource,
@@ -206,7 +205,12 @@ export interface ReviewPollingAcquirerOptions {
   maxConcurrentBaseSyncs?: number | (() => number);
   /** Best-effort automatic-attempt run recorder. */
   runStore?: Pick<RunStore, "createRun" | "finishRun">;
-  harness?: string;
+  /**
+   * Harness a conflict-resolution job is pinned to, when the workspace names
+   * one. A getter keeps a live reload of the pin reflected in run records;
+   * without a pin the run records the failover entry that will run it.
+   */
+  harness?: string | (() => string | undefined);
   now?: () => number;
   /**
    * Repo slugs (`owner/repo`) this worker manages. Open registry rows for
@@ -998,7 +1002,11 @@ export class ReviewPollingAcquirer implements Acquirer {
           prNumber,
           prUrl: `https://github.com/${repo}/pull/${prNumber}`,
           branch,
-          harness: this.options.harness ?? parseHarnessList(process.env.AGENT_HARNESS)[0],
+          harness: runHarnessForRecording(
+            typeof this.options.harness === "function"
+              ? this.options.harness()
+              : this.options.harness,
+          ),
           attempt,
         }) ?? null;
     } catch (error) {
