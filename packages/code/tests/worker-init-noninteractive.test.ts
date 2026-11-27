@@ -793,8 +793,11 @@ describe("runNonInteractiveWorkerInit", () => {
         expect(report.nextSteps[0].message).toContain(
           "It also pairs the relay and installs and starts the worker service",
         );
-        expect(renderNonInteractiveReport(report).join("\n")).toContain(
-          "that also installs and starts the worker service",
+        const text = renderNonInteractiveReport(report).join("\n");
+        expect(text).toContain("that also installs and starts the worker service");
+        // The person-facing message keeps the relay and service note.
+        expect(text).toContain(
+          "into this command on this host. It also pairs the relay and installs and starts the worker service",
         );
       });
 

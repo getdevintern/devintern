@@ -107,6 +107,25 @@ describe("humanNextStep", () => {
     );
   });
 
+  test("complete-sign-in keeps the JSON message's after-sign-in note", () => {
+    const step = (suffix: string) => ({
+      id: "complete-sign-in",
+      message:
+        "A person opens the sign-in url in any browser and signs in. The browser then lands on a " +
+        "127.0.0.1 page that does not load: pass that page's full address to this command on this host" +
+        suffix,
+      command: "devintern worker login --complete '<address>'",
+    });
+    const full = humanNextStep(
+      step(". It also pairs the relay and installs and starts the worker service"),
+    );
+    expect(full.message).toStartWith("Open the sign-in address in any browser");
+    expect(full.message).toEndWith(
+      "into this command on this host. It also pairs the relay and installs and starts the worker service",
+    );
+    expect(humanNextStep(step("")).message).toEndWith("into this command on this host");
+  });
+
   test("renderNextSteps numbers each step with its command below", () => {
     expect(renderNextSteps([serviceStep(workspaceDir)], { indent: "  " })).toEqual([
       expect.stringMatching(/^ {2}1\. Install and start the worker as a background service/),

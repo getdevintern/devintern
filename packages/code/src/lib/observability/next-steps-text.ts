@@ -97,6 +97,13 @@ function humanSignInCommand(command: string, options: HumanNextStepOptions): str
   return human.replace(/(\sworker login(?:\s--workspace\s(?:'[^']*'|\S+))?)\sgithub(?=\s|$)/, "$1");
 }
 
+/**
+ * The variable note the JSON message ends with, kept on the human message:
+ * `complete-sign-in` ends with ". It also pairs the relay and installs and
+ * starts the worker service" depending on `--no-relay` and `--start`.
+ */
+const TRAILING_NOTE = /\. It also [^.]*$/;
+
 /** One step in the form a person in a terminal runs. */
 export function humanNextStep<T extends NextStep>(step: T, options: HumanNextStepOptions = {}): T {
   const human: T = {
@@ -110,7 +117,9 @@ export function humanNextStep<T extends NextStep>(step: T, options: HumanNextSte
   const message = HUMAN_MESSAGES[step.id];
   // A kept --no-wait means the user wants the url-and-complete flow the JSON
   // message describes.
-  if (message && !human.command.includes("--no-wait")) human.message = message;
+  if (message && !human.command.includes("--no-wait")) {
+    human.message = message + (TRAILING_NOTE.exec(human.message)?.[0] ?? "");
+  }
   return human;
 }
 
