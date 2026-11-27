@@ -349,6 +349,32 @@ describe("runPmInitWizard", () => {
     expect(env).toContain("JIRA_DEFAULT_PROJECT_KEY=PROJ");
   });
 
+  test("fast track: reusing workspace credentials writes pm config only and prints no secrets", async () => {
+    writeFileSync(join(workspaceDir, ".env"), "LINEAR_API_KEY=lin_api_shared_secret\n", "utf8");
+    registerInWorkspace("TASK_TRACKER=linear\nLINEAR_TEAM_KEY=APP\n");
+    const workspaceFiles = [
+      join(workspaceDir, "workspace.toml"),
+      join(workspaceDir, ".env"),
+      join(workspaceDir, "env", "app.env"),
+    ];
+    const before = workspaceFiles.map((path) => readFileSync(path));
+
+    const output: string[] = [];
+    const { prompt, asked } = promptQueue(["y", "", "", ""]);
+    await runPmInitWizard({
+      prompt,
+      probe: okProbe,
+      cwd: tempDir,
+      log: (message) => output.push(message),
+    });
+
+    expect(output.join("\n")).toContain('DevIntern workspace (repo "app")');
+    expect([...output, ...asked].join("\n")).not.toContain("lin_api_shared_secret");
+    expect(readEnv()).toContain("LINEAR_API_KEY=lin_api_shared_secret");
+    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-pm/.env");
+    expect(workspaceFiles.map((path) => readFileSync(path))).toEqual(before);
+  });
+
   test("fast track: declining reuse falls back to the normal flow", async () => {
     mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
     writeFileSync(
