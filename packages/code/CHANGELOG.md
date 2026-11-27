@@ -2,20 +2,56 @@
 
 ## [Unreleased]
 
+## [2.30.0] - 2026-11-27
+
+Onboarding release: set up a worker end to end from a terminal, a script, an SSH session, or a coding agent, with honest readiness at every step and the 14-day Worker Pilot reachable without a browser on the host. The relay routes events per worker, the background service is reliable, agent start failures stop looping silently, @mentions on human-authored PRs work, and a notification center (dashboard inbox, desktop, Slack, webhook) surfaces what needs you. Auto-merge waits on CI and reviews oversized diffs.
+
 ### Upgrade notes
 
 - **Auto-merge reviews each PR once by default.** When the merge-safety agent review leaves a PR open, new commits to it (review fixes, conflict resolutions, updates) no longer start another review; a change to the auto-merge policy still re-checks it. PRs left open without an agent run (deny paths, size limits, review disabled) are still checked again after new commits. **Who is affected:** workspaces with `auto_merge = true`. Set `[workspace].auto_merge_recheck_on_push = true` for the previous behavior. See `docs/code/pr-follow-up.md#auto-merging-safe-prs`
 
 - **Auto-merge reads CI checks before merging a code PR.** A PR with a failing or pending check run or commit status on its head commit stays open, with a status comment naming the failing checks (and `auto_merge_review_label` for failing ones) instead of waiting silently. A repository without CI is the operator's choice, so a commit with no checks at all still merges on the remaining gates; set `auto_merge_require_checks = true` to require at least one passing check. **Who is affected:** workspaces with `auto_merge = true`. The GitHub credential now also needs read access to `Commit statuses` (and `Checks` for a GitHub App), for every auto-merged PR including those that only touch safe paths; if it cannot read them, the PR is not merged. Fine-grained personal access tokens cannot be granted `Checks`, so with one the worker reads the commit's combined CI state instead and names failing check runs only by count. See `docs/code/pr-follow-up.md#ci-checks` and `docs/code/configuration.md#github-authentication`
 
+- **Relay events are routed per worker.** Each worker now registers its own relay identity and owns the repos, GitLab projects, and tracker sources its workspace connected; a new worker starts at the current relay position instead of replaying buffered events. **Who is affected:** accounts with more than one worker on the relay. The first upgraded worker to start owns a shared repo; the other shows a doctor and log warning naming the owner and the `devintern worker connect … --takeover` command. Workers still on an older CLI receive only unowned events. See `docs/code/relay.md#multiple-workers-on-one-account`
+- **Release builds ignore `DEVINTERN_SKIP_LICENSE_CHECK` and `DEVINTERN_API_BASE`.** They only work in development builds now
+- **`auto_merge_review_large_diffs` is removed**: oversized diffs are always reviewed from the PR checkout. Remove the key from `workspace.toml`
+- **`--json` next steps have one shape**: every `nextSteps` entry from `worker init`, `worker doctor`, `worker service`, and `worker connect` is `{id, message, command, url?}`, and `worker status --json` / `worker overview --json` carry `schema`, `version`, and `result`. Scripts reading the old fields need updating
+- **An agent CLI that keeps failing to start is retried at most 5 times** (`DEVINTERN_AGENT_START_MAX_ATTEMPTS`), with backoff, then the run is marked failed with the agent's error
+
 ### Added
 
 - **`auto_merge_require_checks`** (default `false`, workspace-wide or per repo, repo wins) and `devintern auto-merge --require-checks`: code PRs merge only when at least one CI check passed on the head commit, so a commit with no checks waits; `skipped` and `neutral` checks do not count. A PR waiting on CI keeps being checked on the same commit and merges once CI passes; the reason shows in the status comment, on the dashboard's Auto-merge entry, and in `--dry-run` output, which also names failing or pending checks
 - **`worker doctor` reports GitHub credentials that can't read CI status**: with `[workspace].auto_merge` or `ci_failure_fix` on, a new **CI status access** row per GitHub repo fails when the token or GitHub App lacks `Commit statuses: Read` (or `Actions: Read` for CI fixes) and names the env file the token comes from. Before, the missing permission only showed up later, on a PR that would not merge. Missing `Checks` is only a note for tokens (fine-grained tokens can't get it) and a warning for an App; network errors warn. The worker runs the same probe at startup and prints one warning line per failing repo. See `docs/code/configuration.md#github-authentication`
+- **Headless worker setup**: `devintern worker init --non-interactive` (with `--tracker`, `--task-query`, `--repo-from-cwd`, `--env-file`, `--remove-env-file`, `--yes`, `--json`) sets up a worker from a coding agent, script, or SSH session; re-running with the same flags is a no-op (`unchanged`), and a failed credential, query, or repository check leaves no config behind. See `docs/code/worker.md`
+- **Worker Pilot from headless hosts**: `devintern worker login github --no-wait` / `--complete` and `worker init --sign-in <method>`; not being signed in yet is reported as `action_required` (exit 2), not a broken setup. Sign-in on a host without a browser can be finished by pasting the callback address, and a repeated `--no-wait` reuses the same link while it is valid
+- **`devintern worker service install|start|stop|restart|status|uninstall|logs`**: a non-interactive systemd/launchd service with honest status; installing an unchanged, running service does not restart it
+- **Relay pairing without a terminal**: `devintern worker connect github --no-wait --json` and non-interactive Sentry connect; an already-installed GitHub App pairs through the relay authorize URL; `worker doctor` gains a **Relay** row
+- **`worker doctor` reports a `setup` state** (`complete`, `ready`, `action_required`, `not_ready`) and a one-line summary, checks that the GitHub token can push (API permission plus a dry-run push), and gives specific fixes (`fix-credentials`, `fix-query`, `fix-repo-access`, `fix-sandbox`)
+- **Interactive `worker init` is shorter**: one "Use the recommended worker settings?" question replaces the CI, conflict, active-hours, and Sentry questions; Enter skips the sign-in wait; Ctrl+C says what was saved and how to resume; the licence step leads with the free Worker Pilot. It reuses the tracker settings `devintern init` saved and promotes a `manual_only` repo to a worker repo (also via `worker add-repo`)
+- **Notification center**: a dashboard bell, inbox (`#/inbox`), and Overview "Needs you" block, plus desktop, Slack, and signed-webhook delivery with a daily digest; DevIntern-side failures get their own outcome class, real cause, and `internal_error` notifications
+- **Run lineage**: run details show "Sourced from" and "Spawned work" for delegated tasks and `devpm` tickets
+- **Dashboard help section**: report a bug or request a feature from the sidebar, without a run
+- **Plugins get `context.pipelineDir`** to resolve paths relative to the pipeline file (DEV-202)
+- **Auto-merge waits on failing or pending CI** (DEV-198) and reviews oversized diffs from the PR checkout instead of leaving them open
+
+### Fixed
+
+- **@devintern-ai mentions on human-authored PRs now run**: a mention in a PR conversation comment reached a review handler that only read reviews, and relay reviews on non-agent PRs were dropped. Child job output under the service now reaches the worker logs instead of only journald
+- **Agent start failures are visible**: `worker status`, `worker queue`, and `worker service status` show an "Agent start" section with the error and a fix hint; debug worktrees for repeated failures are pruned
+- **Blank machines**: `GITHUB_TOKEN` is given to git for HTTPS remotes, so private repos clone; commits work on hosts without a git identity (the token user's noreply address is used); `service install` works from a bare shell without `XDG_RUNTIME_DIR`
+- **Tracker probes**: Jira credentials are checked with `/myself` (anonymous project search no longer passes), GitHub checks repository access, Trello resolves short board ids; a Jira-style query for the GitHub tracker is rejected with a hint
+- **Readiness finds an agent CLI configured only in the workspace `.env`** instead of reporting it not installed
+- **Relay pairing failures are reported** instead of waiting as pending
+- **Usage limits are charged to the harness the run used**, so failover no longer closes the whole chain
+- **Stacked runs survive their base PR merging mid-run** and keep the work on failure
+- **Doctor and sandbox load the registered checkout's workspace env**; `devintern init` writes the chosen tracker and exits cleanly on Ctrl+D; env files stay owner-only when the wizard rewrites them; `--repo-from-cwd` records the default branch
+- **Secrets**: tracker processing-failure comments are redacted, and all redactors share one credential pattern list
 
 ### Technical
 
 - Tests no longer append fixture tasks to the surrounding DevIntern run's outputs when run inside an agent run (phantom "delegated N tasks" notifications)
+- The legacy per-checkout worker lock is removed (DEV-204)
+- Onboarding golden-path e2e suite runs nightly and gates releases, with a smoke test of the published package
 
 ## [2.29.0] - 2026-11-25
 
