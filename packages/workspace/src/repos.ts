@@ -35,6 +35,8 @@ export interface WorkspaceTeam {
   name: string;
   /** The team's tracker; falls back to `[defaults].tracker`. */
   tracker?: string;
+  /** Whether the team sets its own `tracker` rather than inheriting the default. */
+  declaresTracker: boolean;
   /** Fixed destination repo (`[[repos]]` name); unset for a multi-repo team. */
   repo?: string;
   /** Team env file, absolute or relative to the workspace home. */
@@ -91,12 +93,14 @@ function readTeam(raw: unknown, defaultTracker: string | undefined): WorkspaceTe
   if (!isTable(raw)) return null;
   const name = nonEmptyString(raw.name);
   if (!name) return null;
-  const tracker = nonEmptyString(raw.tracker) ?? defaultTracker;
+  const ownTracker = nonEmptyString(raw.tracker);
+  const tracker = ownTracker ?? defaultTracker;
   const repo = nonEmptyString(raw.repo);
   const envFile = nonEmptyString(raw.env_file);
   return {
     name,
     ...(tracker ? { tracker } : {}),
+    declaresTracker: ownTracker !== undefined,
     ...(repo ? { repo } : {}),
     ...(envFile ? { envFile } : {}),
     env: readEnvTable(raw),
@@ -249,7 +253,9 @@ export function namespacedTeamEnv(
 /**
  * The layers a team adds over a repo's credentials, later winning: its
  * namespaced workspace values, its `env_file`, then its inline `[teams.env]`.
- * `TASK_TRACKER` is the team's tracker, as for the tasks the team polls.
+ * `TASK_TRACKER` is the team's tracker only when the team declares one; a team
+ * that inherits `[defaults].tracker` leaves the repo env's selection alone, as
+ * Code's repo-scoped runs do.
  *
  * @param workspaceEnv - The shared workspace `.env`, already read
  */
@@ -266,7 +272,7 @@ export function teamCredentialEnv(
     ...namespacedTeamEnv(workspaceEnv, team),
     ...teamFileEnv,
     ...team.env,
-    ...(team.tracker ? { TASK_TRACKER: team.tracker } : {}),
+    ...(team.declaresTracker && team.tracker ? { TASK_TRACKER: team.tracker } : {}),
   };
 }
 

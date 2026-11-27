@@ -109,24 +109,37 @@ describe("ProjectSetupWizard helpers", () => {
 
   describe("reusedSecretKeys", () => {
     const inspect = makeInspect({
-      reusableFromCode: { trackerId: "jira", values: {}, secretKeys: ["JIRA_API_TOKEN"] },
+      reusableFromCode: {
+        trackerId: "jira",
+        values: { JIRA_BASE_URL: "https://acme.atlassian.net" },
+        secretKeys: ["JIRA_API_TOKEN"],
+      },
       reusableSource: 'DevIntern workspace (repo "app")',
+      currentEnv: { JIRA_BASE_URL: "https://acme.atlassian.net" },
       currentSecretKeys: ["JIRA_API_TOKEN", "LINEAR_API_KEY"],
     });
+    const jira = { JIRA_BASE_URL: "https://acme.atlassian.net" };
 
     test("code source: only for the tracker DevIntern Code offered", () => {
-      expect(reusedSecretKeys(inspect, "code", "jira")).toEqual(["JIRA_API_TOKEN"]);
-      expect(reusedSecretKeys(inspect, "code", "linear")).toEqual([]);
+      expect(reusedSecretKeys(inspect, "code", "jira", jira)).toEqual(["JIRA_API_TOKEN"]);
+      expect(reusedSecretKeys(inspect, "code", "linear", {})).toEqual([]);
       expect(reuseSourceLabel(inspect, "code")).toBe('DevIntern workspace (repo "app")');
     });
 
     test("project source: the current secrets of the chosen tracker", () => {
-      expect(reusedSecretKeys(inspect, "project", "linear")).toEqual(["LINEAR_API_KEY"]);
-      expect(reusedSecretKeys(inspect, "project", "github")).toEqual([]);
+      expect(reusedSecretKeys(inspect, "project", "linear", {})).toEqual(["LINEAR_API_KEY"]);
+      expect(reusedSecretKeys(inspect, "project", "github", {})).toEqual([]);
+    });
+
+    test("an edited host turns reuse off, so the secret must be typed", () => {
+      const edited = { JIRA_BASE_URL: "https://attacker.example" };
+      expect(reusedSecretKeys(inspect, "code", "jira", edited)).toEqual([]);
+      expect(reusedSecretKeys(inspect, "project", "jira", edited)).toEqual([]);
+      expect(reusedSecretKeys(inspect, "project", "jira", jira)).toEqual(["JIRA_API_TOKEN"]);
     });
 
     test("no source reuses nothing", () => {
-      expect(reusedSecretKeys(inspect, null, "jira")).toEqual([]);
+      expect(reusedSecretKeys(inspect, null, "jira", jira)).toEqual([]);
     });
   });
 });

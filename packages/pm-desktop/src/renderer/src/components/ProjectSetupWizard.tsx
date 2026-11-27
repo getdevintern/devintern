@@ -439,7 +439,7 @@ export function ProjectSetupWizard({
     [trackerId],
   );
 
-  const reusedKeys = reusedSecretKeys(inspect, reuseSource, trackerId);
+  const reusedKeys = reusedSecretKeys(inspect, reuseSource, trackerId, values);
   const reusedFrom = reuseSourceLabel(inspect, reuseSource);
   const reuseRequest = reuseSource && reusedKeys.length > 0 ? reuseSource : null;
 

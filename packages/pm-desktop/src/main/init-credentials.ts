@@ -6,7 +6,13 @@
  * probe and save the main process reads the secrets again, from DevIntern
  * Code's credentials or the project's `.devintern-pm/.env`, and fills each one
  * the user left blank. A value the user typed always wins.
+ *
+ * A reused secret is filled only for the project the main process has loaded
+ * and only when the request keeps the source's host settings (see
+ * `sameTrackerHost`), so a renderer cannot send a stored token elsewhere.
  */
+
+import { resolve } from "node:path";
 
 import {
   PM_TRACKER_SETUP,
@@ -23,6 +29,7 @@ import type {
   RedactedTrackerConfig,
   ReusedSecretsRequest,
 } from "../shared/ipc-contract.ts";
+import { sameTrackerHost } from "../shared/reuse-host.ts";
 import { persistTrackerCredentials, readProjectEnv } from "./project-env.ts";
 
 type ProbeFn = NonNullable<Parameters<typeof probePmConnection>[2]>;
@@ -95,17 +102,38 @@ async function readReusableSecrets(
 }
 
 /**
+ * Keep only the wizard step keys of `trackerId`. Anything else the renderer
+ * sends is dropped, because saving sets `process.env` and some keys there
+ * choose the API host (`LINEAR_API_URL`, `TRELLO_API_BASE_URL`,
+ * `ASANA_API_BASE_URL`) or other main-process behavior (`AGENT_CLI_PATH`).
+ */
+function trackerStepValues(
+  trackerId: string,
+  values: Record<string, string>,
+): Record<string, string> {
+  const picked: Record<string, string> = {};
+  for (const step of PM_TRACKER_SETUP[trackerId] ?? []) {
+    const value = values[step.key];
+    if (typeof value === "string") picked[step.key] = value;
+  }
+  return picked;
+}
+
+/**
  * Fill each secret of `trackerId` left blank in `values` from `reuse`.
  *
- * @returns `values` unchanged without `reuse`
+ * @returns only the tracker's step keys; secrets left blank unless `reuse` is
+ *   given and `values` keep the source's host (else the user must type them)
  */
 export async function fillReusedSecrets(
   trackerId: string,
-  values: Record<string, string>,
+  rawValues: Record<string, string>,
   reuse: ReusedSecretsRequest | undefined,
 ): Promise<Record<string, string>> {
+  const values = trackerStepValues(trackerId, rawValues);
   if (!reuse) return values;
   const source = await readReusableSecrets(trackerId, reuse);
+  if (!sameTrackerHost(trackerId, values, source)) return values;
   const filled = { ...values };
   for (const key of pmTrackerSecretKeys(trackerId)) {
     if (!filled[key]?.trim() && source[key]?.trim()) filled[key] = source[key];
@@ -131,6 +159,22 @@ export function parseReusedSecretsRequest(input: unknown): ReusedSecretsRequest 
     }
   }
   throw Object.assign(new Error("Invalid credential reuse request."), { code: "invalid_input" });
+}
+
+/**
+ * Reject a reuse request for any folder but the project the main process has
+ * loaded (`activeProjectDir`), which is the one the setup wizard is open for.
+ *
+ * @throws `invalid_input` when the folders differ
+ */
+export function assertReuseForActiveProject(
+  reuseProjectDir: string,
+  activeProjectDir: string | null,
+): void {
+  if (activeProjectDir && resolve(reuseProjectDir) === resolve(activeProjectDir)) return;
+  throw Object.assign(new Error("Credential reuse is only available for the open project."), {
+    code: "invalid_input",
+  });
 }
 
 /** Probe tracker credentials, filling reused secrets first. */

@@ -7,6 +7,7 @@ import type {
 } from "../../shared/ipc-contract.ts";
 import { track } from "../analytics.ts";
 import {
+  assertReuseForActiveProject,
   inspectProjectInitForRenderer,
   parseReusedSecretsRequest,
   probeWithReusedSecrets,
@@ -16,7 +17,13 @@ import {
 import { listProjectBindings } from "../project-bindings.ts";
 import { removeConnectedProject } from "../remove-connected-project.ts";
 import { recordRecentProjectDir } from "../recent-projects.ts";
-import { detectGitRepository, getSession, loadProject, switchContext } from "../session.ts";
+import {
+  currentProjectDir,
+  detectGitRepository,
+  getSession,
+  loadProject,
+  switchContext,
+} from "../session.ts";
 import { readSettings, updateSettings } from "../settings.ts";
 import { handle } from "./register.ts";
 
@@ -97,7 +104,9 @@ export function registerProjectIpcHandlers(): void {
   handle(
     IPC_CHANNELS.probeTrackerConnection,
     async (_event, trackerId: string, values: Record<string, string>, reuse: unknown) => {
-      return probeWithReusedSecrets(trackerId, values, parseReusedSecretsRequest(reuse));
+      const request = parseReusedSecretsRequest(reuse);
+      if (request) assertReuseForActiveProject(request.projectDir, currentProjectDir());
+      return probeWithReusedSecrets(trackerId, values, request);
     },
   );
 
@@ -108,12 +117,14 @@ export function registerProjectIpcHandlers(): void {
         "This folder is not a git repository. Choose a git-connected project before setting up PM.",
       );
     }
+    const reuseFromCode = input.reuseFromCode === true;
+    if (reuseFromCode) assertReuseForActiveProject(input.projectDir, currentProjectDir());
     await writeInitialProjectConfig({
       projectDir: input.projectDir,
       trackerId: input.trackerId,
       values: input.values,
       overwrite: input.overwrite === true,
-      reuseFromCode: input.reuseFromCode === true,
+      reuseFromCode,
     });
     const status = await loadProject(input.projectDir);
     await updateSettings({ lastProjectDir: status.projectDir });

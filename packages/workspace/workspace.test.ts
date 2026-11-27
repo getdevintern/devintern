@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -274,6 +274,22 @@ describe("findWorkspaceRepo team credentials", () => {
     const match = await findWorkspaceRepo({ dir: dir(), workspaceDir, origin: null });
     expect(match?.env.TASK_TRACKER).toBe("linear");
     expect(match?.env.LINEAR_API_KEY).toBe("team");
+  });
+
+  test("a team without its own tracker keeps the repo env's TASK_TRACKER", async () => {
+    writeWorkspace(`[[teams]]\nname = "core"\nrepo = "app"\n[teams.env]\nFOO = "1"\n`);
+    const toml = join(workspaceDir, "workspace.toml");
+    writeFileSync(
+      toml,
+      readFileSync(toml, "utf8").replace(
+        'REPO_ONLY = "repo"',
+        'REPO_ONLY = "repo"\nTASK_TRACKER = "jira"',
+      ),
+    );
+    const match = await findWorkspaceRepo({ dir: dir(), workspaceDir, origin: null });
+    expect(match?.team?.name).toBe("core");
+    expect(match?.env.TASK_TRACKER).toBe("jira");
+    expect(match?.env.FOO).toBe("1");
   });
 
   test("several teams fixed to the repo offer nothing from teams", async () => {

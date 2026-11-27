@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertReuseForActiveProject,
   fillReusedSecrets,
   inspectProjectInitForRenderer,
   parseReusedSecretsRequest,
@@ -144,6 +145,38 @@ describe.each(sources)("reused credentials from the $name source", ({ write, lab
     ).rejects.toThrow("JIRA_API_TOKEN");
   });
 
+  test("an edited base URL gets no reused secret", async () => {
+    const seen: Record<string, string>[] = [];
+    const result = await probeWithReusedSecrets(
+      "jira",
+      { ...JIRA_SETTINGS, JIRA_BASE_URL: "https://attacker.example" },
+      { projectDir, source: "code" },
+      async (_trackerId, env) => {
+        seen.push(env);
+      },
+    );
+    expect(result).toEqual({ ok: true });
+    expect(seen[0]?.JIRA_API_TOKEN).toBeUndefined();
+    await expect(
+      writeInitialProjectConfig({
+        projectDir,
+        trackerId: "jira",
+        values: { ...JIRA_SETTINGS, JIRA_BASE_URL: "https://attacker.example" },
+        overwrite: false,
+        reuseFromCode: true,
+      }),
+    ).rejects.toThrow("JIRA_API_TOKEN");
+  });
+
+  test("a trailing slash on the same base URL still reuses the secret", async () => {
+    const filled = await fillReusedSecrets(
+      "jira",
+      { ...JIRA_SETTINGS, JIRA_BASE_URL: `${JIRA_SETTINGS.JIRA_BASE_URL}/` },
+      { projectDir, source: "code" },
+    );
+    expect(filled.JIRA_API_TOKEN).toBe(TOKEN);
+  });
+
   test("a different tracker never gets the reused secret", async () => {
     const filled = await fillReusedSecrets(
       "linear",
@@ -200,6 +233,104 @@ describe("current .devintern-pm/.env secrets", () => {
     const written = await readFile(join(projectDir, ".devintern-pm", ".env"), "utf8");
     expect(written).toContain(`JIRA_API_TOKEN=${TOKEN}`);
     expect(written).toContain("JIRA_EMAIL=new@acme.com");
+  });
+});
+
+describe("renderer values outside the tracker's wizard fields", () => {
+  beforeEach(async () => {
+    await mkdir(join(projectDir, ".devintern-pm"), { recursive: true });
+    await writeFile(
+      join(projectDir, ".devintern-pm", ".env"),
+      envText({ TASK_TRACKER: "linear", LINEAR_API_KEY: "lin-secret" }),
+    );
+  });
+
+  const injected = {
+    LINEAR_API_URL: "https://attacker.example/graphql",
+    TRELLO_API_BASE_URL: "https://attacker.example/trello",
+    ASANA_API_BASE_URL: "https://attacker.example/asana",
+    AGENT_CLI_PATH: "/tmp/evil",
+  };
+
+  test("update drops API host overrides and keeps the stored key", async () => {
+    await updateTrackerCredentials(projectDir, "linear", {
+      LINEAR_DEFAULT_TEAM_KEY: "T",
+      ...injected,
+    });
+    const written = await readFile(join(projectDir, ".devintern-pm", ".env"), "utf8");
+    expect(written).toContain("LINEAR_API_KEY=lin-secret");
+    expect(written).toContain("LINEAR_DEFAULT_TEAM_KEY=T");
+    expect(written).not.toContain("attacker.example");
+    expect(written).not.toContain("AGENT_CLI_PATH");
+    for (const key of Object.keys(injected)) expect(process.env[key]).toBeUndefined();
+  });
+
+  test("probe and init never see keys outside the wizard fields", async () => {
+    const seen: Record<string, string>[] = [];
+    await probeWithReusedSecrets(
+      "linear",
+      { LINEAR_DEFAULT_TEAM_KEY: "T", ...injected },
+      { projectDir, source: "project" },
+      async (_trackerId, env) => {
+        seen.push(env);
+      },
+    );
+    expect(seen[0]?.LINEAR_API_KEY).toBe("lin-secret");
+    for (const key of Object.keys(injected)) expect(seen[0]?.[key]).toBeUndefined();
+
+    const noReuse = await fillReusedSecrets(
+      "linear",
+      { LINEAR_API_KEY: "k", ...injected },
+      undefined,
+    );
+    expect(noReuse).toEqual({ LINEAR_API_KEY: "k" });
+  });
+});
+
+describe("current .devintern-pm/.env secrets for a host-bound tracker", () => {
+  beforeEach(async () => {
+    await mkdir(join(projectDir, ".devintern-pm"), { recursive: true });
+    await writeFile(
+      join(projectDir, ".devintern-pm", ".env"),
+      envText({ TASK_TRACKER: "gitlab", GITLAB_TOKEN: "gl-secret", GITLAB_PROJECT: "g/r" }),
+    );
+  });
+
+  test("a blank GitLab URL matches the default host; another host gets nothing", async () => {
+    const reuse = { projectDir, source: "project" as const };
+    const same = await fillReusedSecrets(
+      "gitlab",
+      { GITLAB_BASE_URL: "https://gitlab.com", GITLAB_PROJECT: "g/r" },
+      reuse,
+    );
+    expect(same.GITLAB_TOKEN).toBe("gl-secret");
+    const other = await fillReusedSecrets(
+      "gitlab",
+      { GITLAB_BASE_URL: "https://attacker.example", GITLAB_PROJECT: "g/r" },
+      reuse,
+    );
+    expect(other.GITLAB_TOKEN).toBeUndefined();
+  });
+
+  test("update with a new host and a blank token fails instead of moving the token", async () => {
+    await expect(
+      updateTrackerCredentials(projectDir, "gitlab", {
+        GITLAB_BASE_URL: "https://attacker.example",
+        GITLAB_PROJECT: "g/r",
+      }),
+    ).rejects.toThrow("GITLAB_TOKEN");
+    const written = await readFile(join(projectDir, ".devintern-pm", ".env"), "utf8");
+    expect(written).not.toContain("attacker.example");
+  });
+});
+
+describe("assertReuseForActiveProject", () => {
+  test("allows the open project and rejects any other folder", () => {
+    expect(() => assertReuseForActiveProject("/repos/app/", "/repos/app")).not.toThrow();
+    expect(() => assertReuseForActiveProject("/repos/other", "/repos/app")).toThrow(
+      "only available for the open project",
+    );
+    expect(() => assertReuseForActiveProject("/repos/app", null)).toThrow();
   });
 });
 
