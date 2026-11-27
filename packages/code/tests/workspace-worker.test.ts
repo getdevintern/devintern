@@ -181,9 +181,9 @@ describe("createWorkspaceTaskAcquirer", () => {
   let runResult: boolean;
   let tasks: FleetTask[];
 
-  const makeAcquirer = () =>
+  const makeAcquirer = (config = CONFIG) =>
     createWorkspaceTaskAcquirer({
-      config: CONFIG,
+      config,
       workspaceDir,
       workerState: state.workerState,
       queue: state.queue,
@@ -231,6 +231,45 @@ describe("createWorkspaceTaskAcquirer", () => {
     expect(existsSync(ran[0].cwd)).toBe(false);
     expect(repoManager.calls).toContain("clone:backend");
     expect(repoManager.calls).toContain("fetch:backend");
+  });
+
+  test("a repo's default_branch becomes the task's PR target and feature-branch base", async () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+task_query = "status=todo"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+default_branch = "release/2"
+`);
+    tasks = [{ key: "T-BASE", updated: "u1" }];
+    const acquirer = makeAcquirer(config);
+    await acquirer.tick();
+
+    expect(ran).toHaveLength(1);
+    expect(ran[0].args).toEqual(["--create-pr", "--pr-target-branch", "release/2"]);
+  });
+
+  test("an explicit PR target in worker_task_args wins over default_branch", async () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+task_query = "status=todo"
+worker_task_args = "--create-pr --pr-target-branch hotfix"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+default_branch = "release/2"
+`);
+    tasks = [{ key: "T-EXPLICIT", updated: "u1" }];
+    const acquirer = makeAcquirer(config);
+    await acquirer.tick();
+
+    expect(ran).toHaveLength(1);
+    expect(ran[0].args).toEqual(["--create-pr", "--pr-target-branch", "hotfix"]);
   });
 
   test("failed runs keep the worktree for debugging", async () => {
