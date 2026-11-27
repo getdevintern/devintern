@@ -1,6 +1,7 @@
 import { createGitHubCiProvider } from "../code-host/github/ci-provider";
 import { parseEnvInteger } from "../config/env-integer";
 import { RunStore } from "../state/run-recorder";
+import { settleInProgressCiFixRun } from "../state/orphaned-follow-ups";
 import type { MergeStateAnswer } from "../dependencies/gate";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type {
@@ -640,7 +641,8 @@ export async function buildFleetEventAcquirers(
 
     // CI failure repair uses the same durable agent-PR registry, repo
     // worktree, per-PR lock, and workspace supervisor as reviews.
-    const { CiFailureWatcherAcquirer } = await import("../acquirers/ci-failure-watcher");
+    const { CiFailureWatcherAcquirer, CI_FIX_INCOMPLETE_REASON } =
+      await import("../acquirers/ci-failure-watcher");
     const fixPr = createFleetCiFix(eventDeps);
     const ciWatcher = new CiFailureWatcherAcquirer({
       intervalSeconds,
@@ -649,6 +651,9 @@ export async function buildFleetEventAcquirers(
       queue: state.queue,
       provider: buildFleetCiProvider(gh, ownerOf, nameOf, isGitHubNotFound),
       fixPr,
+      settleCiFixRun: (repo, prNumber) => {
+        settleInProgressCiFixRun(runStore, repo, prNumber, CI_FIX_INCOMPLETE_REASON);
+      },
       verbose,
     });
     acquirers.push(ciWatcher);

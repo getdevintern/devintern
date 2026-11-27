@@ -147,8 +147,32 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: `devintern worker` surface
 - Status: `default`
 - Evidence: `tests/local/worker-doctor-trackers.test.ts` against `providers/fake-jira.ts`. `[defaults]` (Jira, credentials in the workspace `.env`): **Tracker credentials** passes and **Task query** reports `2 tasks match`, the fake records exactly the configured JQL once, exit 0. A query the fake rejects with 400 and Jira-style `errorMessages` exits 1 with the Jira error and the `Fix [defaults].task_query in workspace.toml` hint, after exactly one search. With `JIRA_API_TOKEN` absent, the credential row names the variable and the `.env` path, the dry run is `not run (missing tracker credentials)`, and no request reaches the fake. `[[teams]]`: two Jira teams on separate fakes (one via `env_file`, one via `[teams.env]`) both pass with their own JQL. A missing token or a rejected query fails only that team, labelled `jira (team "<name>")`, with the team hint (naming `env/alpha.env` when set). `--offline` still runs the local credential check (a missing token still exits 1) and turns each dry run into a `skipped (--offline)` warning with no fake request. Tokens never appear raw or URL-encoded in output; no state database or lock is created; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
-- Missing: Trackers other than Jira; a dry-run timeout; namespaced team values in the workspace `.env` (`JIRA_<TEAM>_*`); live Jira `/search/jql` drift. Observed (unconfirmed intent): the **Work sources** detail pluralizes as `2 tracker querys` (not asserted).
+- Missing: Asana, GitHub, GitLab, and Markdown trackers (Linear, Trello, and Azure DevOps have their own rows below); a dry-run timeout; namespaced team values in the workspace `.env` (`JIRA_<TEAM>_*`); live Jira `/search/jql` drift. Observed (unconfirmed intent): the **Work sources** detail pluralizes as `2 tracker querys` (not asserted).
 - Last reviewed: 2026-11-25
+
+### worker doctor: Linear tracker credentials and task-query dry run
+
+- Surface: `devintern worker` surface (external dependency: the tracker's search API)
+- Status: `default`
+- Evidence: `tests/local/worker-doctor-trackers-more.test.ts` ("… Linear [defaults].task_query …") against `providers/fake-linear.ts` started with a random `apiKey` (any other key gets Linear's HTTP 401 `AUTHENTICATION_ERROR`). `[defaults]` with `tracker = "linear"`, an `IssueFilter` JSON `task_query`, and `LINEAR_API_KEY`/`LINEAR_API_URL` in the workspace `.env`. Pass, exit 0: `✅ Tracker credentials — linear ([defaults])`, `✅ Task query — linear ([defaults]): 2 tasks match`, `✅ Everything looks good — …`; `searchRequests` holds exactly the configured filter once. Rejected filter (`rejectSearchFiltersContaining`: HTTP 400 with GraphQL `errors`), exit 1: `❌ Task query — linear ([defaults]): Linear API error (400): ` plus the escaped Linear message, `💡 Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)`, `❌ Not ready — …`; one more search. Wrong key, exit 1: `❌ Tracker credentials — linear ([defaults]): Linear API error (401): ` with `Authentication required, not authenticated`, `❌ Task query — linear ([defaults]): not run`; exactly one 401 and no search. `LINEAR_API_KEY` absent, exit 1: `❌ Tracker credentials — linear ([defaults]): missing LINEAR_API_KEY`, `💡 Add the missing variables to <workspace>/.env`, `❌ Task query — linear ([defaults]): not run (missing tracker credentials)`; zero GraphQL operations reach the fake. Neither key appears raw or URL-encoded; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Linear `[[teams]]` sources; `--offline`; a dry-run timeout; live Linear GraphQL drift. Observed (unconfirmed intent): after a credential probe failure (wrong key, 401) the dry run still reads `not run (missing tracker credentials)` and the hint says `Add the missing variables to <workspace>/.env`, although no variable is missing (suffix and hint not asserted).
+- Last reviewed: 2026-11-27
+
+### worker doctor: Trello tracker credentials and task-query dry run
+
+- Surface: `devintern worker` surface (external dependency: the tracker's search API)
+- Status: `default`
+- Evidence: `tests/local/worker-doctor-trackers-more.test.ts` ("… Trello [defaults].task_query …", "… Trello [[teams]] source …") against `providers/fake-trello.ts` started with a random `apiKey`/`apiToken` (any other pair gets Trello's HTTP 401 `invalid token`). `[defaults]` (credentials, `TRELLO_API_BASE_URL`, `TRELLO_DEFAULT_BOARD_ID` in the workspace `.env`, query `is:open <marker>`): pass, exit 0, `✅ Tracker credentials — trello ([defaults])`, `✅ Task query — trello ([defaults]): 2 tasks match`, `✅ Everything looks good — …`, and `searches` equals the configured query once. Rejected search (`rejectSearchesContaining`: HTTP 400 plain text), exit 1: `❌ Task query — trello ([defaults]): Trello API error (400): invalid value for query`, `💡 Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)`; one more search. Wrong token, exit 1: `❌ Tracker credentials — trello ([defaults]): Trello API error (401): invalid token`, `❌ Task query — trello ([defaults]): not run`; no search. `TRELLO_API_TOKEN` absent, exit 1: `❌ Tracker credentials — trello ([defaults]): missing TRELLO_API_TOKEN`, `💡 Add the missing variables to <workspace>/.env`, `❌ Task query — trello ([defaults]): not run (missing tracker credentials)`; zero requests reach the fake. `[[teams]]` "ops" with credentials in `[teams.env]` (only the endpoint in the workspace `.env`): `✅ Workspace config — 1 repo, 1 team, 0 automations (…)`, `✅ Tracker credentials — trello (team "ops")`, `✅ Task query — trello (team "ops"): 1 task matches`; a rejected search gives `❌ Task query — trello (team "ops"): Trello API error (400): invalid value for query` and `💡 Fix task_query for [[teams]] "ops" in workspace.toml (renamed status, project, or field?)`; a missing `TRELLO_API_TOKEN` gives `❌ Tracker credentials — trello (team "ops"): missing TRELLO_API_TOKEN`, `💡 Add the missing variables to the workspace .env, a team env_file, or [teams.env] for "ops"`, the dry run `not run (missing tracker credentials)`, and zero requests. Key and tokens never appear raw or URL-encoded; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: a Trello team `env_file`; `--offline`; a dry-run timeout; live Trello search drift. Observed (unconfirmed intent): as for Linear, a 401 from the credential probe is followed by `not run (missing tracker credentials)` and the `Add the missing variables` hint (not asserted).
+- Last reviewed: 2026-11-27
+
+### worker doctor: Azure DevOps tracker credentials and task-query dry run
+
+- Surface: `devintern worker` surface (external dependency: the tracker's search API)
+- Status: `partial`
+- Evidence: `tests/local/worker-doctor-trackers-more.test.ts` ("… missing Azure DevOps PAT …") against `providers/fake-azure-devops.ts` started with a random `pat` (any `Authorization` other than `Basic base64(":PAT")` gets a bare HTTP 401). `[defaults]` with a WIQL `task_query`, `AZURE_DEVOPS_ORG`/`AZURE_DEVOPS_PAT`/`AZURE_DEVOPS_PROJECT`/`AZURE_DEVOPS_BASE_URL` in the workspace `.env`, and `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1` in the child environment. `--offline`, exit 0: `✅ Tracker credentials — azure-devops ([defaults])`, `⚠️  Task query — azure-devops ([defaults]): skipped (--offline)`. `AZURE_DEVOPS_PAT` absent, exit 1: `❌ Tracker credentials — azure-devops ([defaults]): missing AZURE_DEVOPS_PAT`, `💡 Add the missing variables to <workspace>/.env`, `❌ Task query — azure-devops ([defaults]): not run (missing tracker credentials)`, `❌ Not ready — …`; the fake records no WIQL request and nothing unexpected. The PAT appears neither raw, URL-encoded, nor as the base64 `:PAT` Basic-auth value in stdout or stderr; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: blocked: the online pass, rejected-WIQL, and wrong-PAT cases. Prerequisite: the doctor credential probe (`defaultProbe` in `packages/task-trackers/src/init/wizard-core.ts`) builds `AzureDevOpsClient` without `baseUrl`, so it must honor `AZURE_DEVOPS_BASE_URL` under `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1` the way `createTrackerClient` does; until then the dry run never runs offline. Observed (unconfirmed intent): with full credentials and the fake opt-in, doctor's credential probe sends `CONNECT dev.azure.com` (refused by the recording proxy) and reports `❌ Tracker credentials — azure-devops ([defaults]): Proxy refused to open a tunnel: 403 Forbidden` with the `Add the missing variables` hint, then skips the dry run (not asserted). Also missing: `[[teams]]` sources and a dry-run timeout.
+- Last reviewed: 2026-11-27
 
 ## Backlog
 
@@ -343,6 +367,38 @@ network, or credentials; the tracker suite uses loopback fake Jira servers).
 Each test owns one temporary root (HOME, workspace, state database, bare
 remote) and removes it in `finally` together with the daemon, the recording
 proxy, the fake trackers, and any listener it bound.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Worker doctor tracker checks: Linear, Trello, Azure DevOps
+
+`tests/local/worker-doctor-trackers-more.test.ts` runs `devintern worker doctor`
+the same way as the Jira file, against `FakeLinearTracker`,
+`FakeTrelloTracker`, and `FakeAzureDevOpsTracker` on loopback. Each fake is
+started with a caller-chosen random secret (`apiKey`, `apiToken`, `pat`
+options) and answers any other credential with that provider's 401, so a
+passing check proves doctor sent the configured secret. Shared helpers
+(`doctorWithout`, `expectLines`, `dotenv`, `randomToken`) live in
+`helpers/worker-doctor.ts` and are also used by the Jira file.
+
+- Linear: pass with the match count and one recorded filter; a filter rejected
+  through `rejectSearchFiltersContaining` (HTTP 400, GraphQL `errors`); a wrong
+  key (one 401, no search); a missing `LINEAR_API_KEY` (no GraphQL operation).
+  The fake answers the credential probe's `Teams` operation.
+- Trello: the same matrix for `[defaults]` through `rejectSearchesContaining`
+  (HTTP 400, plain text), plus a `[[teams]]` source with `[teams.env]`
+  credentials that asserts the `trello (team "ops")` label and both team hints.
+- Azure DevOps: only `--offline` and a missing `AZURE_DEVOPS_PAT` (no request),
+  with the PAT checked raw, URL-encoded, and as base64 `:PAT`. The online dry
+  run is blocked on the credential probe ignoring `AZURE_DEVOPS_BASE_URL` (see
+  the row).
+
+Prerequisites: the built CLI only (no real tracker, network, or credentials).
+Each test owns one temporary root and removes it in `finally` with the
+recording proxy and the fake tracker.
 
 ```sh
 bun run --filter @getdevintern/code build

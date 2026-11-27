@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { dirname, resolve } from "path";
 import { activateWorkerTrial, checkLicense, requireLicense } from "@devintern/license-check";
+import { PromptAttemptsExceededError } from "@devintern/task-trackers";
 import {
   VERSION,
   enforceLicenseOrExit,
@@ -488,9 +489,15 @@ export async function runInteractiveWorkerInit(args: string[]): Promise<number> 
     // is left, 1 a blocking check failed (or setup did not finish).
     exitCode = !result.ok ? 1 : result.ready ? 0 : result.signInOnly ? 2 : 1;
   } catch (error) {
-    if (!isPromptAbort(error)) throw error;
-    // The wizard already said setup paused and where the answers were saved.
-    exitCode = reportWorkerInitAbort(error, console.log);
+    if (isPromptAbort(error)) {
+      // The wizard already said setup paused and where the answers were saved.
+      exitCode = reportWorkerInitAbort(error, console.log);
+    } else if (error instanceof PromptAttemptsExceededError) {
+      console.error(`\n❌ ${error.message}; setup stopped. Re-run \`devintern worker init\`.`);
+      exitCode = 1;
+    } else {
+      throw error;
+    }
   }
   return exitCode;
 }

@@ -452,11 +452,19 @@ async function prepareArtifactPublication(
  * `hookError` alone does not prove a hook ran: the push helper sets it for
  * every failure except divergence, so the repo must also have a pre-push
  * hook. A hook failure is classed `agent` without the environment check,
- * because the hook's test output can mention `ECONNREFUSED` or `429`.
+ * because the hook's test output can mention `ECONNREFUSED` or `429`. A
+ * server-side refusal (`remoteRejection`) is the user's setup: `environment`.
  */
-async function notePushFailure(result: { message?: string; hookError?: unknown }): Promise<void> {
+async function notePushFailure(result: {
+  message?: string;
+  hookError?: unknown;
+  remoteRejection?: unknown;
+}): Promise<void> {
   const error = new Error(`push failed: ${result.message ?? "unknown error"}`);
-  if (result.hookError && (await Utils.hasPrePushHook())) {
+  if (result.remoteRejection) {
+    // The remote's own rule (token scope, branch protection) refused it.
+    tagOutcomeClass(error, "environment", { definite: true });
+  } else if (result.hookError && (await Utils.hasPrePushHook())) {
     tagOutcomeClass(error, "agent", { definite: true });
   }
   noteRunFailure(failureFromError(error, "publish"));

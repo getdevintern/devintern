@@ -20,6 +20,7 @@ import {
   startPendingLogin,
 } from "@devintern/auth";
 import type { ResolvedLogin, StartedPendingLogin } from "@devintern/auth";
+import { PromptAttemptsExceededError } from "@devintern/task-trackers";
 
 import { pendingSignInSummary } from "../account/cli";
 import {
@@ -147,7 +148,9 @@ export async function licenseStep(run: SetupRun): Promise<boolean> {
     run.outcome.licenseFailure = failure;
   } catch (error) {
     // Ctrl+D at the sign-in prompt stops setup; worker/cli.ts reports it.
-    if (isPromptAbort(error)) throw error;
+    // So does a prompt that keeps returning unusable input: the license
+    // step must not swallow either and report success without the answer.
+    if (isPromptAbort(error) || error instanceof PromptAttemptsExceededError) throw error;
     run.log(
       `⚠️  License check errored (${(error as Error).message}); the worker re-checks at startup.`,
     );

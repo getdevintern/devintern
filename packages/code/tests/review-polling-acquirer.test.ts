@@ -2,8 +2,14 @@ import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } f
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { Database } from "bun:sqlite";
+
+import { listNotifications } from "../src/lib/notifications/store";
+import { baseSyncExhaustedGroupKey } from "../src/lib/notifications/base-sync";
+import { NotificationEmitter } from "../src/lib/notifications/emitter";
 
 import {
+  baseSyncRetryBackoffMs,
   baseSyncReviveCooldownMs,
   OPEN_PR_LIST_PAGE_SIZE,
   ReviewPollingAcquirer,
@@ -81,6 +87,7 @@ describe("ReviewPollingAcquirer", () => {
       conflictWindowGraceMs?: number;
       conflictResolution?: ConflictResolutionMode;
       disableResolveConflicts?: boolean;
+      resolveImpl?: (repo: string, prNumber: number) => Promise<AutomaticResolveResult>;
       shouldPollFeedback?: () => boolean;
       feedbackFallbackIntervalSeconds?: number;
     } = {},
@@ -134,10 +141,12 @@ describe("ReviewPollingAcquirer", () => {
       },
       resolveConflicts: options.disableResolveConflicts
         ? undefined
-        : async (repo, n) => {
-            resolved.push(`${repo}#${n}`);
-            return options.resolveResults?.shift() ?? { outcome: "clean", message: "merged" };
-          },
+        : options.resolveImpl
+          ? options.resolveImpl
+          : async (repo, n) => {
+              resolved.push(`${repo}#${n}`);
+              return options.resolveResults?.shift() ?? { outcome: "clean", message: "merged" };
+            },
       quietPeriodSeconds: options.quietPeriodSeconds ?? 0,
       runStore: options.runStore,
       now: options.now,
@@ -621,6 +630,51 @@ describe("ReviewPollingAcquirer", () => {
     expect(resolved).toEqual(["acme/widgets#42"]);
   });
 
+  test("an unknown or missing mergeability never clears a restart-exhaustion row", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = { ...conflictGh(), mergeableState: "unknown" };
+    const { acquirer } = makeAcquirer(gh);
+    await acquirer.tick();
+
+    const writer = new Database(dbPath);
+    try {
+      new NotificationEmitter(writer).emit({
+        kind: "escalated",
+        severity: "high",
+        groupKey: baseSyncExhaustedGroupKey("acme/widgets", 42),
+        title: "Conflict resolution keeps getting cut off",
+      });
+    } finally {
+      writer.close();
+    }
+
+    const unresolvedEscalations = (): number => {
+      const reader = new Database(dbPath);
+      try {
+        return listNotifications(reader, {
+          unresolved: true,
+          includeMuted: true,
+        }).notifications.filter((notification) => notification.kind === "escalated").length;
+      } finally {
+        reader.close();
+      }
+    };
+
+    // GitHub is still recomputing: the PR may still conflict, so wait.
+    await acquirer.tick();
+    expect(unresolvedEscalations()).toBe(1);
+
+    // A payload gap cannot prove the conflict is gone either.
+    gh.mergeableState = undefined;
+    await acquirer.tick();
+    expect(unresolvedEscalations()).toBe(1);
+
+    // Only a definitive verdict clears it.
+    gh.mergeableState = "clean";
+    await acquirer.tick();
+    expect(unresolvedEscalations()).toBe(0);
+  });
+
   test("a fork PR is terminally skipped without invoking the resolver", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const resolved: string[] = [];
@@ -842,6 +896,110 @@ describe("ReviewPollingAcquirer", () => {
       expect(made.resolved).toHaveLength(2);
       expect(queue.getBaseSyncEvent(eventKey)?.status).toBe("completed");
     } finally {
+      setSystemTime();
+    }
+  });
+
+  test("orphaned base-sync attempts back off after each restart and stop at the cap", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    queue.close();
+    queue = new WebhookQueue({ dbPath, maxRetries: 3 });
+    const runStore = new RunStore(dbPath);
+    const eventKey = "base-sync:acme/widgets#42:base1:head1";
+    const start = 1_750_000_000_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "dirty",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: false,
+      reviews: [],
+      comments: [],
+    };
+    let started = 0;
+    const make = () =>
+      makeAcquirer(gh, {
+        runStore,
+        resolveImpl: () => {
+          started += 1;
+          // The resolver never settles: the worker "dies" while it runs.
+          return new Promise<AutomaticResolveResult>(() => {});
+        },
+      });
+    try {
+      setSystemTime(start);
+      let made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(1);
+
+      let restartAt = start + 10 * 60_000;
+      runStore.reapOrphanedRunIds({ maxRetries: 3, now: restartAt });
+      let event = queue.getBaseSyncEvent(eventKey);
+      expect(event?.status).toBe("pending");
+      expect(event?.attempts).toBe(1);
+      expect(event?.updatedAt).toBe(restartAt);
+
+      // Inside the 30s backoff after the restart: no attempt yet.
+      setSystemTime(restartAt + baseSyncRetryBackoffMs(1) - 1);
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(1);
+
+      // The backoff elapsed: attempt 2 starts, then dies with the worker.
+      setSystemTime(restartAt + baseSyncRetryBackoffMs(1));
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(2);
+      let attemptStartedAt = restartAt + baseSyncRetryBackoffMs(1);
+      restartAt = attemptStartedAt + 10 * 60_000;
+      runStore.reapOrphanedRunIds({ maxRetries: 3, now: restartAt });
+      event = queue.getBaseSyncEvent(eventKey);
+      expect(event?.status).toBe("pending");
+      expect(event?.attempts).toBe(2);
+      expect(event?.updatedAt).toBe(restartAt);
+
+      // The backoff doubles: still nothing inside 60s.
+      setSystemTime(restartAt + baseSyncRetryBackoffMs(2) - 1);
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(2);
+
+      setSystemTime(restartAt + baseSyncRetryBackoffMs(2));
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(3);
+      attemptStartedAt = restartAt + baseSyncRetryBackoffMs(2);
+      restartAt = attemptStartedAt + 10 * 60_000;
+      runStore.reapOrphanedRunIds({ maxRetries: 3, now: restartAt });
+      event = queue.getBaseSyncEvent(eventKey);
+      expect(event?.status).toBe("failed");
+      expect(event?.attempts).toBe(3);
+      expect(queue.hasProcessed("github:base-sync", eventKey)).toBe(true);
+
+      const latest = runStore.listRuns({ origin: "conflict_resolution" })[0];
+      expect(latest?.outcomeReason).toContain(
+        "conflict resolution keeps getting cut off by worker restarts",
+      );
+
+      // Exhausted: the cap stops further automatic attempts.
+      setSystemTime(restartAt + 30 * 24 * 60 * 60_000);
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(3);
+
+      const reader = new Database(dbPath);
+      try {
+        const notifications = listNotifications(reader, { includeMuted: true }).notifications;
+        const escalations = notifications.filter(
+          (notification) => notification.kind === "escalated",
+        );
+        expect(escalations).toHaveLength(1);
+        expect(escalations[0]?.title).toContain("acme/widgets#42");
+      } finally {
+        reader.close();
+      }
+    } finally {
+      runStore.close();
       setSystemTime();
     }
   });
@@ -1300,11 +1458,40 @@ describe("ReviewPollingAcquirer", () => {
     await made.acquirer.tick();
     expect(made.resolved).toEqual([]);
 
+    // Model an earlier restart loop that exhausted the automatic base sync.
+    const writer = new Database(dbPath);
+    try {
+      new NotificationEmitter(writer, () => now).emit({
+        kind: "escalated",
+        severity: "high",
+        groupKey: baseSyncExhaustedGroupKey("acme/widgets", 42),
+        title: "Conflict resolution keeps getting cut off",
+      });
+      expect(
+        listNotifications(writer, { unresolved: true, includeMuted: true }).notifications.filter(
+          (notification) => notification.kind === "escalated",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      writer.close();
+    }
+
     // Someone (e.g. `devintern resolve-conflicts <pr-url>`) fixed it out of band.
     gh.mergeableState = "clean";
     now += DAY_MS + 1;
     await made.acquirer.tick();
     expect(made.resolved).toEqual([]);
+
+    const reader = new Database(dbPath);
+    try {
+      expect(
+        listNotifications(reader, { unresolved: true, includeMuted: true }).notifications.filter(
+          (notification) => notification.kind === "escalated",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      reader.close();
+    }
   });
 
   const MIN = 60_000;
@@ -2146,6 +2333,32 @@ describe("ReviewPollingAcquirer team-PR base sync (sync_team_prs)", () => {
     return { acquirer, addressed, resolved };
   }
 
+  function emitEscalation(prNumber: number): void {
+    const writer = new Database(dbPath);
+    try {
+      new NotificationEmitter(writer).emit({
+        kind: "escalated",
+        severity: "high",
+        groupKey: baseSyncExhaustedGroupKey(REPO, prNumber),
+        title: "Conflict resolution keeps getting cut off",
+      });
+    } finally {
+      writer.close();
+    }
+  }
+
+  function unresolvedEscalations(): number {
+    const reader = new Database(dbPath);
+    try {
+      return listNotifications(reader, {
+        unresolved: true,
+        includeMuted: true,
+      }).notifications.filter((notification) => notification.kind === "escalated").length;
+    } finally {
+      reader.close();
+    }
+  }
+
   test("default off: no repo opted in sends no discovery requests", async () => {
     workerState.recordAgentPr({ repo: REPO, prNumber: 42 });
     for (const syncTeamPrsRepos of [undefined, [] as string[]]) {
@@ -2182,6 +2395,107 @@ describe("ReviewPollingAcquirer team-PR base sync (sync_team_prs)", () => {
     // Deduped by base/head like the agent's own PRs.
     await made.acquirer.tick();
     expect(made.resolved).toEqual([`${REPO}#7`]);
+  });
+
+  test("a teammate PR leaving the open list clears its exhaustion row", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+    await made.acquirer.tick();
+
+    // Model an earlier restart loop that exhausted the automatic base sync.
+    const writer = new Database(dbPath);
+    try {
+      new NotificationEmitter(writer).emit({
+        kind: "escalated",
+        severity: "high",
+        groupKey: baseSyncExhaustedGroupKey(REPO, 7),
+        title: "Conflict resolution keeps getting cut off",
+      });
+    } finally {
+      writer.close();
+    }
+
+    // Closed/merged: the PR drops out of the open list.
+    gh.prs.delete(7);
+    gh.version += 1;
+    await made.acquirer.tick();
+
+    const reader = new Database(dbPath);
+    try {
+      expect(
+        listNotifications(reader, { unresolved: true, includeMuted: true }).notifications.filter(
+          (notification) => notification.kind === "escalated",
+        ),
+      ).toHaveLength(0);
+    } finally {
+      reader.close();
+    }
+  });
+
+  test("a team sweep does not clear an own PR's exhaustion row", async () => {
+    workerState.recordAgentPr({ repo: REPO, prNumber: 42 });
+    const gh = new TeamGitHub();
+    // GitHub is recomputing, so the main poller leaves the row alone and the
+    // team sweep is the only path that could clear it this tick.
+    gh.add({ number: 42, association: "MEMBER", mergeable: "unknown" });
+    const made = make(gh);
+    emitEscalation(42);
+
+    await made.acquirer.tick();
+
+    // The main poller owns the PR and may have base-synced it, but the
+    // restart-exhaustion row is not cleared by merely seeing it in the sweep.
+    expect(gh.listCalls.length).toBeGreaterThan(0);
+    expect(unresolvedEscalations()).toBe(1);
+  });
+
+  test("an unusable fresh PR state keeps the teammate escalation row", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+    await made.acquirer.tick();
+    emitEscalation(7);
+
+    // A transient payload gap must not read as "not open".
+    gh.listOverride = [{ number: 7, author_association: "MEMBER" }];
+    gh.prs.get(7)!.state = "";
+    gh.version += 1;
+    await made.acquirer.tick();
+
+    expect(unresolvedEscalations()).toBe(1);
+  });
+
+  test("a missing fresh author association keeps the teammate escalation row", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+    await made.acquirer.tick();
+    emitEscalation(7);
+
+    // The list still identifies a teammate; the per-PR payload is incomplete.
+    gh.listOverride = [{ number: 7, author_association: "MEMBER" }];
+    gh.prs.get(7)!.association = undefined;
+    gh.version += 1;
+    await made.acquirer.tick();
+
+    expect(unresolvedEscalations()).toBe(1);
+  });
+
+  test("a missing list association keeps the teammate escalation row", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+    await made.acquirer.tick();
+    emitEscalation(7);
+
+    // The list payload itself lost the association; that cannot prove the PR
+    // left the team, so the escalation row must survive.
+    gh.listOverride = [{ number: 7 }];
+    gh.version += 1;
+    await made.acquirer.tick();
+
+    expect(unresolvedEscalations()).toBe(1);
   });
 
   test("non-team authors are skipped at discovery and logged once", async () => {

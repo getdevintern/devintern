@@ -78,6 +78,8 @@ These keys behave like an automation's [`harness`, `model`, and `effort`](./auto
 
 After `WEBHOOK_MAX_RETRIES` failed attempts, the worker stops trying on that PR. It tries again in full once the PR's head changes. If the base branch moves on in the meantime, the worker makes one more attempt. It waits at least 3 hours after the last failure, then 6, then 12, and at most a day. A temporary failure therefore clears up within hours, while a conflict the agent cannot resolve costs about one run a day instead of one per merge. To retry right away, run `devintern resolve-conflicts <pr-url>`.
 
+A worker crash or restart during a resolution counts as one failed attempt. After the worker comes back, the next attempt waits out the same backoff instead of starting immediately. If `WEBHOOK_MAX_RETRIES` attempts in a row end because the worker exited, the PR's automatic retries stop, the run records `conflict resolution keeps getting cut off by worker restarts`, and the dashboard raises a notification. Retries resume when the base branch moves (after the revival cooldown) or when you run `resolve-conflicts` by hand.
+
 ### Tuning
 
 | Variable                         | Default | Description                                                      |
@@ -229,7 +231,7 @@ Other flags: `--deny-path` and `--review-path` (repeatable), `--no-review`, `--r
 
 Set `[workspace].ci_failure_fix = true` to have the agent repair failing CI on the PRs the worker created. It is off by default because each repair spends tokens and may push a commit.
 
-The worker watches GitHub Actions workflow runs and commit statuses while each PR is open. Failed and timed-out runs trigger a repair; the worker waits for pending workflows first. Each failure gets up to `CI_FIX_MAX_ATTEMPTS` repair attempts (default 3), then the worker comments on the PR and waits for a human push or a green run. For GitLab code hosts, the same setting watches pipelines and required jobs on the worker's MRs; `allow_failure`, manual, skipped, and canceled jobs are ignored.
+The worker watches GitHub Actions workflow runs and commit statuses while each PR is open. Failed and timed-out runs trigger a repair; the worker waits for pending workflows first. Each failure gets up to `CI_FIX_MAX_ATTEMPTS` repair attempts (default 3), then the worker comments on the PR and waits for a human push or a green run. A worker crash or restart during a repair counts as one failed attempt, so a restart loop reaches that comment instead of retrying at every restart. For GitLab code hosts, the same setting watches pipelines and required jobs on the worker's MRs; `allow_failure`, manual, skipped, and canceled jobs are ignored.
 
 A fine-grained token (or a customer-owned App) needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. If you add these permissions to an existing GitHub App installation, re-approve the installation. CI providers that only publish check runs are not watched unless they also publish a commit status. A missing or rejected credential is logged once per hour per repository, and repair resumes once access works again.
 

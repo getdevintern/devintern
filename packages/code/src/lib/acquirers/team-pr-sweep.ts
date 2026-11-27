@@ -19,7 +19,7 @@
  * branch protection decides what lands.
  */
 
-import { agentPrKey } from "../review/agent-pr-reconciler";
+import { agentPrKey, classifyAgentPrState } from "../review/agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
 import type { WorkerState } from "../state/worker-state";
 
@@ -81,6 +81,8 @@ export interface TeamPrSweepHost {
   fetchPr(repo: string, prNumber: number, etag?: string): Promise<ConditionalResult<PolledPr>>;
   /** Run the poller's base-sync path for an eligible teammate PR. */
   syncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void>;
+  /** Clear a worker-restart exhaustion row when the PR leaves the watch. */
+  resolveBaseSync?(repo: string, prNumber: number): void;
   /** A request stage completed (credential recovery bookkeeping). */
   onSuccess(repo: string, stage: TeamPrSweepStage): void;
   /** A request stage threw; apply the poller's failure policy. */
@@ -187,17 +189,22 @@ export class TeamPrSweeper {
       const key = agentPrKey(repo, item.number);
       listed.add(key);
       if (ownKeys.has(key)) {
-        this.unwatch(key);
+        // The main review poller owns this PR. Stop any team-sweep tracking
+        // without clearing its base-sync escalation: the sweep never watches
+        // own PRs, so leaving this branch says nothing about their conflicts.
+        this.forget(key);
         continue;
       }
       // Drafts signal work in progress; forks are not ours to push to.
       const headRepo = item.head?.repo?.full_name;
       if (item.draft === true || (headRepo && headRepo.toLowerCase() !== repoKey)) {
-        this.unwatch(key);
+        this.unwatch(key, host);
         continue;
       }
       if (!isTeamAuthor(item.author_association)) {
-        this.noteNonTeamAuthor(repo, item.number, item.author_association);
+        this.noteNonTeamAuthor(repo, item.number, item.author_association, host, {
+          clearBaseSync: item.author_association !== undefined,
+        });
         continue;
       }
       if (!this.watched.has(key)) {
@@ -215,7 +222,7 @@ export class TeamPrSweeper {
     const prefix = `${repoKey}#`;
     for (const key of this.watched) {
       if (!key.startsWith(prefix) || listed.has(key)) continue;
-      this.unwatch(key);
+      this.unwatch(key, host);
       console.log(`👋 [${this.logName}] ${key} left the open-PR list; no longer watching`);
     }
     for (const key of this.skippedAuthors) {
@@ -255,15 +262,23 @@ export class TeamPrSweeper {
     }
     const pr = result.notModified ? cached : (result.data ?? undefined);
     if (!pr) return;
-    if (pr.state !== "open" || pr.draft === true) {
+    // Only a confirmed terminal state (or an explicit draft) means the PR is
+    // no longer watched. An unusable `state` must not be read as "not open":
+    // that would clear the escalation while the PR may still conflict.
+    const lifecycle = classifyAgentPrState(pr.state);
+    if (pr.draft === true || lifecycle === "closed" || lifecycle === "merged") {
       // Closed/merged/draft PRs drop out of the watch set via the list.
       this.prCache.delete(key);
+      host.resolveBaseSync?.(repo, prNumber);
       return;
     }
+    if (lifecycle === null) return;
     // Re-check the team gate on the fresh per-PR payload: the list entry can
-    // be stale, and eligibility must hold at sync time.
+    // be stale, and eligibility must hold at sync time. A missing association
+    // cannot prove the author is outside the team, so wait for a usable one.
+    if (pr.author_association === undefined) return;
     if (!isTeamAuthor(pr.author_association)) {
-      this.noteNonTeamAuthor(repo, prNumber, pr.author_association);
+      this.noteNonTeamAuthor(repo, prNumber, pr.author_association, host);
       return;
     }
     if (!result.notModified) {
@@ -274,10 +289,22 @@ export class TeamPrSweeper {
   }
 
   /** Log a non-team author skip once per PR, and stop watching it. */
-  private noteNonTeamAuthor(repo: string, prNumber: number, association?: string): void {
+  private noteNonTeamAuthor(
+    repo: string,
+    prNumber: number,
+    association: string | undefined,
+    host: TeamPrSweepHost,
+    options: { clearBaseSync?: boolean } = {},
+  ): void {
     const key = agentPrKey(repo, prNumber);
+    // Keep the log-once marker: only a real unwatch drops it.
     this.watched.delete(key);
     this.prCache.delete(key);
+    // A missing association cannot prove the author is outside the team, so it
+    // must not clear an escalation row for a PR that may still conflict.
+    if (options.clearBaseSync ?? association !== undefined) {
+      host.resolveBaseSync?.(repo, prNumber);
+    }
     if (this.skippedAuthors.has(key)) return;
     this.skippedAuthors.add(key);
     console.log(
@@ -286,7 +313,21 @@ export class TeamPrSweeper {
     );
   }
 
-  private unwatch(key: string): void {
+  /**
+   * Stop tracking a PR. Leaving the watch means no base sync will run for it,
+   * so any earlier restart-exhaustion row no longer describes live work.
+   */
+  private unwatch(key: string, host: TeamPrSweepHost): void {
+    this.forget(key);
+    const separator = key.lastIndexOf("#");
+    const prNumber = Number(key.slice(separator + 1));
+    if (Number.isSafeInteger(prNumber)) {
+      host.resolveBaseSync?.(key.slice(0, separator), prNumber);
+    }
+  }
+
+  /** Drop in-memory tracking for a PR without touching its escalation row. */
+  private forget(key: string): void {
     this.watched.delete(key);
     this.prCache.delete(key);
     this.skippedAuthors.delete(key);

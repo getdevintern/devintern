@@ -4,7 +4,11 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { CiFailureWatcherAcquirer, truncateCiLogs } from "../src/lib/acquirers/ci-failure-watcher";
+import {
+  CiFailureWatcherAcquirer,
+  CI_FIX_INCOMPLETE_REASON,
+  truncateCiLogs,
+} from "../src/lib/acquirers/ci-failure-watcher";
 import type {
   CiFailureWatcherGitHub,
   PolledCiPr,
@@ -16,6 +20,8 @@ import type { CiConditionalResult } from "../src/lib/code-host/ci-provider";
 import type { CiFixResult } from "../src/lib/acquirers/ci-failure-watcher";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
+import { RunStore } from "../src/lib/state/run-recorder";
+import { settleInProgressCiFixRun } from "../src/lib/state/orphaned-follow-ups";
 
 describe("truncateCiLogs", () => {
   test("returns null for empty input", () => {
@@ -230,6 +236,39 @@ describe("CiFailureWatcherAcquirer", () => {
     // Same failure next tick is deduped.
     await acquirer.tick();
     expect(fixed).toEqual(["acme/widgets#42"]);
+  });
+
+  test("a failed fix settles the child's open run so a restart counts it once", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const runStore = new RunStore(dbPath);
+    const runId = runStore.createRun({ origin: "ci_fix", repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(101)],
+    };
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider(makeGithub(gh)),
+      fixPr: async () => false,
+      settleCiFixRun: (repo, prNumber) => {
+        settleInProgressCiFixRun(runStore, repo, prNumber, CI_FIX_INCOMPLETE_REASON);
+      },
+    });
+
+    try {
+      await acquirer.tick();
+      expect(workerState.getCiFixState("acme/widgets", 42).consecutiveFailures).toBe(1);
+      expect(runStore.getRun(runId)?.status).toBe("failed");
+
+      // The restart reap has no orphan left, so the budget stays at one.
+      expect(runStore.reapOrphanedRunIds({ maxRetries: 3 })).toEqual([]);
+      expect(workerState.getCiFixState("acme/widgets", 42).consecutiveFailures).toBe(1);
+    } finally {
+      runStore.close();
+    }
   });
 
   test("a PR 404 keeps the CI watch when the credential loses access", async () => {

@@ -13,6 +13,7 @@ import { ensureWorkspaceCodeState, resolveWorkspaceDir, workspaceDbPath } from "
 import { resolveRulesFilePath } from "./merge-safety-rules";
 import { parseMentionArg } from "./mention-trigger";
 import type { MentionTrigger } from "./mention-trigger";
+import type { ResolveConflictsResult } from "./conflict-resolver";
 
 /** Use a registered repo's workspace layers for manual PR commands. */
 async function loadReviewEnvironment(changeUrl: string): Promise<void> {
@@ -26,6 +27,51 @@ async function loadReviewEnvironment(changeUrl: string): Promise<void> {
     process.env.WEBHOOK_QUEUE_DB ||= workspaceDbPath(workspaceDir);
   }
   loadEnvironment(undefined, { skipProjectEnv: Boolean(credentials) });
+}
+
+/**
+ * A successful manual resolve-conflicts proves the earlier worker-restart
+ * exhaustion row for that PR is stale. The automatic path resolves it through
+ * its recorded run; this CLI path does not create one, so clear it directly.
+ */
+async function clearBaseSyncExhaustion(prUrl: string): Promise<void> {
+  try {
+    const { parseChangeRequestUrl } = await import("../code-host/index");
+    const identity = parseChangeRequestUrl(prUrl, {
+      gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+    });
+    if (!identity) return;
+    const { resolveQueueDbPath, WebhookQueue } = await import("../state/webhook-queue");
+    const queue = new WebhookQueue({ dbPath: resolveQueueDbPath() });
+    try {
+      queue.resolveBaseSyncExhausted(identity.projectPath, identity.number);
+    } finally {
+      queue.close();
+    }
+  } catch (error) {
+    console.warn(`⚠️  Could not clear the base-sync notification: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Whether a manual `resolve-conflicts` result proves the remote branch no
+ * longer needs the paused automatic base sync, so the stale restart-exhaustion
+ * row can be cleared.
+ *
+ * A `resolved`/`clean` result only changed the remote when it was pushed:
+ * with `--no-push` the merge is local, so the PR may still conflict. A
+ * `skipped` result is benign (already up to date, closed, or a fork) and never
+ * leaves a conflict behind.
+ *
+ * @param result - Resolver outcome and message
+ * @param noPush - Whether `--no-push` kept the merge local
+ */
+export function shouldClearBaseSyncExhaustion(
+  result: Pick<ResolveConflictsResult, "outcome">,
+  noPush: boolean,
+): boolean {
+  if (result.outcome === "skipped") return true;
+  return !noPush && (result.outcome === "clean" || result.outcome === "resolved");
 }
 
 /** `devintern address-review <pr-url>` — manually address PR/MR review feedback. */
@@ -197,6 +243,9 @@ export async function runResolveConflictsCommand(args: string[]): Promise<void> 
       expectedHeadSha,
       expectedBaseSha,
     });
+    if (shouldClearBaseSyncExhaustion(result, noPush)) {
+      await clearBaseSyncExhaustion(prUrl);
+    }
     const resultFd = Number(process.env.DEVINTERN_RESULT_FD);
     if (Number.isInteger(resultFd) && resultFd >= 3) {
       const { writeSync } = await import("fs");

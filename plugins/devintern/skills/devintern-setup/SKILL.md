@@ -52,6 +52,8 @@ Ask once, up front, and record the answers:
    ```
 
    Add the tracker's variables (for example `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`; see [Integrations](references/integrations.md)). `AGENT_HARNESS` is `claude-code`, `codex`, `opencode`, `cursor`, or another harness id; there is no flag for it. For GitHub, suggest a fine-grained token limited to the repository with Contents, Pull requests, and Issues set to Read and write and Metadata Read (created at `https://github.com/settings/personal-access-tokens/new`), or a classic token with the `repo` scope. The file must be mode `0600`.
+
+   When the GitHub CLI is installed and signed in (`gh auth status` succeeds), you can omit `GITHUB_TOKEN` from the env file: `worker init --non-interactive` reuses `gh auth token`, probes it, and saves a copy in the workspace `.env`; `--json` reports `tokenSource: "gh"`. A rejected token is not saved and setup fails with the `fix-credentials` next step. The saved copy does not refresh when `gh` re-authenticates; update `GITHUB_TOKEN` in the workspace `.env` (`~/.devintern/.env`) or re-run setup with `--env-file`.
 2. Get a checkout of the repository on the worker host if none exists. The worker keeps its own clone, so a shallow clone is enough; the checkout identifies the repository through its `origin` remote. For a private HTTPS repository, use the token without writing it to disk or the remote URL:
 
    ```bash

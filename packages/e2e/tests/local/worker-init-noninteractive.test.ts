@@ -181,10 +181,12 @@ cliTest(
   async () => {
     await withFixture(async (fixture) => {
       // Missing flags, text mode: every missing flag and variable in one line.
+      // Jira has a default query (open tickets labeled `devintern`), so
+      // `--task-query` is not among them.
       expectInputError(
         fixture,
         await fixture.run(["worker", "init", "--non-interactive", "--tracker", "jira"]),
-        "missing: --task-query, JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN.",
+        "missing: JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN.",
       );
 
       // Missing flags, JSON mode: the error is in the document, stderr stays empty.

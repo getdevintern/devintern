@@ -49,7 +49,8 @@ export {
   describeCustomWorkerSettings,
 } from "./worker-init-policy";
 export type { WorkerInitDeps, WorkerInitResult } from "./worker-init-run";
-export { WORKER_INIT_STEPS, defaultEnsureTracker, describeQueryFailure } from "./worker-init-steps";
+export { WORKER_INIT_STEPS, defaultEnsureTracker } from "./worker-init-steps";
+export { describeQueryFailure } from "./worker-init-query-failure";
 
 /**
  * Insert or update KEY=value lines in an env file's content. Existing keys

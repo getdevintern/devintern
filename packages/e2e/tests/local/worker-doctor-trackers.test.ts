@@ -18,44 +18,16 @@ import { FakeJiraTracker } from "../../providers/fake-jira";
 import { proxyEnvironment, startRecordingProxy } from "../../helpers/recording-proxy";
 import type { RecordingProxy } from "../../helpers/recording-proxy";
 import { cliPath, WorkerFixture } from "../../helpers/worker";
-import type { WorkerAddResult } from "../../helpers/worker";
+import { doctorWithout, dotenv, expectLines, randomToken } from "../../helpers/worker-doctor";
 
 const builtCli = existsSync(cliPath);
 const NOT_READY = "❌ Not ready — the worker would sit idle or fail. Fix the checks above.";
 const UNKNOWN_STATUS = "The value 'Ready for Dev' does not exist for the field 'status'.";
 
-const randomToken = (prefix: string) => `${prefix}${crypto.randomUUID().replaceAll("-", "")}`;
-
 /** Jira credentials for one fake, with a caller-chosen secret token. */
 function jiraEnv(tracker: FakeJiraTracker, token: string): Record<string, string> {
   const { JIRA_BASE_URL, JIRA_EMAIL } = tracker.environment();
   return { JIRA_BASE_URL: JIRA_BASE_URL!, JIRA_EMAIL: JIRA_EMAIL!, JIRA_API_TOKEN: token };
-}
-
-function dotenv(values: Record<string, string>): string {
-  return Object.entries(values)
-    .map(([key, value]) => `${key}=${value}\n`)
-    .join("");
-}
-
-/** Run doctor and assert no secret (raw or URL-encoded) reached stdout or stderr. */
-async function doctorWithout(
-  worker: WorkerFixture,
-  secrets: string[],
-  args: string[] = [],
-): Promise<WorkerAddResult> {
-  const result = await worker.runCli(["worker", "doctor", ...args]);
-  for (const output of [result.stdout, result.stderr]) {
-    for (const secret of secrets) {
-      expect(output).not.toContain(secret);
-      expect(output).not.toContain(encodeURIComponent(secret));
-    }
-  }
-  return result;
-}
-
-function expectLines(result: WorkerAddResult, lines: string[]): void {
-  for (const line of lines) expect(result.stdout).toContain(line);
 }
 
 test.skipIf(!builtCli)(

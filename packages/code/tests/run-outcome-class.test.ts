@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { deliveryHaltFailure } from "../src/lib/agent/run-harness-finalize";
+import { deliveryHaltFailure, publishImplementation } from "../src/lib/agent/run-harness-finalize";
 import type { DeliveryState } from "../src/lib/agent/run-harness-finalize";
 import type { FinalizeContext } from "../src/lib/agent/run-harness-git";
 import { verifyImplementation } from "../src/lib/agent/verify";
@@ -32,6 +32,13 @@ import { composeOutcomeReason, finishTaskRun } from "../src/lib/state/task-run";
 import { deliveryDispositionFailure } from "../src/lib/agent/implementation-outcome";
 import { preservedWorkStatus } from "../src/lib/task/preserve-work";
 import { AuthenticationError } from "../src/types/task-tracker-errors";
+import { Utils } from "../src/lib/utils";
+import { pushWithHookRetry as pushReviewFix } from "../src/lib/review/address";
+import type { pushWithHookRetry as PushReviewFix } from "../src/lib/review/address";
+import {
+  describeRemotePushRejection,
+  findRemotePushRejection,
+} from "../src/lib/utils/git-push-rejection";
 
 /** What `getPRDiff` threw in run 953 after the stacked base PR merged mid-run. */
 const RUN_953_ERROR =
@@ -350,6 +357,83 @@ describe("classifying the current run", () => {
       expect(run?.outcomeReason).toBe(`verify: ${RUN_953_ERROR}`);
     } finally {
       rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  async function publishWithFailedPush(result: Record<string, unknown>) {
+    beginRun({ origin: "task", taskKey: "P-1" });
+    const hasHook = spyOn(Utils, "hasPrePushHook").mockResolvedValue(true);
+    try {
+      const state = {
+        hookValidated: true,
+        output: "",
+        context: { enableGit: true, taskKey: "P-1", taskSummary: "s", createPr: true, task: {} },
+        helpers: { pushWithHookRetry: async () => ({ success: false, result }) },
+      } as unknown as DeliveryState;
+      const step = await publishImplementation(state);
+      expect(step).toMatchObject({ kind: "halt", reason: "Push failed" });
+      return pendingRunFailure();
+    } finally {
+      hasHook.mockRestore();
+    }
+  }
+
+  test.each([
+    "refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope",
+    "protected branch hook declined",
+    "pre-receive hook declined",
+    "cannot lock ref 'refs/heads/feature/p-1'",
+  ])(
+    "a server-side push refusal %p is the environment, even with a pre-push hook",
+    async (reason) => {
+      const rejection = findRemotePushRejection(
+        ` ! [remote rejected] feature/p-1 -> feature/p-1 (${reason})`,
+        "feature/p-1",
+      )!;
+      const failure = await publishWithFailedPush({
+        success: false,
+        message: describeRemotePushRejection(rejection, "feature/p-1"),
+        remoteRejection: rejection,
+      });
+      expect(failure).toMatchObject({ outcomeClass: "environment", stage: "publish" });
+    },
+  );
+
+  test("a pre-push hook failure stays the agent's", async () => {
+    const failure = await publishWithFailedPush({
+      success: false,
+      message: "Failed to push branch: lint failed",
+      hookError: "lint failed",
+    });
+    expect(failure?.outcomeClass).toBe("agent");
+  });
+
+  test("a review fix push the remote refused is the environment", async () => {
+    const rejection = findRemotePushRejection(
+      " ! [remote rejected] feature/p-1 -> feature/p-1 (protected branch hook declined)",
+      "feature/p-1",
+    )!;
+    const push = spyOn(Utils, "pushCurrentBranch").mockResolvedValue({
+      success: false,
+      message: describeRemotePushRejection(rejection, "feature/p-1"),
+      remoteRejection: rejection,
+    });
+    const hasHook = spyOn(Utils, "hasPrePushHook").mockResolvedValue(true);
+    try {
+      const thrown = await pushReviewFix({
+        workDir: "/nonexistent",
+        verbose: false,
+        hookRetries: 2,
+        harness: {} as Parameters<typeof PushReviewFix>[0]["harness"],
+        executablePath: "/usr/bin/agent",
+        maxTurns: 1,
+        prBranch: "feature/p-1",
+      }).catch((error: unknown) => error);
+      expect(failureFromError(thrown, "publish").outcomeClass).toBe("environment");
+      expect(push).toHaveBeenCalledTimes(1);
+    } finally {
+      push.mockRestore();
+      hasHook.mockRestore();
     }
   });
 });

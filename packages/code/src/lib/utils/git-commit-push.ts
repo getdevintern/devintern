@@ -1,6 +1,8 @@
 import { executeGitCommandWithConfigLockRetry, hasConfigLockError } from "./git-exec";
 import { hasUncommittedWork, stageWorkTreeChanges } from "./git-stage";
 import { classifyCommitConfigError } from "./git-identity";
+import { describeRemotePushRejection, findRemotePushRejection } from "./git-push-rejection";
+import type { RemotePushRejection } from "./git-push-rejection";
 import { Utils } from "./registry";
 
 /**
@@ -390,6 +392,8 @@ export async function pushCurrentBranch(options?: {
   success: boolean;
   message: string;
   hookError?: string;
+  /** Set when the remote itself refused the update; callers class it `environment`. */
+  remoteRejection?: RemotePushRejection;
 }> {
   const verbose = options?.verbose ?? false;
   const cwd = options?.cwd;
@@ -538,6 +542,18 @@ export async function pushCurrentBranch(options?: {
         success: false,
         message: `Push rejected - branch diverged from remote. Run 'git pull --rebase' or 'git push --force' (dangerous): ${pushResult.error}`,
         // Don't mark as hookError since this is not fixable by @devintern/code
+      };
+    }
+
+    // The remote refused the update itself (GitHub `workflow` scope, branch
+    // protection, push protection, a server pre-receive hook). No worktree
+    // edit can satisfy that, so do not hand it to the hook-fix agent.
+    const rejection = findRemotePushRejection(fullError, currentBranch);
+    if (rejection) {
+      return {
+        success: false,
+        message: describeRemotePushRejection(rejection, currentBranch),
+        remoteRejection: rejection,
       };
     }
 

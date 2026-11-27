@@ -11,7 +11,15 @@
  */
 
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, relative } from "node:path";
 import { cliPath } from "../../helpers/fixture-workspace";
@@ -553,4 +561,161 @@ test.skipIf(process.platform === "win32")(
     expect(native.usable).toBe(true);
     expect(native.reason).toBe("native has no external binary to probe");
   },
+);
+
+/** A stub `sbx` whose every subcommand succeeds, so docker detects as available. */
+const DOCKER_READY_STUB = '#!/bin/sh\necho "stub"\nexit 0\n';
+
+/**
+ * Run `devintern sandbox` with `AGENT_SANDBOX=auto` over a
+ * `claude-code,opencode` chain whose CLIs (and a ready `sbx`) are stubs.
+ *
+ * @param home - Isolated home; nono needs one outside the OS temp dir.
+ * @param basePath - PATH the stub directory is prepended to.
+ * @returns The doctor's exit code and combined output.
+ */
+async function autoChainDoctor(
+  root: string,
+  home: string,
+  basePath: string,
+): Promise<{ exitCode: number; text: string }> {
+  const bin = join(root, "chain-bin");
+  mkdirSync(bin, { recursive: true });
+  stubHarness(bin, "claude");
+  stubHarness(bin, "opencode");
+  stubExecutable(bin, providerBinary("docker") ?? "sbx", DOCKER_READY_STUB);
+  const env = {
+    ...sandboxEnvironment(root, home, "auto"),
+    PATH: [bin, basePath].join(delimiter),
+    AGENT_HARNESS: "claude-code,opencode",
+  };
+  const result = await command([process.execPath, cliPath, "sandbox"], root, env);
+  return { exitCode: result.exitCode, text: `${result.stdout}\n${result.stderr}` };
+}
+
+/** Shared assertions: auto labels the choice per harness and never picks docker. */
+function expectAutoPerHarness(text: string): void {
+  expect(text).toContain("Configured: AGENT_SANDBOX=auto");
+  expect(text).toContain("Next run:   per harness (each entry gets its own sandbox decision):");
+  expect(text).toMatch(
+    /claude-code\s+auto picks native — agent wrapped with Harness native sandbox/,
+  );
+  expect(text).toContain("Harness CLI preflight (auto (per harness))");
+  expect(text).toContain("AGENT_SANDBOX=auto would pick: native (for claude-code)");
+  // docker is detected as ready, yet auto never selects it for any entry.
+  expect(text).toMatch(
+    /docker\s+Docker Sandboxes \(microVM\) \[explicit-only, never picked by auto\]\s+✅ available/,
+  );
+  expect(text).not.toContain("auto picks docker");
+  expect(text).not.toContain("would pick: docker");
+  expect(text).not.toContain("[docker]");
+}
+
+test.skipIf(!existsSync(cliPath))(
+  "sandbox doctor decides auto per chain entry and warns when no provider wraps the fallback",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-doctor-auto-chain-"));
+    const home = createProviderHome(root);
+    try {
+      const { exitCode, text } = await autoChainDoctor(root, home, providerOfflinePath("nono"));
+      expect(exitCode, text).toBe(0);
+      expectAutoPerHarness(text);
+      expect(text).toMatch(
+        /opencode\s+auto finds no usable provider — the run proceeds unsandboxed with a warning/,
+      );
+      expect(text).toContain(
+        'no sandbox provider available on this machine for the "opencode" harness — running the agent unsandboxed',
+      );
+      expect(text).toContain(
+        "AGENT_SANDBOX=auto would run opencode unsandboxed (no available provider supports it).",
+      );
+      // native is never stretched over a harness it cannot wrap.
+      expect(text).not.toMatch(/opencode\s+auto picks native/);
+      expect(text).not.toContain("would pick: native (for opencode)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+test.skipIf(skip)(
+  "sandbox doctor picks native for claude-code and nono for opencode in an auto chain",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-doctor-auto-chain-nono-"));
+    // nono refuses to start with HOME under the OS temp dir (see createSandboxHome).
+    const home = createSandboxHome();
+    try {
+      const { exitCode, text } = await autoChainDoctor(
+        root,
+        home,
+        [runtimeBinDir(), process.env.PATH ?? ""].join(delimiter),
+      );
+      expect(exitCode, text).toBe(0);
+      expectAutoPerHarness(text);
+      expect(text).toMatch(
+        /opencode\s+auto picks nono — agent wrapped with nono \(kernel sandbox\)/,
+      );
+      expect(text).toContain("AGENT_SANDBOX=auto would pick: nono (for opencode)");
+      expect(text).not.toContain("auto finds no usable provider");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+test.skipIf(!existsSync(cliPath))(
+  "a one-shot run with a chain fails closed on a first entry native cannot wrap",
+  async () => {
+    const run = await new SandboxWorkspace({ provider: "native" }).prepare();
+    try {
+      // Both chain entries are recording stubs; the second one is a harness
+      // native supports, so a silent fallback would spawn it.
+      const bin = join(run.root, "chain-bin");
+      mkdirSync(bin, { recursive: true });
+      const opencodeLog = join(run.root, "opencode-invocations.txt");
+      const claudeLog = join(run.root, "claude-invocations.txt");
+      // Each stub logs its argv; `--version` answers like a real CLI.
+      const recorder = (log: string) =>
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\necho "1.0.0"\n`;
+      const opencode = stubExecutable(bin, "opencode", recorder(opencodeLog));
+      const claude = stubExecutable(bin, "claude", recorder(claudeLog));
+      const headBefore = await run.git("rev-parse", "HEAD");
+
+      const result = await run.run(
+        {
+          PATH: [bin, runtimeBinDir(), process.env.PATH ?? ""].join(delimiter),
+          AGENT_HARNESS: "opencode,claude-code",
+          OPENCODE_CLI_PATH: opencode,
+          CLAUDE_CODE_CLI_PATH: claude,
+        },
+        ["--sandbox", "native"],
+        { createPr: false, probeAgent: false },
+      );
+      const text = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode, text).not.toBe(0);
+      expect(text).toContain('Sandbox provider "native" does not support the "opencode" harness');
+      expect(text).not.toContain("🔒 Agent sandbox:");
+      // No silent fallback: the second entry was never spawned.
+      expect(existsSync(claudeLog)).toBe(false);
+      // The first entry never ran as an agent. Its executable may be probed
+      // for its version before the sandbox check (recorded in the area file as
+      // an observation), but no agent argv (`run ...`) reached it.
+      const opencodeCalls = existsSync(opencodeLog)
+        ? readFileSync(opencodeLog, "utf8").split("\n").filter(Boolean)
+        : [];
+      expect(opencodeCalls.filter((argv) => argv.trim() !== "--version")).toEqual([]);
+      expect(Object.keys(run.checks())).toHaveLength(0);
+      // The repo is unchanged: same HEAD, nothing staged or edited, nothing pushed.
+      expect(await run.git("rev-parse", "HEAD")).toBe(headBefore);
+      expect(await run.git("rev-list", "--count", `${run.base}..HEAD`)).toBe("0");
+      expect(await run.git("status", "--porcelain")).toBe("");
+      expect(await run.remoteSha(run.head)).toBeUndefined();
+    } finally {
+      run.dispose();
+    }
+  },
+  90_000,
 );
