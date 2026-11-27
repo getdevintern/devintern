@@ -31,6 +31,7 @@ const silentLog = () => {};
 const deps = {
   getUser: () => Promise.resolve(null),
   listInstalledAgents: () => [{ name: "claude-code", displayName: "Claude Code" }],
+  githubCliToken: () => null,
 };
 
 beforeEach(() => {

@@ -47,7 +47,6 @@ import {
   trackersSupportingPolling,
 } from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
-import { Utils } from "../utils";
 import { writeSecretFile } from "../utils/secret-file";
 import { loadWorkspaceConfig } from "../workspace/config";
 import {
@@ -55,7 +54,6 @@ import {
   writeWorkerOperatingPolicy,
   writeWorkspaceDefaults,
 } from "../workspace/init";
-import { gitHubSlugFromRemote } from "../workspace/env";
 import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import {
   ensureWorkspaceCodeState,
@@ -70,10 +68,14 @@ import {
   relayStep,
   serviceStep,
 } from "./worker-init-activation";
+import { readGitHubCliToken } from "./github-cli-token";
+import type { GitHubCliToken } from "./github-cli-token";
 import { recordRepoDefaultBranch } from "./worker-init-branch";
 import { errorMessage } from "./worker-init-fs";
+import { githubTokenStep, originGitHubSlug } from "./worker-init-github-token";
 import { hostStep, withoutRepeatedHostFailures } from "./worker-init-host";
 import { defaultDevinternLabelOps } from "./worker-init-label";
+import { describeQueryFailure } from "./worker-init-query-failure";
 import {
   createQueryCorrectionAttempts,
   queryLabelsCheck,
@@ -120,6 +122,7 @@ export const WORKER_INIT_STEPS: readonly WorkerInitStep[] = [
   { id: "host", run: hostStep },
   { id: "tracker", run: trackerStep },
   { id: "workspace", run: workspaceStep },
+  { id: "github-token", run: githubTokenStep },
   { id: "query", run: queryStep },
   { id: "settings", run: settingsStep },
   { id: "save", run: saveStep },
@@ -219,7 +222,13 @@ async function trackerStep(run: SetupRun): Promise<boolean> {
         promptSecret: run.promptSecret,
         log: run.log,
       })
-    : await defaultEnsureTracker(run.cwd, run.prompt, run.promptSecret, run.log);
+    : await defaultEnsureTracker(
+        run.cwd,
+        run.prompt,
+        run.promptSecret,
+        run.log,
+        run.deps.githubCliToken,
+      );
   if (!trackerType) {
     run.log("❌ Tracker setup did not finish. Re-run `devintern worker init`.");
     trackWorkerInitFailed("tracker_setup_incomplete");
@@ -318,9 +327,28 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
  */
 async function queryStep(run: SetupRun): Promise<boolean> {
   if (run.input === "flags") {
-    const planned = planQuery(run.args, run.draft!, run);
+    // Read `gh` with the run's environment (tests pin PATH here); an injected
+    // reader keeps a test hermetic when the developer host is signed in.
+    const processEnv = run.deps.processEnv ?? process.env;
+    const githubCliToken =
+      run.deps.githubCliToken ?? (() => readGitHubCliToken({ env: processEnv }));
+    const planned = await planQuery(run.args, run.draft!, run, {
+      probe: run.deps.probe ?? defaultProbe,
+      githubCliToken,
+      ...(run.deps.probeTimeoutMs ? { probeTimeoutMs: run.deps.probeTimeoutMs } : {}),
+    });
     if (!planned.ok) return failFlags(run, planned);
     run.plan = planned.plan;
+    if (planned.plan.githubTokenProbeFailed) {
+      const reason = planned.plan.githubTokenAuthRejected
+        ? "was rejected"
+        : "could not be verified";
+      const detail = planned.plan.githubTokenFailure ? ` (${planned.plan.githubTokenFailure})` : "";
+      run.report.warnings.push(
+        `The GitHub CLI token ${reason}${detail}, so it was not saved; use a token with ` +
+          "repository access or pass one with --env-file.",
+      );
+    }
     return true;
   }
   const { workspaceDir } = run;
@@ -555,6 +583,9 @@ async function saveStep(run: SetupRun): Promise<boolean> {
     for (const file of applied.filesWritten) log(`💾 Wrote ${file}`);
     if (applied.seededProject) log(`   Seeded routing rule: project = ${applied.seededProject}`);
   }
+  // Report the token only once the workspace `.env` holds it: a run that
+  // refuses to update an existing workspace must not claim a token was saved.
+  if (plan.tokenSource) report.tokenSource = plan.tokenSource;
   report.changed = run.writes.length > 0;
   noteRepo(run);
   return true;
@@ -719,6 +750,23 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
       if (labels) checks.push(labels);
     }
   }
+  // A CLI token whose probe failed is never written. For the GitHub tracker
+  // that token is required, so the run fails with `fix-credentials`; for a
+  // non-GitHub tracker it is only the optional PR token, so a warning keeps an
+  // otherwise valid tracker setup alive. A distinct name keeps this row apart
+  // from the tracker `credentials` row above.
+  if (plan.githubTokenProbeFailed) {
+    const prefix = plan.githubTokenAuthRejected
+      ? "GitHub CLI token rejected"
+      : "GitHub CLI token could not be verified";
+    checks.push({
+      name: "github-token",
+      label: "GitHub credential probe",
+      status: plan.tracker === "github" ? "fail" : "warn",
+      message: plan.githubTokenFailure ? `${prefix}: ${plan.githubTokenFailure}` : prefix,
+      hint: "Use a GITHUB_TOKEN that can open pull requests, or pass one with --env-file",
+    });
+  }
   return checks;
 }
 
@@ -791,18 +839,12 @@ function applyEnvFile(envPath: string): Record<string, string> {
   return env;
 }
 
-/** `owner/repo` of the checkout's GitHub `origin`, or null (no origin, not GitHub). */
-async function originGitHubSlug(cwd: string): Promise<string | null> {
-  const result = await Utils.executeGitCommand(["remote", "get-url", "origin"], { cwd });
-  const remote = result.success ? result.output.trim() : "";
-  return remote ? gitHubSlugFromRemote(remote) : null;
-}
-
 export async function defaultEnsureTracker(
   cwd: string,
   prompt: PromptFn,
   promptSecret: PromptFn,
   log: LogFn,
+  githubCliToken?: () => GitHubCliToken | null,
 ): Promise<string | null> {
   // A legacy checkout `.env` is reused once; `add-repo` merges it into the
   // workspace env in the next step.
@@ -846,6 +888,10 @@ export async function defaultEnsureTracker(
     promptSecret,
     envLabel: sharedEnvPath,
     stepDefaults: originSlug ? { GITHUB_REPO: originSlug } : undefined,
+    // The worker's own GitHub-token step offers this after the workspace is
+    // known, so a declined offer is not repeated here.
+    offerPrToken: false,
+    ...(githubCliToken ? { githubCliToken } : {}),
     writeEnv: async (envContent) => {
       mergeIntoSharedEnv(sharedEnvPath, envContent, log);
       return sharedEnvPath;
@@ -919,61 +965,6 @@ function mergeIntoSharedEnv(envPath: string, envContent: string, log: LogFn): vo
   }
 }
 
-/**
- * Turn a ready-tasks dry-run error into one readable line. A GitHub search
- * the token cannot run (the repository is missing or not granted to it) is a
- * credentials problem, flagged `access` so the wizard does not blame the query.
- *
- * @param message - The error message from the tracker client
- * @param githubRepo - Configured `GITHUB_REPO`, named in the access message
- */
-export function describeQueryFailure(
-  message: string,
-  githubRepo?: string,
-): { text: string; access: boolean } {
-  const status = /GitHub API error \((\d{3})\)/.exec(message)?.[1];
-  const repo = githubRepo || "the repository";
-  if (
-    status === "422" &&
-    /cannot be searched|do not exist or you do not have permission/i.test(message)
-  ) {
-    return {
-      text:
-        `GitHub can't search ${repo}: the repository doesn't exist or the token can't see it. ` +
-        "Check GITHUB_REPO and the token's repository access.",
-      access: true,
-    };
-  }
-  if (status === "401") {
-    return {
-      text: "GitHub rejected the token (401): it is mistyped, expired, or revoked.",
-      access: true,
-    };
-  }
-  // GitHub (and others) append the raw JSON body; keep only its messages.
-  const jsonStart = message.indexOf("{");
-  if (jsonStart >= 0) {
-    const messages = [...message.slice(jsonStart).matchAll(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/g)]
-      .map((match) => match[1])
-      .filter((text): text is string => Boolean(text));
-    if (messages.length > 0) {
-      const prefix = message.slice(0, jsonStart).replace(/[\s:]+$/, "");
-      return {
-        text: condenseMessage(`${prefix}: ${[...new Set(messages)].join("; ")}`),
-        access: false,
-      };
-    }
-  }
-  return { text: condenseMessage(message), access: false };
-}
-
-/**
- * What still keeps the worker from running, one line each: the failing
- * readiness checks when they ran, otherwise the license step's result.
- *
- * @param checks - `worker doctor` checks, or undefined when they did not run
- * @param licenseFailure - License step outcome (null when entitled)
- */
 export function readinessBlockers(
   checks: ReadinessCheck[] | undefined,
   licenseFailure: string | null | undefined,

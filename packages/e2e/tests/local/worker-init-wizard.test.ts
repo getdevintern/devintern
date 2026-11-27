@@ -178,9 +178,10 @@ function tailAfter(output: string, prompt: RegExp): string {
 }
 
 /**
- * Aborted prompts end with one clean `❌` line naming how the input stopped.
- * Once the workspace is written (`paused`), a `⏸️  Setup paused` line before
- * it says where the answers so far are saved.
+ * Aborted prompts end with one clean closing line. Before the workspace is
+ * written it is a `❌` line naming how the input stopped. Once it is written
+ * (`paused`), the closing line is `⏸️  Setup paused`, saying where the answers
+ * so far are saved, and the generic `❌ … setup stopped` line is not repeated.
  */
 function expectCleanAbort(
   run: WizardRun,
@@ -194,13 +195,16 @@ function expectCleanAbort(
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "");
-  expect(tail).toHaveLength(options.paused ? 2 : 1);
+  expect(tail).toHaveLength(1);
   if (options.paused) {
     expect(tail[0]).toStartWith("⏸️  Setup paused. Your answers so far are saved in");
     expect(tail[0]).toContain("workspace.toml");
+    expect(tail[0]).toContain("run `devintern worker init` to continue");
+    expect(run.output).not.toContain("setup stopped");
+    return;
   }
-  expect(tail.at(-1)).toStartWith("❌");
-  expect(tail.at(-1)).toContain(reason);
+  expect(tail[0]).toStartWith("❌");
+  expect(tail[0]).toContain(reason);
 }
 
 ptyTest(
@@ -217,6 +221,10 @@ ptyTest(
       for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
       expect(run.output).not.toMatch(SIGN_IN_PROMPT);
       expect(run.output).toContain("✅ Query works: 1 task(s) match right now.");
+      expect(run.output).toContain("📦 DevIntern opens pull requests on GitHub.");
+      expect(run.output).toContain(
+        "Token permissions and GitHub App setup: https://devintern.com/docs/code/github-integration",
+      );
       expect(run.output).toContain("Sentry auto-fixes skipped");
       expect(run.output).toContain("Relay skipped.");
       expect(run.output).toContain("📋 Readiness (the same checks as `devintern worker doctor`):");
@@ -327,9 +335,11 @@ ptyTest(
       const init = await fixture.init(["--json"]);
       expect(init.exitCode, init.stderr).toBe(0);
 
-      // Drop the tracker, tasks-directory and PR-token prompts (already configured).
-      // The query prompt shows the saved query as its default: keep it.
+      // Drop the tracker and tasks-directory prompts (already configured); the
+      // PR token is still optional and unset, so skip it. The query prompt
+      // shows the saved query as its default: keep it.
       const answers: Answer[] = [
+        [TOKEN_PROMPT, "\r"],
         [/Ready-tasks query[^\n]*: $/, "\r"],
         ...markdownAnswers(fixture, { licensing: false }).slice(
           markdownAnswers(fixture).findIndex(([prompt]) => prompt === QUERY_PROMPT) + 1,
@@ -392,11 +402,12 @@ for (const [name, key, reason] of [
         // half-initialised workspace is not left on the "jira" default.
         expect(fixture.config().defaults).toMatchObject({ tracker: "markdown" });
 
-        // The re-run recovers instead of refusing the half-initialised workspace.
+        // The re-run recovers instead of refusing the half-initialised
+        // workspace. The PR token was skipped earlier, so it asks again first.
         const rerun = await runWizard(
           fixture,
           proxy,
-          [[QUERY_PROMPT, "status=todo\r"], ...answers.slice(queryIndex + 1)],
+          [[TOKEN_PROMPT, "\r"], [QUERY_PROMPT, "status=todo\r"], ...answers.slice(queryIndex + 1)],
           { licensing: false },
         );
         expect(rerun.exitCode, rerun.output).toBe(0);

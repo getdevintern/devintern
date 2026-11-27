@@ -172,6 +172,7 @@ describe("runNonInteractiveWorkerInit", () => {
         processEnv: {},
         probe: async () => {},
         probeTimeoutMs: 2_000,
+        githubCliToken: () => null,
         doctor: doctorStubs(doctorOverrides),
         ...rest,
       },
