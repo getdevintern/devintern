@@ -593,6 +593,87 @@ export function appendRepoEntry(
   return { content: content + separator + block, name, added: true, seededProject };
 }
 
+/**
+ * Set or add the `default_branch` key of one existing `[[repos]]` entry
+ * without rewriting unrelated comments or tables.
+ *
+ * @param content - Current workspace.toml text
+ * @param name - The entry's `name`
+ * @param defaultBranch - Branch tasks start from and pull requests target
+ * @returns Updated text; unchanged when no entry has that name
+ */
+export function upsertRepoDefaultBranch(
+  content: string,
+  name: string,
+  defaultBranch: string,
+): string {
+  const lines = content.split("\n");
+  const isHeader = (line: string) => /^\s*\[/.test(line);
+  const isRepoHeader = (line: string) => /^\s*\[\[repos\]\]\s*(#.*)?$/.test(line);
+  for (let start = 0; start < lines.length; start++) {
+    if (!isRepoHeader(lines[start] ?? "")) continue;
+    // The entry's own keys run until the next table header (a `[repos.env]`
+    // sub-table or the next entry).
+    let end = start + 1;
+    while (end < lines.length && !isHeader(lines[end] ?? "")) end++;
+    const bodyStart = start + 1;
+    const body = lines.slice(bodyStart, end);
+    if (!body.some((line) => tomlNameValue(line) === name)) continue;
+
+    const activeIndex = body.findIndex((line) => /^\s*default_branch\s*=/.test(line));
+    if (activeIndex >= 0) {
+      lines[bodyStart + activeIndex] = `default_branch = ${tomlString(defaultBranch)}`;
+      return lines.join("\n");
+    }
+
+    // Insert after the entry's last key, before any trailing comments that
+    // belong to the next table.
+    let insertAt = bodyStart;
+    body.forEach((line, index) => {
+      if (line.trim() !== "" && !line.trim().startsWith("#")) insertAt = bodyStart + index + 1;
+    });
+    lines.splice(insertAt, 0, `default_branch = ${tomlString(defaultBranch)}`);
+    return lines.join("\n");
+  }
+  return content;
+}
+
+/** Validate and persist one repo's `default_branch` in `workspace.toml`. */
+export function writeRepoDefaultBranch(
+  workspaceDir: string,
+  name: string,
+  defaultBranch: string,
+): void {
+  const configPath = workspaceConfigPath(workspaceDir);
+  const updated = upsertRepoDefaultBranch(readFileSync(configPath, "utf8"), name, defaultBranch);
+  parseWorkspaceConfig(updated, configPath);
+  writeFileSync(configPath, updated);
+}
+
+/**
+ * The checkout's current branch and the remote default branch as the clone
+ * recorded it (`origin/HEAD`), without contacting the remote. The default
+ * falls back to the current branch when the clone has no `origin/HEAD`.
+ *
+ * @param cwd - Repository checkout
+ */
+export async function detectCheckoutBranches(
+  cwd: string,
+): Promise<{ branch?: string; defaultBranch?: string }> {
+  const head = await Utils.executeGitCommand(["symbolic-ref", "--quiet", "--short", "HEAD"], {
+    cwd,
+  });
+  const branch = head.success ? head.output.trim() || undefined : undefined;
+  const originHead = await Utils.executeGitCommand(
+    ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+    { cwd },
+  );
+  const remoteDefault = originHead.success
+    ? originHead.output.trim().replace(/^origin\//, "") || undefined
+    : undefined;
+  return { branch, defaultBranch: remoteDefault ?? branch };
+}
+
 /** The comment `devintern init` writes above a repo's `manual_only = true`. */
 const MANUAL_ONLY_COMMENT =
   /^\s*#\s*Run by hand from your checkout only; the worker skips this repo\.\s*$/;
