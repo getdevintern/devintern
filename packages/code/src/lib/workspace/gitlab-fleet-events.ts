@@ -3,6 +3,8 @@ import type { Acquirer } from "../../worker";
 import { createGitLabCiProvider } from "../code-host/gitlab/ci-provider";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { JobKind, TaskSupervisor } from "../worker/supervisor";
+import { RunStore } from "../state/run-recorder";
+import { settleInProgressCiFixRun } from "../state/orphaned-follow-ups";
 import type {
   AgentPr,
   AgentPrCloseReason,
@@ -130,7 +132,7 @@ export async function buildGitLabFleetAcquirers(options: {
       ) => Promise<void>)
     | undefined;
   if (hasGitLabProfile) {
-    const { CiFailureWatcherAcquirer, runCiFixViaCli } =
+    const { CiFailureWatcherAcquirer, CI_FIX_INCOMPLETE_REASON, runCiFixViaCli } =
       await import("../acquirers/ci-failure-watcher");
     const { GitLabReviewPollingAcquirer } = await import("../acquirers/gitlab-review-polling");
     const { GitLabReviewsClient } = await import("../code-host/gitlab/reviews");
@@ -223,6 +225,7 @@ export async function buildGitLabFleetAcquirers(options: {
     intervalUpdaters.push((seconds) => gitlabPoller.updateInterval(seconds));
 
     const gitlabCiRows = new Map<string, Map<number, import("../state/worker-state").AgentPr>>();
+    const gitlabRunStore = new RunStore(state.dbPath);
     const ciKey = (mr: import("../state/worker-state").AgentPr) =>
       `${mr.instanceUrl}:${mr.projectPath}`;
     const ciRow = (key: string, number?: number) => {
@@ -261,6 +264,14 @@ export async function buildGitLabFleetAcquirers(options: {
           });
       },
       markClosed: gitLabCiMarkClosed(state.workerState, ciRow),
+      settleCiFixRun: (key, prNumber) => {
+        settleInProgressCiFixRun(
+          gitlabRunStore,
+          ciRow(key, prNumber)?.projectPath ?? key,
+          prNumber,
+          CI_FIX_INCOMPLETE_REASON,
+        );
+      },
       provider: createGitLabCiProvider(resolveCi),
       fixPr: async (key, n, feedbackPath, expectedHeadSha) => {
         const { mr, client } = resolveCi(key, n);
