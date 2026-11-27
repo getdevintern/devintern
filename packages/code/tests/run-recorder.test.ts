@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 
 import { runTaskSteps } from "../src/lib/task/step-runner";
 
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 
 import {
   RunStore,
@@ -19,6 +19,9 @@ import {
   recordRunStage,
   replaceRunStage,
 } from "../src/lib/state/run-recorder";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
+import { WorkerState } from "../src/lib/state/worker-state";
+import { listNotifications } from "../src/lib/notifications/store";
 
 describe("RunStore", () => {
   let dbPath: string;
@@ -154,6 +157,97 @@ describe("RunStore", () => {
     const run = store.getRun(id);
     expect(run?.status).toBe("succeeded");
     expect(run?.outcomeReason).toBe("late completion");
+  });
+
+  test("orphaned base-sync attempts count as failures and exhaust at the retry cap", () => {
+    const queue = new WebhookQueue({ dbPath });
+    const externalId = "base-sync:acme/widgets#42:base1:head1";
+    const start = 1_750_000_000_000;
+    try {
+      queue.observeBaseSyncEvent({
+        externalId,
+        repo: "acme/widgets",
+        prNumber: 42,
+        baseSha: "base1",
+        headSha: "head1",
+        now: start,
+      });
+      const attempts: number[] = [];
+      let lastRunId = 0;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const startedAt = start + attempt * 60_000;
+        queue.beginBaseSyncAttempt(externalId, startedAt);
+        lastRunId = store.createRun({
+          origin: "conflict_resolution",
+          repo: "acme/widgets",
+          prNumber: 42,
+          attempt,
+        });
+        const restartAt = startedAt + 10 * 60_000;
+        store.reapOrphanedRunIds({ maxRetries: 3, now: restartAt });
+
+        const event = queue.getBaseSyncEvent(externalId);
+        expect(event?.attempts).toBe(attempt);
+        // Backoff is anchored at the restart, not at the attempt's start.
+        expect(event?.updatedAt).toBe(restartAt);
+        attempts.push(event?.attempts ?? 0);
+        if (attempt < 3) {
+          expect(event?.status).toBe("pending");
+          expect(event?.lastError).toContain("orphaned");
+          expect(queue.hasProcessed("github:base-sync", externalId)).toBe(false);
+        } else {
+          expect(event?.status).toBe("failed");
+          expect(event?.lastError).toContain("keeps getting cut off by worker restarts");
+          expect(queue.hasProcessed("github:base-sync", externalId)).toBe(true);
+          expect(store.getRun(lastRunId)?.outcomeReason).toContain(
+            "conflict resolution keeps getting cut off by worker restarts",
+          );
+        }
+      }
+      expect(attempts).toEqual([1, 2, 3]);
+
+      const reader = new Database(dbPath);
+      try {
+        const notifications = listNotifications(reader, { includeMuted: true }).notifications;
+        expect(notifications).toHaveLength(1);
+        expect(notifications[0]?.kind).toBe("escalated");
+        expect(notifications[0]?.title).toContain("acme/widgets#42");
+
+        // A later successful resolution on the same PR resolves the row.
+        const resolvedRun = store.createRun({
+          origin: "conflict_resolution",
+          repo: "acme/widgets",
+          prNumber: 42,
+          attempt: 4,
+        });
+        store.finishRun(resolvedRun, "succeeded", "pushed");
+        expect(
+          listNotifications(reader, { unresolved: true, includeMuted: true }).notifications,
+        ).toHaveLength(0);
+      } finally {
+        reader.close();
+      }
+    } finally {
+      queue.close();
+    }
+  });
+
+  test("orphaned CI fix attempts consume the PR's autofix budget", () => {
+    const workerState = new WorkerState(dbPath);
+    try {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        store.createRun({
+          origin: "ci_fix",
+          repo: "acme/widgets",
+          prNumber: 42,
+          attempt,
+        });
+        store.reapOrphanedRunIds({ maxRetries: 3, now: 1_750_000_000_000 + attempt });
+      }
+      expect(workerState.getCiFixState("acme/widgets", 42).consecutiveFailures).toBe(2);
+    } finally {
+      workerState.close();
+    }
   });
 
   test("pr_mention runs have no task key", () => {

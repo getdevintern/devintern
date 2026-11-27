@@ -2,8 +2,12 @@ import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } f
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { Database } from "bun:sqlite";
+
+import { listNotifications } from "../src/lib/notifications/store";
 
 import {
+  baseSyncRetryBackoffMs,
   baseSyncReviveCooldownMs,
   OPEN_PR_LIST_PAGE_SIZE,
   ReviewPollingAcquirer,
@@ -81,6 +85,7 @@ describe("ReviewPollingAcquirer", () => {
       conflictWindowGraceMs?: number;
       conflictResolution?: ConflictResolutionMode;
       disableResolveConflicts?: boolean;
+      resolveImpl?: (repo: string, prNumber: number) => Promise<AutomaticResolveResult>;
       shouldPollFeedback?: () => boolean;
       feedbackFallbackIntervalSeconds?: number;
     } = {},
@@ -134,10 +139,12 @@ describe("ReviewPollingAcquirer", () => {
       },
       resolveConflicts: options.disableResolveConflicts
         ? undefined
-        : async (repo, n) => {
-            resolved.push(`${repo}#${n}`);
-            return options.resolveResults?.shift() ?? { outcome: "clean", message: "merged" };
-          },
+        : options.resolveImpl
+          ? options.resolveImpl
+          : async (repo, n) => {
+              resolved.push(`${repo}#${n}`);
+              return options.resolveResults?.shift() ?? { outcome: "clean", message: "merged" };
+            },
       quietPeriodSeconds: options.quietPeriodSeconds ?? 0,
       runStore: options.runStore,
       now: options.now,
@@ -842,6 +849,110 @@ describe("ReviewPollingAcquirer", () => {
       expect(made.resolved).toHaveLength(2);
       expect(queue.getBaseSyncEvent(eventKey)?.status).toBe("completed");
     } finally {
+      setSystemTime();
+    }
+  });
+
+  test("orphaned base-sync attempts back off after each restart and stop at the cap", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    queue.close();
+    queue = new WebhookQueue({ dbPath, maxRetries: 3 });
+    const runStore = new RunStore(dbPath);
+    const eventKey = "base-sync:acme/widgets#42:base1:head1";
+    const start = 1_750_000_000_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "dirty",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: false,
+      reviews: [],
+      comments: [],
+    };
+    let started = 0;
+    const make = () =>
+      makeAcquirer(gh, {
+        runStore,
+        resolveImpl: () => {
+          started += 1;
+          // The resolver never settles: the worker "dies" while it runs.
+          return new Promise<AutomaticResolveResult>(() => {});
+        },
+      });
+    try {
+      setSystemTime(start);
+      let made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(1);
+
+      let restartAt = start + 10 * 60_000;
+      runStore.reapOrphanedRunIds({ maxRetries: 3, now: restartAt });
+      let event = queue.getBaseSyncEvent(eventKey);
+      expect(event?.status).toBe("pending");
+      expect(event?.attempts).toBe(1);
+      expect(event?.updatedAt).toBe(restartAt);
+
+      // Inside the 30s backoff after the restart: no attempt yet.
+      setSystemTime(restartAt + baseSyncRetryBackoffMs(1) - 1);
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(1);
+
+      // The backoff elapsed: attempt 2 starts, then dies with the worker.
+      setSystemTime(restartAt + baseSyncRetryBackoffMs(1));
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(2);
+      let attemptStartedAt = restartAt + baseSyncRetryBackoffMs(1);
+      restartAt = attemptStartedAt + 10 * 60_000;
+      runStore.reapOrphanedRunIds({ maxRetries: 3, now: restartAt });
+      event = queue.getBaseSyncEvent(eventKey);
+      expect(event?.status).toBe("pending");
+      expect(event?.attempts).toBe(2);
+      expect(event?.updatedAt).toBe(restartAt);
+
+      // The backoff doubles: still nothing inside 60s.
+      setSystemTime(restartAt + baseSyncRetryBackoffMs(2) - 1);
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(2);
+
+      setSystemTime(restartAt + baseSyncRetryBackoffMs(2));
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(3);
+      attemptStartedAt = restartAt + baseSyncRetryBackoffMs(2);
+      restartAt = attemptStartedAt + 10 * 60_000;
+      runStore.reapOrphanedRunIds({ maxRetries: 3, now: restartAt });
+      event = queue.getBaseSyncEvent(eventKey);
+      expect(event?.status).toBe("failed");
+      expect(event?.attempts).toBe(3);
+      expect(queue.hasProcessed("github:base-sync", eventKey)).toBe(true);
+
+      const latest = runStore.listRuns({ origin: "conflict_resolution" })[0];
+      expect(latest?.outcomeReason).toContain(
+        "conflict resolution keeps getting cut off by worker restarts",
+      );
+
+      // Exhausted: the cap stops further automatic attempts.
+      setSystemTime(restartAt + 30 * 24 * 60 * 60_000);
+      made = make();
+      await made.acquirer.tick();
+      expect(started).toBe(3);
+
+      const reader = new Database(dbPath);
+      try {
+        const notifications = listNotifications(reader, { includeMuted: true }).notifications;
+        const escalations = notifications.filter(
+          (notification) => notification.kind === "escalated",
+        );
+        expect(escalations).toHaveLength(1);
+        expect(escalations[0]?.title).toContain("acme/widgets#42");
+      } finally {
+        reader.close();
+      }
+    } finally {
+      runStore.close();
       setSystemTime();
     }
   });

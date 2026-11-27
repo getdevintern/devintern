@@ -31,6 +31,7 @@ import {
 } from "./run-outputs";
 import type { RunOutputRecord, StoredRunOutput } from "./run-outputs";
 import { notifyRunFinished } from "../notifications/run-rules";
+import { ORPHANED_FOLLOW_UP_REASON, settleOrphanedFollowUps } from "./orphaned-follow-ups";
 import { isRunOutcomeClass, isRunWorkStatus } from "./run-outcome";
 import type { RunFailure, RunOutcomeClass, RunWork, RunWorkStatus } from "./run-outcome";
 import type { RunFinishRuleOptions } from "../notifications/run-rules";
@@ -44,6 +45,10 @@ export interface ReapOrphanedRunsOptions {
    * raise a false "will not be retried automatically" alarm.
    */
   notify?: boolean;
+  /** Retry ceiling for follow-up events; defaults to `WEBHOOK_MAX_RETRIES`. */
+  maxRetries?: number;
+  /** Clock override for the sweep and follow-up settlement (tests). */
+  now?: number;
 }
 
 export type RunOrigin =
@@ -687,8 +692,8 @@ export class RunStore {
    * @returns Ids of the runs reaped by this call
    */
   reapOrphanedRunIds(options: ReapOrphanedRunsOptions = {}): number[] {
-    const reason = "orphaned: worker exited before the run finished";
-    const now = Date.now();
+    const reason = ORPHANED_FOLLOW_UP_REASON;
+    const now = options.now ?? Date.now();
     const reapedIds = this.db
       .transaction(() => {
         // Select inside the immediate transaction and update per id so a
@@ -721,6 +726,18 @@ export class RunStore {
         return ids;
       })
       .immediate();
+    // An automatic per-PR attempt was already consumed before its resolver
+    // started, so finish that event's failure bookkeeping now: the orphaned
+    // attempt must wait out the retry backoff and count toward exhaustion.
+    // Settle before notifications so the clear exhausted outcome is recorded
+    // on the run first.
+    const reapedRuns = reapedIds
+      .map((id) => this.getRun(id))
+      .filter((run): run is RunRecord => run !== null);
+    settleOrphanedFollowUps(this.db, reapedRuns, {
+      now,
+      ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
+    });
     // Reaped runs never reached `endRun`, so their outputs files are still on disk.
     this.ingestSettledRunOutputs();
     // A reaped run is a failed run nothing retried: evaluate the finish rules
