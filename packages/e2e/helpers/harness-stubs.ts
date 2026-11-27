@@ -153,10 +153,18 @@ export interface ConfigureFailoverOptions {
   primary?: "limit" | "limit-once";
   /** Reset hint the primary prints; defaults to {@link ONE_HOUR_RESET}. */
   primaryResetHint?: string;
+  /**
+   * Harness name of the fallback chain entry (defaults to `codex`). Its stub
+   * is wired through `<HARNESS>_CLI_PATH`, so a sandbox test can put a harness
+   * a provider cannot wrap (for example `opencode` under `native`) second.
+   */
+  fallbackHarness?: string;
 }
 
 /**
- * Install the harness stubs and point a `claude-code,codex` chain at them.
+ * Install the harness stubs and point a `claude-code,<fallback>` chain at them
+ * (`claude-code,codex` unless {@link ConfigureFailoverOptions.fallbackHarness}
+ * names another fallback).
  *
  * The fixture's `prepare()` pins `AGENT_CLI_PATH` at the fake agent, and that
  * global override wins over every `<HARNESS>_CLI_PATH` during env-driven
@@ -171,8 +179,9 @@ export function configureFailover(
   mkdirSync(dir, { recursive: true });
   const agentPath = join(worker.root, "agent.ts");
   const primaryInvocations = join(dir, "claude-code-invocations.txt");
-  const fallbackInvocations = join(dir, "codex-invocations.txt");
-  const fallbackGate = join(dir, "codex-release");
+  const fallbackHarness = options.fallbackHarness ?? "codex";
+  const fallbackInvocations = join(dir, `${fallbackHarness}-invocations.txt`);
+  const fallbackGate = join(dir, `${fallbackHarness}-release`);
   const resetHint = options.primaryResetHint ?? ONE_HOUR_RESET;
   const primary =
     options.primary === "limit-once"
@@ -188,24 +197,24 @@ export function configureFailover(
     options.fallback === "limit"
       ? createLimitStub(
           dir,
-          "codex-limit.sh",
+          `${fallbackHarness}-limit.sh`,
           fallbackInvocations,
           options.fallbackResetHint ?? ONE_HOUR_RESET,
         )
       : options.fallback === "gated"
         ? createGatedDelegateStub(
             dir,
-            "codex-gated.sh",
+            `${fallbackHarness}-gated.sh`,
             fallbackInvocations,
             agentPath,
             fallbackGate,
           )
-        : createDelegateStub(dir, "codex-delegate.sh", fallbackInvocations, agentPath);
+        : createDelegateStub(dir, `${fallbackHarness}-delegate.sh`, fallbackInvocations, agentPath);
 
   delete worker.env.AGENT_CLI_PATH;
-  worker.env.AGENT_HARNESS = "claude-code,codex";
+  worker.env.AGENT_HARNESS = `claude-code,${fallbackHarness}`;
   worker.env.CLAUDE_CODE_CLI_PATH = primary;
-  worker.env.CODEX_CLI_PATH = fallback;
+  worker.env[`${fallbackHarness.toUpperCase().replaceAll("-", "_")}_CLI_PATH`] = fallback;
   return { dir, primaryInvocations, fallbackInvocations, fallbackGate };
 }
 

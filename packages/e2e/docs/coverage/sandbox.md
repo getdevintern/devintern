@@ -2,7 +2,7 @@
 
 Scope: sandbox providers (`nono`, `native`, `docker`, `auto`, removed `srt`/`smolvm`), workspace grants, the `--sandbox` flag, and the `devintern sandbox` doctor.
 
-Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox suites are `tests/local/sandbox.test.ts`, `tests/local/sandbox-workspace-grants.test.ts` and `tests/local/sandbox-workspace-grants-worker.test.ts`.
+Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox suites are `tests/local/sandbox.test.ts`, `tests/local/sandbox-harness-chain-worker.test.ts`, `tests/local/sandbox-workspace-grants.test.ts` and `tests/local/sandbox-workspace-grants-worker.test.ts`.
 
 Status values are defined in the [coverage index](../coverage-matrix.md#status-legend).
 
@@ -20,9 +20,9 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: External dependency: sandboxing
 - Status: `partial`
-- Evidence: `tests/local/sandbox.test.ts`
-- Missing: Native harness path, fallback when the preferred provider exists but cannot start, and other harness chains.
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/sandbox.test.ts` (single harness: native for claude-code, nono for goose; `claude-code,opencode` chain: per-harness doctor decision, native for claude-code, nono for opencode when installed, unsandboxed warning for opencode when nono is off `PATH`, docker never picked even with a ready stub `sbx`); run with `bun run --filter @devintern/e2e test`
+- Missing: Native harness path, fallback when the preferred provider exists but cannot start. A real worker run of an `auto` chain (the per-harness decision is covered through the doctor only).
+- Last reviewed: 2026-11-27
 
 ### `native` provider (claude-code, codex)
 
@@ -71,6 +71,22 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Evidence: `tests/local/sandbox.test.ts` (provider matrix, native auto, missing harness, invalid/unreachable, removed srt/smolvm)
 - Missing: —
 - Last reviewed: 2026-11-17
+
+### Explicit provider in a worker failover chain skips a fallback entry it cannot wrap
+
+- Surface: External dependency: sandboxing
+- Status: `default`
+- Evidence: `tests/local/sandbox-harness-chain-worker.test.ts` (real `devintern worker`, `AGENT_SANDBOX=native`, `AGENT_HARNESS=claude-code,opencode`, usage-limited claude-code stub, recording opencode stub); run with `bun run --filter @devintern/e2e test`
+- Missing: The same rule for `docker` and for a fallback that becomes unwrappable after startup. The worker spawns the primary stub once at startup as a readiness probe under the sandbox; the test only requires at least one primary spawn.
+- Last reviewed: 2026-11-27
+
+### One-shot task run with a chain uses only the first entry under an explicit provider
+
+- Surface: External dependency: sandboxing
+- Status: `default`
+- Evidence: `tests/local/sandbox.test.ts` ("a one-shot run with a chain fails closed on a first entry native cannot wrap"); run with `bun run --filter @devintern/e2e test`
+- Missing: PR-review and interactive runs with a chain. Observed (unconfirmed intent): before the sandbox check fails closed, the one-shot run executes the first entry's CLI once with `--version` (version detection) outside any sandbox. No agent argv reaches it, and the test leaves that probe unasserted.
+- Last reviewed: 2026-11-27
 
 ## Backlog
 
@@ -190,4 +206,28 @@ commit` works.
 ```sh
 bun run --filter @getdevintern/code build
 bun test packages/e2e/tests/local/sandbox-workspace-grants.test.ts packages/e2e/tests/local/sandbox-workspace-grants-worker.test.ts
+```
+
+### Sandbox providers across an `AGENT_HARNESS` failover chain
+
+These tests cover the documented chain rules: `auto` decides per harness, a
+worker skips a fallback the explicit provider cannot wrap, and interactive
+(one-shot) runs use only the first entry. Every harness CLI is a local stub, so
+no agent account or model call is involved.
+
+| Test                                                                                      | File                                               | Proves                                                                                                                                                                                                                                                                                                                       | Prerequisite                     |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| sandbox doctor decides auto per chain entry and warns when no provider wraps the fallback | `tests/local/sandbox.test.ts`                      | With `AGENT_SANDBOX=auto`, `AGENT_HARNESS=claude-code,opencode` and nono removed from `PATH`, the doctor prints a per-harness "Next run": native for claude-code, an explicit unsandboxed warning for opencode. A ready stub `sbx` is never picked.                                                                          | built CLI only                   |
+| sandbox doctor picks native for claude-code and nono for opencode in an auto chain        | `tests/local/sandbox.test.ts`                      | Same chain with nono installed: native for claude-code, nono for opencode, docker never picked.                                                                                                                                                                                                                              | nono on `PATH` (skips otherwise) |
+| an explicit native provider skips an opencode fallback it cannot wrap in a worker chain   | `tests/local/sandbox-harness-chain-worker.test.ts` | A real worker with `AGENT_SANDBOX=native` drops opencode at startup. When the claude-code stub hits a usage limit, the task is requeued with one `deferred` run, the claude-code window is persisted, nothing is pushed, and the opencode stub is never spawned (checked through its invocation log and the queue database). | built CLI only                   |
+| a one-shot run with a chain fails closed on a first entry native cannot wrap              | `tests/local/sandbox.test.ts`                      | `devintern <task.md> --sandbox native` with `AGENT_HARNESS=opencode,claude-code` (no `--create-pr`) exits non-zero with the provider/harness error. The claude-code stub is never spawned, opencode never receives an agent argv, and the repo is unchanged.                                                                 | built CLI only                   |
+
+The one-shot test does not pass `--agent-path`, so each harness resolves its
+own recording stub through `<HARNESS>_CLI_PATH`. With `--agent-path` the probe
+agent would also answer the CLI's `--version` detection and edit the repo
+before the sandbox check runs.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
 ```

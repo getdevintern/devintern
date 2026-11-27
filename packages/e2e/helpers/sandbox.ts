@@ -678,21 +678,30 @@ export class SandboxWorkspace {
    * @param overrides - Environment overrides for this run.
    * @param extraArgs - Additional CLI arguments appended to the base argv
    *   (for example `--sandbox nono`). The flag wins over `AGENT_SANDBOX`.
+   * @param options - `createPr: false` drops `--create-pr` (and its target
+   *   branch), for runs that must not push or open a pull request.
+   *   `probeAgent: false` drops `--agent-path`, so each harness resolves its
+   *   own executable (for example a recording stub in `<HARNESS>_CLI_PATH`)
+   *   instead of the probe.
    * @returns The CLI's exit code and captured output.
    */
-  async run(overrides: Record<string, string> = {}, extraArgs: readonly string[] = []) {
+  async run(
+    overrides: Record<string, string> = {},
+    extraArgs: readonly string[] = [],
+    options: { createPr?: boolean; probeAgent?: boolean } = {},
+  ) {
+    const delivery =
+      options.createPr === false ? [] : ["--create-pr", "--pr-target-branch", this.base];
+    const agent = options.probeAgent === false ? [] : ["--agent-path", this.agentPath];
     return command(
       [
         process.execPath,
         cliPath,
         join(this.root, `${this.id}.md`),
-        "--agent-path",
-        this.agentPath,
+        ...agent,
         "--skip-clarity-check",
         "--skip-comments",
-        "--create-pr",
-        "--pr-target-branch",
-        this.base,
+        ...delivery,
         "--hook-retries",
         "0",
         "--no-update",
