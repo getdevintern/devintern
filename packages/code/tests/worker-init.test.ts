@@ -188,10 +188,13 @@ describe("runWorkerInit", () => {
     return {
       cwd: tempDir,
       log: (m: string) => logs.push(m),
-      // "n" takes the expanded settings path (CI, conflicts, hours, Sentry),
-      // which these scripted answers walk through.
-      prompt: async (question: string) =>
-        question.startsWith(RECOMMENDED_QUESTION) ? "n" : (queued.shift() ?? "n"),
+      // `--customize` takes the expanded settings path (CI, conflicts, hours,
+      // Sentry), which these scripted answers walk through.
+      customize: true,
+      prompt: async (question: string) => {
+        if (question.startsWith(RECOMMENDED_QUESTION)) throw new Error(`asked: ${question}`);
+        return queued.shift() ?? "n";
+      },
       ensureTracker: async () => "markdown",
       bootstrapWorkspace: async () => ({ workspaceDir }),
       configureOperatingPolicy: async () => {},

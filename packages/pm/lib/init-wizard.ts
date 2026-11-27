@@ -23,6 +23,7 @@ import {
   withTimeout,
 } from "@devintern/task-trackers";
 import type { ExistingTrackerConfig } from "@devintern/task-trackers";
+import { findCodeCredentials, renderEnvText } from "./code-credentials";
 import { ensureGitignore } from "./init";
 import {
   PM_TRACKER_DOCS,
@@ -33,7 +34,7 @@ import {
   missingRequiredPmFields,
   renderPmEnvFile,
 } from "./init-shared";
-import { pathExists, readFile, writeFile } from "./runtime/fs.js";
+import { pathExists, writeFile } from "./runtime/fs.js";
 
 export { isInteractive } from "@devintern/task-trackers";
 export type { ExistingTrackerConfig };
@@ -81,8 +82,13 @@ export class PmInitError extends Error {
 export interface PmInitContext {
   configExists: boolean;
   envPath: string;
-  /** Tracker credentials found in `.devintern-code/.env`, if reusable. */
+  /**
+   * Tracker credentials DevIntern Code has for this project (its workspace
+   * entry, or a legacy `.devintern-code/.env`), if reusable.
+   */
   reusableFromCode: ExistingTrackerConfig | null;
+  /** Where {@link reusableFromCode} came from, for display. */
+  reusableSource?: string;
 }
 
 /**
@@ -93,13 +99,17 @@ export async function inspectPmInitContext(cwd: string): Promise<PmInitContext> 
   const envPath = join(cwd, ".devintern-pm", ".env");
   const configExists = await pathExists(envPath);
 
-  let reusableFromCode: ExistingTrackerConfig | null = null;
-  const codeEnvPath = join(cwd, ".devintern-code", ".env");
-  if (await pathExists(codeEnvPath)) {
-    reusableFromCode = extractExistingTrackerConfig(await readFile(codeEnvPath), PM_TRACKER_SETUP);
-  }
+  const code = await findCodeCredentials(cwd);
+  const reusableFromCode = code
+    ? extractExistingTrackerConfig(renderEnvText(code.env), PM_TRACKER_SETUP)
+    : null;
 
-  return { configExists, envPath, reusableFromCode };
+  return {
+    configExists,
+    envPath,
+    reusableFromCode,
+    ...(reusableFromCode && code ? { reusableSource: code.sourceLabel } : {}),
+  };
 }
 
 /**
@@ -191,7 +201,8 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
   }
 
   try {
-    const { configExists, envPath, reusableFromCode } = await inspectPmInitContext(cwd);
+    const { configExists, envPath, reusableFromCode, reusableSource } =
+      await inspectPmInitContext(cwd);
     if (configExists) {
       log(`\n⚠️  Configuration already exists: ${envPath}`);
       const answer = (await prompt("Overwrite it? (y/N): ")).trim().toLowerCase();
@@ -204,11 +215,11 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
     const values: Record<string, string> = {};
     let trackerId: string | undefined;
 
-    // Fast track: reuse tracker credentials from an existing @devintern/code
-    // config in the same project (env var names are shared).
+    // Fast track: reuse the tracker credentials @devintern/code already has
+    // for this project (env var names are shared).
     if (reusableFromCode) {
       const reused = await promptReuseExistingConfig(reusableFromCode, {
-        sourceLabel: "@devintern/code configuration (.devintern-code/.env)",
+        sourceLabel: reusableSource ?? "@devintern/code configuration",
         trackerName: PM_TRACKER_NAMES[reusableFromCode.trackerId] ?? reusableFromCode.trackerId,
         steps: PM_TRACKER_SETUP[reusableFromCode.trackerId] ?? [],
         prompt,

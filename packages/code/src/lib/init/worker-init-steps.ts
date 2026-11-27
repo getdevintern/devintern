@@ -66,6 +66,7 @@ import {
   serviceStep,
 } from "./worker-init-activation";
 import { errorMessage } from "./worker-init-fs";
+import { hostStep, withoutRepeatedHostFailures } from "./worker-init-host";
 import { defaultDevinternLabelOps } from "./worker-init-label";
 import {
   applyPlan,
@@ -94,6 +95,9 @@ import type { FlagsRun, PromptRun, ReadinessBlocker, SetupRun } from "./worker-i
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
 import { runTrackerSetup } from "./wizard";
 
+/** The wizard that asks each worker setting one by one. */
+const CUSTOMIZE_COMMAND = "devintern worker init --customize";
+
 /** One setup step. Returns false to stop setup (the step has said why). */
 export interface WorkerInitStep {
   id: string;
@@ -102,6 +106,7 @@ export interface WorkerInitStep {
 
 /** Every `worker init` step, in order, for both input sources. */
 export const WORKER_INIT_STEPS: readonly WorkerInitStep[] = [
+  { id: "host", run: hostStep },
   { id: "tracker", run: trackerStep },
   { id: "workspace", run: workspaceStep },
   { id: "query", run: queryStep },
@@ -413,10 +418,10 @@ async function offerDevinternLabel(run: PromptRun, query: string): Promise<void>
 
 /**
  * Worker settings. Both sources write the recommended settings explicitly
- * instead of relying on defaults: the wizard when its one question is
- * accepted on a workspace without custom settings ("n" walks through CI
- * repair, conflicts, active hours, and Sentry), flags mode for a new
- * workspace. An existing workspace keeps its custom settings either way.
+ * instead of relying on defaults for a workspace without custom settings
+ * (flags mode: a new workspace), and keep custom settings as they are, without
+ * a question. The wizard's `--customize` asks each setting (CI repair,
+ * conflicts, active hours) and offers Sentry instead.
  */
 async function settingsStep(run: SetupRun): Promise<boolean> {
   if (run.input === "flags") {
@@ -425,21 +430,20 @@ async function settingsStep(run: SetupRun): Promise<boolean> {
   }
   const { workspaceDir } = run;
   run.log("\n4️⃣  Worker settings");
-  const current = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
-  const custom = describeCustomWorkerSettings(current);
-  const question = custom
-    ? `Keep the current worker settings (${custom})? [Y/n]: `
-    : `Use the recommended worker settings (${RECOMMENDED_WORKER_SETTINGS_SUMMARY})? [Y/n]: `;
-  if (await askYesNo(run, question, true)) {
-    if (!custom) {
-      writeWorkerOperatingPolicy(workspaceDir, { ...RECOMMENDED_WORKER_POLICY, activeWindows: [] });
-      run.log("💾 Wrote the recommended worker settings to workspace.toml.");
-    } else {
-      run.log("   Kept the current worker settings.");
-    }
-    run.log(
-      "   Change them later in workspace.toml, or re-run `devintern worker init` and answer n.",
+  if (!run.deps.customize) {
+    const custom = describeCustomWorkerSettings(
+      loadWorkspaceConfig(workspaceConfigPath(workspaceDir)),
     );
+    if (custom) {
+      run.log(
+        `   Kept the current worker settings (${custom}); change them in workspace.toml or with \`${CUSTOMIZE_COMMAND}\`.`,
+      );
+    } else {
+      writeWorkerOperatingPolicy(workspaceDir, { ...RECOMMENDED_WORKER_POLICY, activeWindows: [] });
+      run.log(
+        `💾 Wrote the recommended worker settings to workspace.toml (${RECOMMENDED_WORKER_SETTINGS_SUMMARY}); change them there or with \`${CUSTOMIZE_COMMAND}\`.`,
+      );
+    }
     return true;
   }
 
@@ -566,15 +570,31 @@ async function readinessStep(run: SetupRun): Promise<boolean> {
     run.log("\n📋 Readiness (the same checks as `devintern worker doctor`):");
     try {
       checks = await run.deps.collectReadiness(run.workspaceDir);
-      for (const line of renderReadinessReport(checks).lines) run.log(`   ${line}`);
+      const shown = withoutRepeatedHostFailures(checks, run.host);
+      for (const line of renderReadinessReport(shown).lines) run.log(`   ${line}`);
     } catch (error) {
       run.log(`   ⚠️  Could not run the checks: ${(error as Error).message}`);
       run.log("   Run `devintern worker doctor` to check readiness.");
       checks = undefined;
     }
   }
-  run.outcome.blockers = readinessBlockers(checks, run.outcome.licenseFailure);
+  run.outcome.blockers = readinessBlockers(checks, run.outcome.licenseFailure).map((blocker) =>
+    installAgentBlocker(blocker, checks, run),
+  );
   return true;
+}
+
+/** The agent-CLI blocker names the install command the host step found. */
+function installAgentBlocker(
+  blocker: ReadinessBlocker,
+  checks: ReadinessCheck[] | undefined,
+  run: PromptRun,
+): ReadinessBlocker {
+  const install = run.host?.checks.installAgent;
+  const harness = checks?.find((check) => check.id === "harness" && check.status === "fail");
+  if (!install || !harness || !blocker.text.startsWith(`${harness.label}:`)) return blocker;
+  const how = install.url ? `see ${install.url}` : `run ${install.command}`;
+  return { ...blocker, text: `${harness.label}: install the agent CLI (${how})` };
 }
 
 function trackerDisplayName(tracker: string): string {

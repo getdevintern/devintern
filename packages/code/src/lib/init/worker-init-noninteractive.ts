@@ -146,6 +146,14 @@ export function parseNonInteractiveInitArgs(argv: string[]): ParseResult {
       case "--no-service":
         // Non-interactive init never installs the service; accepted for symmetry.
         break;
+      case "--customize":
+        return {
+          ok: false,
+          json,
+          error:
+            "--customize asks each worker setting and needs a terminal; it cannot be combined " +
+            `with --non-interactive. Edit workspace.toml instead. ${USAGE_HINT}`,
+        };
       default:
         return {
           ok: false,

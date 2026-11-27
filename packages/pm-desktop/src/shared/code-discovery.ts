@@ -14,7 +14,7 @@ export const CODE_PRODUCT_URL =
 export interface CodeDiscoveryVisibilityInput {
   /** Project has usable PM config (setup banner takes priority otherwise). */
   configured: boolean;
-  /** Project already has a `.devintern-code` directory. */
+  /** @devintern/code already knows the project (workspace entry or legacy folder). */
   hasCodeConfig: boolean;
   /** User chose "Don't show again" (persisted in settings.json). */
   dismissed: boolean;

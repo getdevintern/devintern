@@ -129,8 +129,9 @@ export interface ProjectStatus {
   /** Present when the config could not be loaded (missing .env vars, etc.). */
   configError?: string;
   /**
-   * True when `<project>/.devintern-code` exists — the team is already using
-   * (or scaffolding) @devintern/code, so skip the discovery tip.
+   * True when @devintern/code already knows the project (registered in the
+   * DevIntern workspace, or a legacy `<project>/.devintern-code`), so skip the
+   * discovery tip.
    */
   hasCodeConfig?: boolean;
   backendName?: string;

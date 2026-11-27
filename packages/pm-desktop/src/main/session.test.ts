@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -108,6 +109,42 @@ describe("detectCodeConfig", () => {
     tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-code-"));
     await writeFile(join(tempDir, ".devintern-code"), "not a directory");
     expect(await detectCodeConfig(tempDir)).toBe(false);
+  });
+
+  test("returns true when the project is registered in the workspace by path", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-code-"));
+    const workspaceDir = join(tempDir, "home");
+    const projectDir = join(tempDir, "project");
+    await mkdir(workspaceDir);
+    await mkdir(join(projectDir, "src"), { recursive: true });
+    await writeFile(
+      join(workspaceDir, "workspace.toml"),
+      `[[repos]]\nname = "project"\npath = ${JSON.stringify(projectDir)}\nmanual_only = true\n`,
+    );
+    expect(await detectCodeConfig(join(projectDir, "src"), workspaceDir)).toBe(true);
+    expect(await detectCodeConfig(tempDir, workspaceDir)).toBe(false);
+  });
+
+  test("returns true when the project's origin is registered in the workspace", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "pm-desktop-code-"));
+    const workspaceDir = join(tempDir, "home");
+    const projectDir = join(tempDir, "project");
+    await mkdir(workspaceDir);
+    await mkdir(projectDir);
+    execFileSync("git", ["init", "-q", projectDir]);
+    execFileSync("git", [
+      "-C",
+      projectDir,
+      "remote",
+      "add",
+      "origin",
+      "git@github.com:acme/api.git",
+    ]);
+    await writeFile(
+      join(workspaceDir, "workspace.toml"),
+      `[[repos]]\nname = "api"\nremote = "https://github.com/acme/api"\n`,
+    );
+    expect(await detectCodeConfig(projectDir, workspaceDir)).toBe(true);
   });
 });
 

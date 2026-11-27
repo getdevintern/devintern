@@ -34,6 +34,7 @@
     "@devintern/agent-harness": "workspace:*",
     "@devintern/task-trackers": "workspace:*",
     "@devintern/utils": "workspace:*",
+    "@devintern/workspace": "workspace:*",
     "@getdevintern/pm": "workspace:*",
     "@mdxeditor/editor": "^4.5.0",
     "@sentry/node": "10.70.0",

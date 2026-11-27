@@ -17,14 +17,34 @@ import {
 } from "./lib/init-wizard";
 
 let tempDir: string;
+let workspaceDir: string;
+let previousWorkspaceDir: string | undefined;
 
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), "pm-init-wizard-test-"));
+  // Never read the real ~/.devintern.
+  workspaceDir = mkdtempSync(join(tmpdir(), "pm-init-wizard-home-"));
+  previousWorkspaceDir = process.env.DEVINTERN_WORKSPACE_DIR;
+  process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
 });
 
 afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
+  rmSync(workspaceDir, { recursive: true, force: true });
+  if (previousWorkspaceDir === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
+  else process.env.DEVINTERN_WORKSPACE_DIR = previousWorkspaceDir;
 });
+
+/** Register `tempDir` in the test workspace as a path-keyed manual repo. */
+function registerInWorkspace(envFile: string, extraToml = ""): void {
+  mkdirSync(join(workspaceDir, "env"), { recursive: true });
+  writeFileSync(join(workspaceDir, "env", "app.env"), envFile, "utf8");
+  writeFileSync(
+    join(workspaceDir, "workspace.toml"),
+    `${extraToml}[[repos]]\nname = "app"\npath = ${JSON.stringify(tempDir)}\nmanual_only = true\nenv_file = "env/app.env"\n`,
+    "utf8",
+  );
+}
 
 /** Prompt stub that answers from a queue and records questions. */
 function promptQueue(answers: string[]) {
@@ -145,6 +165,29 @@ describe("writePmProjectConfig / probePmConnection (programmatic init)", () => {
     expect(ctx.configExists).toBe(false);
     expect(ctx.reusableFromCode?.trackerId).toBe("github");
     expect(ctx.reusableFromCode?.values.GITHUB_TOKEN).toBe("ghp_x");
+  });
+
+  test("inspectPmInitContext reuses the project's DevIntern workspace credentials", async () => {
+    writeFileSync(join(workspaceDir, ".env"), "LINEAR_API_KEY=shared\n", "utf8");
+    registerInWorkspace("LINEAR_TEAM_KEY=APP\n", '[defaults]\ntracker = "linear"\n\n');
+
+    const ctx = await inspectPmInitContext(tempDir);
+    expect(ctx.reusableSource).toBe('DevIntern workspace (repo "app")');
+    expect(ctx.reusableFromCode?.trackerId).toBe("linear");
+    expect(ctx.reusableFromCode?.values.LINEAR_API_KEY).toBe("shared");
+  });
+
+  test("inspectPmInitContext prefers the workspace over a legacy .devintern-code/.env", async () => {
+    registerInWorkspace("TASK_TRACKER=github\nGITHUB_TOKEN=ghp_workspace\n");
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".devintern-code", ".env"),
+      "TASK_TRACKER=github\nGITHUB_TOKEN=ghp_legacy\n",
+      "utf8",
+    );
+
+    const ctx = await inspectPmInitContext(tempDir);
+    expect(ctx.reusableFromCode?.values.GITHUB_TOKEN).toBe("ghp_workspace");
   });
 
   test("probePmConnection surfaces probe failures", async () => {
@@ -304,6 +347,32 @@ describe("runPmInitWizard", () => {
     expect(env).toContain("JIRA_BASE_URL=https://acme.atlassian.net");
     expect(env).toContain("JIRA_API_TOKEN=secret-token");
     expect(env).toContain("JIRA_DEFAULT_PROJECT_KEY=PROJ");
+  });
+
+  test("fast track: reusing workspace credentials writes pm config only and prints no secrets", async () => {
+    writeFileSync(join(workspaceDir, ".env"), "LINEAR_API_KEY=lin_api_shared_secret\n", "utf8");
+    registerInWorkspace("TASK_TRACKER=linear\nLINEAR_TEAM_KEY=APP\n");
+    const workspaceFiles = [
+      join(workspaceDir, "workspace.toml"),
+      join(workspaceDir, ".env"),
+      join(workspaceDir, "env", "app.env"),
+    ];
+    const before = workspaceFiles.map((path) => readFileSync(path));
+
+    const output: string[] = [];
+    const { prompt, asked } = promptQueue(["y", "", "", ""]);
+    await runPmInitWizard({
+      prompt,
+      probe: okProbe,
+      cwd: tempDir,
+      log: (message) => output.push(message),
+    });
+
+    expect(output.join("\n")).toContain('DevIntern workspace (repo "app")');
+    expect([...output, ...asked].join("\n")).not.toContain("lin_api_shared_secret");
+    expect(readEnv()).toContain("LINEAR_API_KEY=lin_api_shared_secret");
+    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-pm/.env");
+    expect(workspaceFiles.map((path) => readFileSync(path))).toEqual(before);
   });
 
   test("fast track: declining reuse falls back to the normal flow", async () => {
