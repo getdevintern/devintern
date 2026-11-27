@@ -1,6 +1,11 @@
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, join } from "path";
 import { detectSandboxProviders } from "@devintern/agent-harness";
+import {
+  MAX_PROMPT_ATTEMPTS,
+  PromptAttemptsExceededError,
+  createPromptAttempts,
+} from "@devintern/task-trackers";
 import { hasHelpArg } from "../cli/help";
 import { isPromptAbort, promptAbortReason } from "../cli/prompt-abort";
 import { flushAnalytics, trackSetupCompleted, trackSetupStarted } from "../observability/analytics";
@@ -112,11 +117,15 @@ export async function promptRunMode(
   log: (message: string) => void,
 ): Promise<RunMode> {
   log(RUN_MODE_QUESTION);
+  const reject = createPromptAttempts("run mode");
   for (;;) {
     const answer = (await prompt("Enter 1 or 2 [1]: ")).trim().toLowerCase();
     if (answer === "" || answer === "1" || answer === "worker") return "worker";
     if (answer === "2" || answer === "manual") return "manual";
     log("Please enter 1 or 2.");
+    reject(
+      `No valid run mode after ${MAX_PROMPT_ATTEMPTS} attempts; enter 1 for a worker or 2 for manual runs`,
+    );
   }
 }
 
@@ -176,9 +185,15 @@ export async function runInit(deps: InitCommandDeps = {}): Promise<number> {
     }
     return typeof process.exitCode === "number" ? process.exitCode : 0;
   } catch (error) {
-    if (!isPromptAbort(error)) throw error;
-    log(`\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern init\`.`);
-    return 1;
+    if (isPromptAbort(error)) {
+      log(`\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern init\`.`);
+      return 1;
+    }
+    if (error instanceof PromptAttemptsExceededError) {
+      log(`\n❌ ${error.message}; setup stopped. Re-run \`devintern init\`.`);
+      return 1;
+    }
+    throw error;
   }
 }
 

@@ -23,8 +23,10 @@ import {
 } from "@devintern/auth";
 import type { SupabaseAuthConfig } from "@devintern/auth";
 import {
+  MAX_PROMPT_ATTEMPTS,
   PROBE_TIMEOUT_MS,
   condenseMessage,
+  createPromptAttempts,
   defaultProbe,
   extractExistingTrackerConfig,
   isInteractive,
@@ -650,6 +652,7 @@ export async function runInitUpgrade(
     log("   3. Exit without changes");
 
     let choice: string | undefined;
+    const reject = createPromptAttempts("init action");
     for (;;) {
       const answer = (await prompt("Enter a number (1-3): ")).trim();
       if (answer === "1" || answer === "2" || answer === "3") {
@@ -657,6 +660,7 @@ export async function runInitUpgrade(
         break;
       }
       log(`❌ Invalid choice: '${answer}'. Pick 1-3.`);
+      reject(`No valid choice after ${MAX_PROMPT_ATTEMPTS} attempts; pick 1, 2, or 3`);
     }
     if (choice === "3") {
       log("No changes made.");

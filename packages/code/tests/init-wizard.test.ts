@@ -11,7 +11,7 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { basename, join } from "path";
-import { BUNDLED_TRELLO_API_KEY } from "@devintern/task-trackers";
+import { BUNDLED_TRELLO_API_KEY, PromptAttemptsExceededError } from "@devintern/task-trackers";
 import {
   ENV_HARNESS_DOCS,
   TRACKER_SETUP,
@@ -1030,6 +1030,27 @@ describe("runInitUpgrade", () => {
       expect(statSync(upgradeEnvPath()).mode & 0o777).toBe(0o600);
     },
   );
+
+  test("three invalid init-action choices stop without touching the file", async () => {
+    seedExistingConfig();
+    const before = readFileSync(upgradeEnvPath(), "utf8");
+    const { prompt, asked } = promptQueue(["maybe", "maybe", "maybe"]);
+    const run = runInitUpgrade({
+      envPath: upgradeEnvPath(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid choice after 3 attempts");
+    expect(asked.filter((question) => question.startsWith("Enter a number (1-3)"))).toHaveLength(3);
+    expect(readFileSync(upgradeEnvPath(), "utf8")).toBe(before);
+  });
 
   test("exit option leaves the file untouched", async () => {
     seedExistingConfig();

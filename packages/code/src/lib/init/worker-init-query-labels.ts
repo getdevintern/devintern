@@ -7,7 +7,11 @@
  * next step. No API call when the query has no label term.
  */
 
-import { condenseMessage } from "@devintern/task-trackers";
+import {
+  MAX_PROMPT_ATTEMPTS,
+  condenseMessage,
+  createPromptAttempts,
+} from "@devintern/task-trackers";
 
 import { TRACKER_CAPABILITIES, supportsLabelCreation } from "../trackers/capabilities";
 import { extractQueryLabels } from "../trackers/query-labels";
@@ -16,6 +20,27 @@ import type { DevinternLabelOps, DevinternLabelOpsFactory } from "./worker-init-
 import type { InitCheck } from "./worker-init-noninteractive-types";
 import type { LogFn, PromptFn } from "./worker-init-policy";
 import { withTimeout } from "./worker-init-run";
+
+/**
+ * Deliberate "fix the query" corrections (and failed dry runs after choosing
+ * to edit) one wizard run allows. Higher than the shared prompt budget: these
+ * are valid answers, not unusable input, but a scripted prompt that never
+ * improves the query still has to stop.
+ */
+const MAX_QUERY_CORRECTIONS = 5;
+
+/**
+ * Counter for query corrections chosen by the user (or forced by a failing dry
+ * run). Valid answers get a larger budget than unusable input, but stay
+ * bounded so a scripted prompt cannot loop.
+ */
+export function createQueryCorrectionAttempts(): (overrideMessage?: string) => void {
+  return createPromptAttempts(
+    "ready-tasks query",
+    `The ready-tasks query still does not work after ${MAX_QUERY_CORRECTIONS} corrections; fix it later in workspace.toml`,
+    MAX_QUERY_CORRECTIONS,
+  );
+}
 
 /** Report check name (flags mode) for labels the query names but the tracker lacks. */
 export const QUERY_LABELS_CHECK = "query-labels";
@@ -96,6 +121,7 @@ export async function reviewQueryLabels(
   if (missing.length === 0) return "keep";
   const where = ops.location ?? trackerName;
   const labelWord = missing.length === 1 ? "label" : "labels";
+  const reject = createPromptAttempts("query labels");
   for (;;) {
     const answer = (
       await run.prompt(
@@ -111,6 +137,7 @@ export async function reviewQueryLabels(
     }
     if (answer === "c" || answer === "create") break;
     run.log("   Enter f (fix the query), c (create), or k (continue).");
+    reject(`No valid label choice after ${MAX_PROMPT_ATTEMPTS} attempts; enter f, c, or k`);
   }
   for (const name of missing) {
     try {
