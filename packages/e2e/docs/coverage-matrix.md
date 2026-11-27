@@ -90,6 +90,7 @@ Commands:
 - [coverage/cli.md](coverage/cli.md): the one-shot `devintern` task run, its flags, and standalone commands.
 - [coverage/worker-daemon.md](coverage/worker-daemon.md): the worker daemon loop, schedules, routing, and concurrency.
 - [coverage/worker-commands.md](coverage/worker-commands.md): `worker init`, `login`, `scaffold`, `add-repo`, `add`, `connect`, and `run-now`.
+- [coverage/onboarding.md](coverage/onboarding.md): the onboarding golden path on a blank systemd host, from source and from the npm release.
 
 ## How to refresh the inventory
 

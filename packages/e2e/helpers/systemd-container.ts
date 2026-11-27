@@ -58,17 +58,17 @@ function envForDocker(): Record<string, string> {
   return env;
 }
 
-/** Build the image from the packed CLI tarball and the deterministic agent. */
-export async function buildServiceImage(tarball: string): Promise<void> {
-  const context = mkdtempSync(join(tmpdir(), "devintern-e2e-service-image-"));
+/**
+ * Build `tag` from a temporary context. `files` maps context names to source
+ * paths (files or directories) relative to this package.
+ */
+export async function buildImage(tag: string, files: Record<string, string>): Promise<void> {
+  const context = mkdtempSync(join(tmpdir(), "devintern-e2e-image-"));
   try {
-    cpSync(join(packageRoot, "infrastructure/service/Dockerfile"), join(context, "Dockerfile"));
-    cpSync(tarball, join(context, "cli.tgz"));
-    cpSync(join(packageRoot, "helpers/fake-agent.ts"), join(context, "fake-agent.ts"));
-    cpSync(join(packageRoot, "fixtures/simple-project"), join(context, "simple-project"), {
-      recursive: true,
-    });
-    const result = await docker(["build", "-q", "-t", SERVICE_IMAGE, context], 900_000);
+    for (const [name, source] of Object.entries(files)) {
+      cpSync(resolve(packageRoot, source), join(context, name), { recursive: true });
+    }
+    const result = await docker(["build", "-q", "-t", tag, context], 900_000);
     if (result.exitCode !== 0) {
       throw new Error(`docker build failed:\n${result.stdout}\n${result.stderr}`);
     }
@@ -77,9 +77,32 @@ export async function buildServiceImage(tarball: string): Promise<void> {
   }
 }
 
+/** Build the image from the packed CLI tarball and the deterministic agent. */
+export function buildServiceImage(tarball: string): Promise<void> {
+  return buildImage(SERVICE_IMAGE, {
+    Dockerfile: "infrastructure/service/Dockerfile",
+    "cli.tgz": tarball,
+    "fake-agent.ts": "helpers/fake-agent.ts",
+    "simple-project": "fixtures/simple-project",
+  });
+}
+
+export interface SystemdContainerOptions {
+  /** Image to run (default {@link SERVICE_IMAGE}). */
+  image?: string;
+  /** Container name prefix; a random suffix is appended. */
+  namePrefix?: string;
+}
+
 export class SystemdContainer {
-  readonly name = `devintern-e2e-systemd-${crypto.randomUUID().slice(0, 8)}`;
+  readonly name: string;
+  private readonly image: string;
   private started = false;
+
+  constructor(options: SystemdContainerOptions = {}) {
+    this.image = options.image ?? SERVICE_IMAGE;
+    this.name = `${options.namePrefix ?? "devintern-e2e-systemd"}-${crypto.randomUUID().slice(0, 8)}`;
+  }
 
   /** Boot systemd, then enable lingering so the user manager runs. */
   async start(): Promise<void> {
@@ -94,7 +117,7 @@ export class SystemdContainer {
       "/run",
       "--tmpfs",
       "/run/lock",
-      SERVICE_IMAGE,
+      this.image,
     ]);
     if (run.exitCode !== 0) throw new Error(`docker run failed:\n${run.stderr}`);
     this.started = true;
@@ -138,6 +161,53 @@ export class SystemdContainer {
       timeout,
       script,
     );
+  }
+
+  /**
+   * Run a script as `user` the way a person at a fresh shell would:
+   * `docker exec -u <user>` with no `-i`/`-t` (stdin closed, no TTY) and a
+   * login shell (`bash -l -c`), so PATH comes only from the user's profile.
+   * Nothing but the telemetry and update opt-outs is injected; there is no
+   * XDG_RUNTIME_DIR, bus address, git identity or credential.
+   */
+  login(user: string, script: string, timeout = 180_000): Promise<CommandResult> {
+    return docker(
+      [
+        "exec",
+        "-u",
+        user,
+        "-w",
+        `/home/${user}`,
+        ...BASE_ENV.flatMap((entry) => ["-e", entry]),
+        this.name,
+        "bash",
+        "-l",
+        "-c",
+        script,
+      ],
+      timeout,
+    );
+  }
+
+  /**
+   * Write `content` to `path` as `user` with mode 0600. The content travels
+   * on stdin, never in argv, so secrets stay out of process listings.
+   */
+  async writePrivateFile(user: string, path: string, content: string): Promise<void> {
+    const result = await docker(
+      ["exec", "-i", "-u", user, this.name, "sh", "-c", 'umask 077 && cat > "$1"', "sh", path],
+      30_000,
+      content,
+    );
+    if (result.exitCode !== 0) throw new Error(`could not write ${path}: ${result.stderr}`);
+  }
+
+  /** Copy a host file into the container, readable by every user. */
+  async copyIn(source: string, target: string): Promise<void> {
+    const copied = await docker(["cp", source, `${this.name}:${target}`]);
+    if (copied.exitCode !== 0) throw new Error(`docker cp failed: ${copied.stderr}`);
+    const chmod = await this.root(`chmod 644 '${target}'`);
+    if (chmod.exitCode !== 0) throw new Error(`chmod ${target} failed: ${chmod.stderr}`);
   }
 
   /** Run a user script and fail with its output when it exits non-zero. */

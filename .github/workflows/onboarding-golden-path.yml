@@ -1,0 +1,153 @@
+name: onboarding-golden-path
+
+# Onboarding golden path (packages/e2e, `test:e2e:golden-path`): install the
+# CLI with `bun add -g` on a blank systemd box, `worker init
+# --non-interactive` against GitHub Issues, `worker doctor`, the systemd
+# service picking up a labelled issue and opening a PR on
+# getdevintern/devintern-e2e, service stop/restart/uninstall, and the
+# interactive wizard on a PTY. ~2-4 minutes.
+#
+# Runs:
+#   - nightly from main (from source), opening or updating an
+#     `onboarding-regression` issue when it fails;
+#   - before every @getdevintern/code release (npm-release.yml calls it with
+#     cli-source "source"; a red run blocks publishing);
+#   - after a release against the just-published npm package (npm-release.yml
+#     calls it with cli-source "npm:<version>" and report-failures);
+#   - on pull requests that change the suite itself;
+#   - on demand: Actions -> onboarding-golden-path -> Run workflow.
+#
+# Needs the repository variable E2E_GITHUB_REPOSITORY and the secret
+# E2E_GITHUB_TOKEN (the same pair as github-e2e.yml). Without them (forks)
+# the job skips with a notice instead of failing.
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      cli-source:
+        description: '"source", "npm:latest", or "npm:<version>"'
+        type: string
+        default: source
+      report-failures:
+        description: Open or update an onboarding-regression issue on failure
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      cli-source:
+        type: string
+        default: source
+      report-failures:
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/onboarding-golden-path.yml
+      - packages/e2e/scripts/golden-path.ts
+      - packages/e2e/tests/golden-path/**
+      - packages/e2e/infrastructure/golden-path/**
+      - packages/e2e/helpers/systemd-container.ts
+      - packages/e2e/helpers/pty.ts
+
+permissions:
+  contents: read
+
+jobs:
+  golden-path:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The fixture repository is shared: never run two golden paths at once
+    # (job level, so it also holds when another workflow calls this one).
+    concurrency:
+      group: onboarding-golden-path
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    env:
+      TURBO_TELEMETRY_DISABLED: 1
+      CLI_SOURCE: ${{ inputs.cli-source || 'source' }}
+      E2E_GITHUB_REPOSITORY: ${{ vars.E2E_GITHUB_REPOSITORY }}
+      # Contents, Pull requests and Issues write on the fixture repository.
+      E2E_GITHUB_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
+    steps:
+      - name: Check fixture credentials
+        id: creds
+        run: |
+          if [ -z "$E2E_GITHUB_TOKEN" ] || [ -z "$E2E_GITHUB_REPOSITORY" ]; then
+            echo "::notice title=Onboarding golden path skipped::E2E_GITHUB_TOKEN or E2E_GITHUB_REPOSITORY is not available (fork or unconfigured repository)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.creds.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        if: steps.creds.outputs.run == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Keep in sync with ci.yml's verify job.
+          bun-version: latest
+
+      - name: Install dependencies
+        if: steps.creds.outputs.run == 'true'
+        run: bun install --frozen-lockfile
+
+      # A development build: it honours DEVINTERN_SKIP_LICENSE_CHECK, which
+      # the suite uses in place of signing in. Not needed for npm mode.
+      - name: Build Code CLI
+        if: steps.creds.outputs.run == 'true' && env.CLI_SOURCE == 'source'
+        run: bun run --filter @getdevintern/code build
+
+      - name: Onboarding golden path
+        id: suite
+        if: steps.creds.outputs.run == 'true'
+        env:
+          DEVINTERN_CLI_SOURCE: ${{ env.CLI_SOURCE }}
+        run: |
+          set -o pipefail
+          bun run --filter @devintern/e2e test:e2e:golden-path 2>&1 | tee "$RUNNER_TEMP/golden-path.log"
+
+      - name: Report regression
+        if: >-
+          failure() && steps.suite.outcome == 'failure' &&
+          (github.event_name == 'schedule' || inputs.report-failures)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          log="$RUNNER_TEMP/golden-path.log"
+          failed="$(grep -E '^\(fail\)' "$log" | grep -v 'Not run: the earlier step' | head -n 1 | sed -E 's/^\(fail\) onboarding golden path > //; s/ \[[0-9.]+m?s\]$//')"
+          [ -n "$failed" ] || failed="the suite did not reach a test (see the run log)"
+          body="$RUNNER_TEMP/issue.md"
+          {
+            echo "The onboarding golden path failed (CLI source: \`$CLI_SOURCE\`, ref \`$GITHUB_REF_NAME\`, commit $GITHUB_SHA)."
+            echo
+            echo "**Failing step:** $failed"
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo '<details><summary>Log excerpt (last 120 lines)</summary>'
+            echo
+            echo '```'
+            # The issue body is not masked like the job log: redact the token.
+            excerpt="$(tail -n 120 "$log")"
+            echo "${excerpt//"$E2E_GITHUB_TOKEN"/[REDACTED]}"
+            echo '```'
+            echo '</details>'
+          } > "$body"
+          gh label create onboarding-regression --color B60205 \
+            --description "Onboarding golden path failed" 2>/dev/null || true
+          existing="$(gh issue list --label onboarding-regression --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$body"
+          else
+            gh issue create --label onboarding-regression \
+              --title "Onboarding golden path failing: $failed" --body-file "$body"
+          fi
