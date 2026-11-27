@@ -7,7 +7,7 @@ import {
   loadEnvironment,
   loadSupabaseConfig,
 } from "../cli/bootstrap";
-import { isPromptAbort, promptAbortReason } from "../cli/prompt-abort";
+import { isPromptAbort, isPromptAbortReported, promptAbortReason } from "../cli/prompt-abort";
 import { flushAnalytics, trackWorkerConnect } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
 import { TaskTrackerManager } from "../trackers/manager";
@@ -444,9 +444,12 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     exitCode = !result.ok ? 1 : result.ready ? 0 : result.signInOnly ? 2 : 1;
   } catch (error) {
     if (!isPromptAbort(error)) throw error;
-    console.log(
-      `\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern worker init\`.`,
-    );
+    // The wizard already said setup paused and where the answers were saved.
+    if (!isPromptAbortReported(error)) {
+      console.log(
+        `\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern worker init\`.`,
+      );
+    }
   }
   await flushAnalytics();
   process.exit(exitCode);

@@ -18,7 +18,7 @@ import { randomBytes } from "crypto";
 import { findProjectRoot } from "@devintern/utils";
 
 import { WORKER_PILOT_OFFER } from "../account/worker-pilot";
-import { isPromptAbort } from "../cli/prompt-abort";
+import { isPromptAbort, markPromptAbortReported } from "../cli/prompt-abort";
 import { resolveWizardPrompts } from "../cli/prompt-session";
 import { GITHUB_APP_INSTALL_URL } from "../code-host/github/app-setup";
 import { trackWorkerInitCompleted, trackWorkerInitStarted } from "../observability/analytics";
@@ -195,6 +195,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
         `\n⏸️  Setup paused. Your answers so far are saved in ${workspaceConfigPath(run.workspaceDir)}; ` +
           "run `devintern worker init` to continue (it offers them as defaults).",
       );
+      markPromptAbortReported(error);
     }
     throw error;
   } finally {

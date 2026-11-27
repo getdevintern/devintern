@@ -33,3 +33,18 @@ export function isPromptInterrupt(error: unknown): boolean {
 export function promptAbortReason(error: unknown): string {
   return isPromptInterrupt(error) ? "Interrupted (Ctrl+C)" : "Input closed (Ctrl+D)";
 }
+
+const reportedPromptAborts = new WeakSet<object>();
+
+/**
+ * Record that the abort was already explained (for example with a "setup
+ * paused" line), so the caller does not print a second closing message.
+ */
+export function markPromptAbortReported(error: unknown): void {
+  if (typeof error === "object" && error !== null) reportedPromptAborts.add(error);
+}
+
+/** Whether {@link markPromptAbortReported} already handled this abort. */
+export function isPromptAbortReported(error: unknown): boolean {
+  return typeof error === "object" && error !== null && reportedPromptAborts.has(error);
+}

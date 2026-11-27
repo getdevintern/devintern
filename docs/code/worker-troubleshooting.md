@@ -4,7 +4,7 @@ sidebarLabel: "Worker Troubleshooting"
 description: "Use when the worker service keeps failing or stops at logout, or a worker task did not run, ran again, or failed: retrying tickets, actioned tickets, interrupted runs, pickup log messages, and reading worker logs."
 section: "Automation"
 order: 2.3
-dateModified: 2026-11-26
+dateModified: 2026-11-27
 ---
 
 # Worker Troubleshooting
@@ -22,6 +22,10 @@ If `worker doctor` reports `Agent harness — <harness>: AGENT_CLI_PATH=<path> (
 If it warns `worker failover: Harness "<harness>" is not installed`, the worker skips that `AGENT_HARNESS` entry. The worker chooses its failover entries using `~/.devintern/.env` only, so set that harness's `<HARNESS>_CLI_PATH` there, not in a repository `env_file` or `[repos.env]`.
 
 If it warns `<harness>: after failover the task runs AGENT_CLI_PATH=<path>`, worker tasks that fail over to that harness would start the primary's CLI. Replace `AGENT_CLI_PATH` with the primary harness's own path key (for example `CLAUDE_CODE_CLI_PATH`).
+
+## `devintern: command not found` over SSH or in cron
+
+`bash -lc`, ssh one-liners, and cron can miss `~/.bun/bin` because the Bun installer appends its `PATH` line below Debian's non-interactive guard in `~/.bashrc`. Add `export PATH="$HOME/.bun/bin:$PATH"` to `~/.profile`; the systemd service is not affected.
 
 ## The service keeps failing
 

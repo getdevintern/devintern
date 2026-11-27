@@ -490,6 +490,12 @@ export function runWorkerReadCommand(
   // failed its license check never created the database, and saying why it
   // is stopped matters more than empty queue counts.
   if (dbError && !(key === "status" && !existsSync(dbPath))) {
+    // `queue` is a common first command: an empty queue before the worker has
+    // ever started is not an error worth a red cross.
+    if (key === "queue" && !values.json && !existsSync(dbPath)) {
+      io.stdout("ℹ️  The worker has not started yet; see devintern worker service status\n");
+      return 0;
+    }
     io.stderr(`❌ ${dbError}\n`);
     return 1;
   }

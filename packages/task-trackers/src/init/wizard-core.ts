@@ -49,6 +49,8 @@ export interface EnvPromptStep {
   example?: string;
   /** Default applied when the user presses Enter. */
   defaultValue?: string;
+  /** Show the default inline as `[value]` instead of an "Enter for default" hint. */
+  defaultInBrackets?: boolean;
   /** Token or key: read with the hidden-input prompt when the wizard has one. */
   secret?: boolean;
 }
@@ -196,18 +198,22 @@ export async function promptSteps(
   for (const step of steps) {
     const link = stepLink(step, values);
     if (link) {
-      log(`\n🔗 Create your ${step.label.toLowerCase()} at:\n   ${link}`);
+      log(
+        `\n🔗 Create your ${step.label.toLowerCase().replace(/\bgithub\b/g, "GitHub")} at:\n   ${link}`,
+      );
     }
+    const inlineDefault = step.defaultInBrackets ? step.defaultValue : undefined;
     const hints: string[] = [];
     const ask = step.secret && promptSecret ? promptSecret : prompt;
     if (step.secret && promptSecret) hints.push("input hidden");
-    if (step.example) hints.push(`e.g. ${step.example}`);
-    if (step.defaultValue) hints.push(`Enter for default`);
-    else if (step.optional) hints.push("optional, Enter to skip");
+    if (step.example && !inlineDefault) hints.push(`e.g. ${step.example}`);
+    if (step.defaultValue && !inlineDefault) hints.push(`Enter for default`);
+    else if (step.optional && !step.defaultValue) hints.push("optional, Enter to skip");
     const suffix = hints.length > 0 ? ` (${hints.join("; ")})` : "";
+    const label = inlineDefault ? `${step.label} [${inlineDefault}]` : step.label;
 
     for (;;) {
-      const answer = (await ask(`${step.label}${suffix}: `)).trim();
+      const answer = (await ask(`${label}${suffix}: `)).trim();
       if (answer) {
         values[step.key] = answer;
         break;

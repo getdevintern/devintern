@@ -451,6 +451,22 @@ describe("devintern worker read-only dashboard commands", () => {
     }
   });
 
+  test("queue before the first worker start explains the empty queue instead of failing", () => {
+    const empty = mkdtempSync(join(tmpdir(), "worker-read-empty-queue-"));
+    try {
+      writeFileSync(join(empty, "workspace.toml"), WORKSPACE_TOML);
+      const result = run("queue", ["--workspace", empty]);
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(
+        "The worker has not started yet; see devintern worker service status",
+      );
+      expect(result.stderr).toBe("");
+      expect(existsSync(workspaceStateDir(empty))).toBe(false);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
   test("unreadable database exits non-zero", () => {
     const broken = mkdtempSync(join(tmpdir(), "worker-read-broken-"));
     try {
