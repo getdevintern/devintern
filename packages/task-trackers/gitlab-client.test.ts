@@ -282,6 +282,56 @@ describe("GitLabClient", () => {
   });
 });
 
+describe("GitLabClient label lookup and creation", () => {
+  test("hasLabel returns true when the label exists", async () => {
+    const calls = mockFetch(() => ({ json: { name: "devintern" } }));
+
+    await expect(makeClient().hasLabel("devintern")).resolves.toBe(true);
+
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].url).toContain(
+      "/projects/acme%2Fteam%2Fwebapp/labels/devintern?include_ancestor_groups=true",
+    );
+  });
+
+  test("hasLabel returns false on 404", async () => {
+    mockFetch(() => ({ status: 404, json: { message: "404 Not Found" } }));
+
+    await expect(makeClient().hasLabel("devintern")).resolves.toBe(false);
+  });
+
+  test("hasLabel throws on other errors", async () => {
+    mockFetch(() => ({ status: 403, json: { message: "Forbidden" } }));
+
+    await expect(makeClient().hasLabel("devintern")).rejects.toThrow("GitLab API error (403)");
+  });
+
+  test("createLabel posts the name, color with # and description", async () => {
+    const calls = mockFetch(() => ({ json: { name: "devintern" } }));
+
+    await makeClient().createLabel("devintern", {
+      color: "5319e7",
+      description: "Ready for DevIntern",
+    });
+
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toContain("/projects/acme%2Fteam%2Fwebapp/labels");
+    expect(calls[0].body).toEqual({
+      name: "devintern",
+      color: "#5319e7",
+      description: "Ready for DevIntern",
+    });
+  });
+
+  test("createLabel omits an absent description", async () => {
+    const calls = mockFetch(() => ({ json: { name: "devintern" } }));
+
+    await makeClient().createLabel("devintern", { color: "5319e7" });
+
+    expect(calls[0].body).toEqual({ name: "devintern", color: "#5319e7" });
+  });
+});
+
 describe("sanitizeGitlabBaseUrl", () => {
   test("defaults to gitlab.com when unset or blank", () => {
     expect(sanitizeGitlabBaseUrl(undefined)).toBe(DEFAULT_GITLAB_BASE_URL);

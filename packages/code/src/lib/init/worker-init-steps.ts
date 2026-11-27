@@ -353,10 +353,11 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
       run.log("❌ A query is required — it defines what 'ready for the agent' means.");
       continue;
     }
-    await offerDevinternLabel(run, query);
-    // The default query's devintern label was just offered; check the rest after the dry run.
+    // Offer the devintern label only once the query works; the default query's
+    // label is handled there, so the rest are checked afterwards.
     const handled = isDefaultTaskQuery(run.trackerType, query) ? [DEVINTERN_LABEL] : [];
     if (!run.deps.dryRunQuery) {
+      await offerDevinternLabel(run, query);
       if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") continue;
       break;
     }
@@ -371,6 +372,7 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
             : "   (0 matches is fine if nothing is ready yet — the worker will poll.)",
         );
       }
+      await offerDevinternLabel(run, query);
       if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") continue;
       break;
     } catch (error) {
