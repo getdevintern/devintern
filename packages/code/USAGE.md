@@ -36,7 +36,9 @@ The easiest way to set up @devintern/code for your project is using the `init` c
 devintern init
 ```
 
-This creates a `.devintern-code` folder in your current project with:
+In a terminal, `init` first asks how you want to run tickets: **1) Automatically with a worker** (the default) runs the same wizard as `devintern worker init`; **2) By hand from this terminal** sets up manual runs as described below. With `--yes` or piped input it sets up manual runs without asking.
+
+For manual runs, this creates a `.devintern-code` folder in your current project with:
 
 - `.env` - Your project-specific configuration file with JIRA credentials
 - `.env.example` - Template with all configuration options
