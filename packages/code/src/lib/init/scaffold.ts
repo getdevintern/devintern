@@ -69,7 +69,12 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
       label: "GitHub personal access token ('repo' scope)",
       link: GITHUB_TOKEN_LINK,
     },
-    { key: "GITHUB_REPO", label: "Target repository", example: "owner/repo" },
+    {
+      key: "GITHUB_REPO",
+      label: "Repository",
+      example: "owner/repo",
+      defaultInBrackets: true,
+    },
     {
       key: "GITHUB_STATUS_LABELS",
       label: "Comma-separated status label names",
