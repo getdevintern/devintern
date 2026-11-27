@@ -313,10 +313,19 @@ export function commandDetail(result: RunCommandResult): string {
  * written: the same defaults fit a laptop and a 64 GB workstation. They are
  * configurable through `[workspace.execution]`; see `memory-budget.ts`.
  *
- * `StartLimitIntervalSec=` / `StartLimitBurst=` bound a crash loop: a worker
- * that is repeatedly killed for memory stops being restarted after four tries
- * in 30 minutes instead of recreating the same load every 30 seconds. Fix the
- * cause, then `devintern worker service restart`.
+ * `OOMPolicy=continue` keeps a kernel OOM kill inside the cgroup scoped to
+ * the process it picked (a runaway test runner or browser): systemd's default
+ * `stop` would tear down the whole unit, ending every concurrent job and
+ * counting as a unit failure. If the kernel picks the worker itself, the
+ * main process dies by SIGKILL and `Restart=on-failure` still applies.
+ *
+ * `StartLimitIntervalSec=` / `StartLimitBurst=` bound a crash loop: after six
+ * starts in 30 minutes systemd stops restarting the worker instead of
+ * recreating the same load every 30 seconds. The budget counts every start,
+ * including the initial one and the restart after an idle self-update (exit 1,
+ * see `worker-auto-update.ts`, at most once a day), so it leaves headroom for
+ * those. `devintern worker service restart` runs `reset-failed` first, which
+ * clears the counter. Fix the cause, then restart.
  *
  * @param options - Binary path, working directory, memory budget, and whether to run the direct webhook service
  */
@@ -364,7 +373,7 @@ Description=devintern ${options.listen ? "webhook server" : "worker"} (${options
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=1800
-StartLimitBurst=4
+StartLimitBurst=6
 
 [Service]
 Type=simple
@@ -375,6 +384,7 @@ RestartSec=30
 RestartPreventExitStatus=${WORKER_CONFIG_EXIT_CODE}
 KillMode=mixed
 TimeoutStopSec=120
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target

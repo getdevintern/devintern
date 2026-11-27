@@ -50,13 +50,13 @@ Run `devintern worker service status`. It shows the service state and, when the 
 
 Startup failures are written to `worker.stderr.log` in the workspace home, so `devintern worker logs` and the dashboard show them too. Output from before the worker could log at all (for example a missing Bun runtime) is only in the service manager's log: `devintern worker service logs`.
 
-After four failed starts in 30 minutes the service stops restarting (`failed`, not `restarting`) so a crash loop cannot keep the host busy. Fix the cause, then run `devintern worker service restart`.
+After six starts in 30 minutes (restarts after an update count too) the service stops restarting (`failed`, not `restarting`) so a crash loop cannot keep the host busy. Fix the cause, then run `devintern worker service restart`.
 
 If `worker service install` says the worker would not start, it did not install anything. Fix the checks it lists and run it again. `--force` installs anyway, and the service then fails until the checks pass.
 
 ## The worker uses too much memory
 
-The generated systemd unit caps the worker at a share of host RAM. The cap covers the worker, every run child, and everything an agent starts in the worker's own cgroup (test runners, browsers, dev servers). Runs with `AGENT_SANDBOX=docker` are outside it: the agent runs in a guest microVM that outlives the `sbx` client, so the host-memory admission check below still reacts but a single heavy sandboxed run can exceed the cap. At `MemoryHigh` the kernel throttles the cgroup; at `MemoryMax` it kills inside the worker's own cgroup, so the desktop and other apps keep their memory. When the service keeps being killed, `worker service status` shows `failed`, and `devintern worker logs` shows the runs that were interrupted.
+The generated systemd unit caps the worker at a share of host RAM. The cap covers the worker, every run child, and everything an agent starts in the worker's own cgroup (test runners, browsers, dev servers). Runs with `AGENT_SANDBOX=docker` are outside it: the agent runs in a guest microVM that outlives the `sbx` client, so the host-memory admission check below still reacts but a single heavy sandboxed run can exceed the cap. At `MemoryHigh` the kernel throttles the cgroup; at `MemoryMax` the kernel kills the largest process inside the worker's own cgroup, usually a test runner or browser, so the desktop and other apps keep their memory. The run that owned it fails; the worker and other running jobs continue. If the worker itself is killed, the service restarts it. When that keeps happening, `worker service status` shows `failed`, and `devintern worker logs` shows the runs that were interrupted.
 
 The defaults are 50% of RAM for `MemoryHigh`, 65% for `MemoryMax`, and 15% for swap. Override them in `workspace.toml`, then reinstall the service so the unit is rewritten:
 
@@ -73,7 +73,7 @@ devintern worker service install
 
 A service installed by an earlier DevIntern version has no memory cap or crash-loop guard; running `devintern worker service install` once updates it. A host with much less RAM than the workloads need still needs fewer concurrent jobs: lower [`max_concurrency`](./workspaces.md#bounded-host-concurrency) or raise the budget and accept less headroom for the desktop.
 
-The worker also pauses new jobs when memory is tight: below 5% of RAM (with a 512 MB floor) available, when the kernel reports high memory pressure (PSI `some avg10` of 50 or more), or when its own cgroup is 85% of its limit. Running jobs continue; a PR job waiting for a slot shows "Waiting for the host to have enough free memory" in the dashboard, and expanding the row shows which limit fired and its numbers. Set `DEVINTERN_MEMORY_ADMISSION=0` to disable this pause. macOS launchd agents have no cgroup budget.
+The worker also pauses new jobs when memory is tight: below 5% of RAM (with a 512 MB floor) available, when the kernel reports high memory pressure (PSI `some avg10` of 50 or more), or when its own cgroup reaches 90% of `MemoryHigh` or 85% of `MemoryMax`. Running jobs continue. The worker log shows `pausing new jobs: <reason>` when the pause starts and another line when it ends, for every kind of job. A PR job waiting for a slot also shows "Waiting for the host to have enough free memory" in the dashboard, and expanding the row shows which limit fired and its numbers. Set `DEVINTERN_MEMORY_ADMISSION=0` to disable this pause. macOS launchd agents have no cgroup budget.
 
 ## The agent CLI fails to start
 

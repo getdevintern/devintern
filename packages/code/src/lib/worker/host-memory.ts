@@ -18,10 +18,12 @@
  *   memory pressure even if some memory is still nominally free.
  *
  * When the worker itself runs in a memory-limited cgroup, its own anonymous
- * usage (`memory.stat` `anon`) against `memory.max` is checked as well: 85% of
- * the worker's own budget is a more direct signal than host-wide availability,
- * and it applies on a busy host where other apps are the reason free memory is
- * low. Page cache charged to the cgroup is excluded because it is reclaimable.
+ * usage (`memory.stat` `anon`) is checked against its limits as well: 90% of
+ * `memory.high` (where the kernel starts throttling the whole cgroup) or 85%
+ * of `memory.max`, whichever is lower. That is a more direct signal than
+ * host-wide availability, and it applies on a busy host where other apps are
+ * the reason free memory is low. Page cache charged to the cgroup is excluded
+ * because it is reclaimable.
  *
  * Every reader is best-effort. A missing `/proc` file (macOS, a container
  * without cgroup v2) disables only that signal; no error ever reaches the
@@ -42,6 +44,8 @@ export interface HostMemorySnapshot {
   cgroupUsedBytes?: number;
   /** Worker cgroup hard limit (`memory.max`), when it is not `max`. */
   cgroupMaxBytes?: number;
+  /** Worker cgroup throttle limit (`memory.high`), when it is not `max`. */
+  cgroupHighBytes?: number;
 }
 
 /** Injectable file reader, platform, and environment (tests). */
@@ -61,12 +65,15 @@ export interface MemoryAdmissionLimits {
   maxPressureSomeAvg10?: number;
   /** Defer when the worker cgroup uses this share of its `MemoryMax`. Default 85%. */
   cgroupMaxShare?: number;
+  /** Defer when the worker cgroup uses this share of its `MemoryHigh`. Default 90%. */
+  cgroupHighShare?: number;
 }
 
 const DEFAULT_MIN_AVAILABLE_SHARE = 0.05;
 const DEFAULT_MIN_AVAILABLE_BYTES = 512 * 1024 * 1024;
 const DEFAULT_MAX_PRESSURE_SOME_AVG10 = 50;
 const DEFAULT_CGROUP_MAX_SHARE = 0.85;
+const DEFAULT_CGROUP_HIGH_SHARE = 0.9;
 
 function readUtf8(path: string, deps: HostMemoryDeps): string | null {
   try {
@@ -99,8 +106,16 @@ export function parsePsiSomeAvg10(text: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
+/** Parse a cgroup v2 limit file: bytes, or undefined for `max`/garbage. */
+function parseCgroupLimit(text: string | undefined): number | undefined {
+  if (!text || text === "max") return undefined;
+  const value = Number(text);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 /**
- * The worker's own cgroup v2 usage and limit, or null when it is not limited.
+ * The worker's own cgroup v2 usage and limits, or null when it is not limited
+ * (both `memory.high` and `memory.max` are `max`).
  *
  * `/proc/self/cgroup` gives the path relative to the cgroup mount; the mount
  * point is `/sys/fs/cgroup` on every modern Linux distribution.
@@ -114,7 +129,7 @@ export function parsePsiSomeAvg10(text: string): number | undefined {
  */
 export function readCgroupMemory(
   deps: HostMemoryDeps = {},
-): { usedBytes: number; maxBytes: number } | null {
+): { usedBytes: number; maxBytes?: number; highBytes?: number } | null {
   const membership = readUtf8("/proc/self/cgroup", deps);
   if (!membership) return null;
   const unified = membership
@@ -124,14 +139,18 @@ export function readCgroupMemory(
   if (!unified) return null;
   const base = `/sys/fs/cgroup${unified.replace(/\/$/, "")}`;
   const current = readUtf8(`${base}/memory.current`, deps)?.trim();
-  const max = readUtf8(`${base}/memory.max`, deps)?.trim();
-  if (!current || !max || max === "max") return null;
+  const maxBytes = parseCgroupLimit(readUtf8(`${base}/memory.max`, deps)?.trim());
+  const highBytes = parseCgroupLimit(readUtf8(`${base}/memory.high`, deps)?.trim());
+  if (!current || (maxBytes === undefined && highBytes === undefined)) return null;
   const stats = readUtf8(`${base}/memory.stat`, deps);
   const anon = stats ? /^anon\s+(\d+)$/m.exec(stats)?.[1] : undefined;
   const usedBytes = Number(anon ?? current);
-  const maxBytes = Number(max);
-  if (!Number.isFinite(usedBytes) || !Number.isFinite(maxBytes) || maxBytes <= 0) return null;
-  return { usedBytes, maxBytes };
+  if (!Number.isFinite(usedBytes)) return null;
+  return {
+    usedBytes,
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
+    ...(highBytes !== undefined ? { highBytes } : {}),
+  };
 }
 
 /**
@@ -175,7 +194,9 @@ export function readHostMemorySnapshot(deps: HostMemoryDeps = {}): HostMemorySna
   return {
     ...parsed,
     ...(psi !== undefined ? { pressureSomeAvg10: psi } : {}),
-    ...(cgroup ? { cgroupUsedBytes: cgroup.usedBytes, cgroupMaxBytes: cgroup.maxBytes } : {}),
+    ...(cgroup ? { cgroupUsedBytes: cgroup.usedBytes } : {}),
+    ...(cgroup?.maxBytes !== undefined ? { cgroupMaxBytes: cgroup.maxBytes } : {}),
+    ...(cgroup?.highBytes !== undefined ? { cgroupHighBytes: cgroup.highBytes } : {}),
   };
 }
 
@@ -204,17 +225,36 @@ export function memoryAdmissionBlockReason(
   snapshot: HostMemorySnapshot,
   limits: MemoryAdmissionLimits = {},
 ): string | null {
-  const cgroupShare = limits.cgroupMaxShare ?? DEFAULT_CGROUP_MAX_SHARE;
-  if (
-    snapshot.cgroupUsedBytes !== undefined &&
-    snapshot.cgroupMaxBytes !== undefined &&
-    snapshot.cgroupUsedBytes >= snapshot.cgroupMaxBytes * cgroupShare
-  ) {
-    return (
-      `the worker's own memory budget is ${percent(
-        (snapshot.cgroupUsedBytes / snapshot.cgroupMaxBytes) * 100,
-      )} full ` + `(${gib(snapshot.cgroupUsedBytes)} of ${gib(snapshot.cgroupMaxBytes)})`
-    );
+  // The tighter of the two cgroup thresholds wins. With the default budget
+  // (high 50%, max 65% of RAM) 85% of MemoryMax sits above MemoryHigh, so a
+  // max-only check would keep admitting work into a cgroup already throttled.
+  const used = snapshot.cgroupUsedBytes;
+  if (used !== undefined) {
+    const thresholds = [
+      snapshot.cgroupHighBytes !== undefined
+        ? {
+            limit: snapshot.cgroupHighBytes,
+            at: snapshot.cgroupHighBytes * (limits.cgroupHighShare ?? DEFAULT_CGROUP_HIGH_SHARE),
+            name: "throttle limit (MemoryHigh)",
+          }
+        : undefined,
+      snapshot.cgroupMaxBytes !== undefined
+        ? {
+            limit: snapshot.cgroupMaxBytes,
+            at: snapshot.cgroupMaxBytes * (limits.cgroupMaxShare ?? DEFAULT_CGROUP_MAX_SHARE),
+            name: "hard limit (MemoryMax)",
+          }
+        : undefined,
+    ]
+      .filter((entry) => entry !== undefined)
+      .sort((a, b) => a.at - b.at);
+    const hit = thresholds.find((entry) => used >= entry.at);
+    if (hit) {
+      return (
+        `the worker's own memory budget is ${percent((used / hit.limit) * 100)} of its ` +
+        `${hit.name} (${gib(used)} of ${gib(hit.limit)})`
+      );
+    }
   }
 
   const share = limits.minAvailableShare ?? DEFAULT_MIN_AVAILABLE_SHARE;
@@ -255,5 +295,34 @@ export function createHostMemoryAdmission(
       // Admission must fail open: a broken reader must never idle the worker.
       return null;
     }
+  };
+}
+
+/**
+ * Worker-log line for the supervisor's `onBackpressureChange`. Task jobs held
+ * back by memory are not listed in the dashboard queue, so this is how an
+ * operator sees why a claimed task has not started yet.
+ *
+ * @param reason - The probe's reason when admission pauses, null when it resumes
+ */
+export function logMemoryAdmissionChange(reason: string | null): void {
+  if (reason !== null) {
+    console.warn(`⏸️  [worker] pausing new jobs: ${reason}; running jobs continue`);
+  } else {
+    console.log("▶️  [worker] no jobs are waiting on memory any more");
+  }
+}
+
+/**
+ * The production supervisor options: the host-memory admission probe plus the
+ * worker-log line on pause/resume. Shared by every worker supervisor.
+ */
+export function hostMemorySupervisorOptions(): {
+  backpressure: () => string | null;
+  onBackpressureChange: (reason: string | null) => void;
+} {
+  return {
+    backpressure: createHostMemoryAdmission(),
+    onBackpressureChange: logMemoryAdmissionChange,
   };
 }

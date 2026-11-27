@@ -10,7 +10,7 @@ import type { WorkerState } from "../state/worker-state";
 import type { RoutingSkipStore } from "./state";
 import { getWorkerFailover, harnessChainBlockedUntil } from "../worker/failover";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
-import { createHostMemoryAdmission } from "../worker/host-memory";
+import { hostMemorySupervisorOptions } from "../worker/host-memory";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
@@ -463,7 +463,7 @@ export function createGatedFleetTaskExecutor(
         maxConcurrency: config.workspace.execution.maxConcurrency,
         maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
       },
-      { backpressure: createHostMemoryAdmission() },
+      hostMemorySupervisorOptions(),
     );
 
   return async (taskKey, routable) => {

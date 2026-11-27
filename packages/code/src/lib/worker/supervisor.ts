@@ -194,6 +194,14 @@ export interface SupervisorOptions {
   backpressure?: () => string | null;
   /** How long to wait before probing again while jobs are held back. */
   backpressureRetryMs?: number;
+  /**
+   * Called when host pressure starts holding back at least one queued job
+   * (with the probe's reason) and again with `null` once nothing is held back
+   * by it. Fires only on those transitions, so a long pressure spell logs
+   * twice, not once per retry. Covers task jobs, which the dashboard queue
+   * does not list.
+   */
+  onBackpressureChange?: (reason: string | null) => void;
 }
 
 interface RunningJob {
@@ -354,6 +362,19 @@ export function createTaskSupervisor(
   };
 
   let pumping = false;
+  /** Whether the last pump left at least one queued job held back by pressure. */
+  let heldByPressure = false;
+  const reportPressure = (pressure: string | null): void => {
+    const held =
+      pressure !== null && queued.some((job) => blockedOn(job.request, pressure) === "memory");
+    if (held === heldByPressure) return;
+    heldByPressure = held;
+    try {
+      options.onBackpressureChange?.(held ? pressure : null);
+    } catch {
+      // A broken logger must not break admission.
+    }
+  };
   let pressureTimer: ReturnType<typeof setTimeout> | undefined;
   const clearPressureTimer = (): void => {
     if (pressureTimer === undefined) return;
@@ -416,6 +437,7 @@ export function createTaskSupervisor(
       }
     } finally {
       pumping = false;
+      reportPressure(pressure);
       // A job held back only by host pressure has no completion event to
       // re-pump: poll while the queue is non-empty so it starts once memory
       // recovers. One unref'd timer at a time. The snapshot from this pump,

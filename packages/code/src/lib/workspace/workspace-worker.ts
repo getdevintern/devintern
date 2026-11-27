@@ -69,7 +69,7 @@ import { EstimationAcquirer } from "../automation/estimation-acquirer";
 import { composeScheduledJobActions } from "../automation/scheduled-jobs";
 import { warnUninstalledHarnessPins } from "../agent/selection";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
-import { createHostMemoryAdmission } from "../worker/host-memory";
+import { hostMemorySupervisorOptions } from "../worker/host-memory";
 import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
@@ -954,7 +954,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       maxConcurrency: config.workspace.execution.maxConcurrency,
       maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
     },
-    { backpressure: createHostMemoryAdmission() },
+    hostMemorySupervisorOptions(),
   );
   const orphanRecovery = await recoverOrphanedWorkspaceRuns({
     config,

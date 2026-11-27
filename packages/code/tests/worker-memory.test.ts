@@ -73,7 +73,9 @@ describe("systemd memory budget", () => {
     expect(unit).toContain(`MemoryMax=${Math.floor(64 * GIB * 0.65)}`);
     expect(unit).toContain(`MemorySwapMax=${Math.floor(64 * GIB * 0.15)}`);
     expect(unit).toContain("StartLimitIntervalSec=1800");
-    expect(unit).toContain("StartLimitBurst=4");
+    expect(unit).toContain("StartLimitBurst=6");
+    // A kernel OOM kill ends only the offending process, not the whole unit.
+    expect(unit).toContain("OOMPolicy=continue\n");
   });
 
   test("a custom budget is written into the unit", () => {
@@ -219,10 +221,39 @@ SwapTotal:      16777216 kB
     });
   });
 
+  test("reads memory.high alongside memory.max", () => {
+    const files: Record<string, string> = {
+      "/proc/self/cgroup": "0::/user.slice/x.service\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.current": "800\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.high": "700\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.max": "1000\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.stat": "anon 600\n",
+    };
+    expect(readCgroupMemory({ readFile: (path) => files[path] ?? "" })).toEqual({
+      usedBytes: 600,
+      maxBytes: 1000,
+      highBytes: 700,
+    });
+  });
+
+  test("a cgroup with only memory.high set is still a memory signal", () => {
+    const files: Record<string, string> = {
+      "/proc/self/cgroup": "0::/user.slice/x.service\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.current": "800\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.high": "900\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.max": "max\n",
+    };
+    expect(readCgroupMemory({ readFile: (path) => files[path] ?? "" })).toEqual({
+      usedBytes: 800,
+      highBytes: 900,
+    });
+  });
+
   test("an unlimited cgroup is not a memory signal", () => {
     const files: Record<string, string> = {
       "/proc/self/cgroup": "0::/user.slice/x.service\n",
       "/sys/fs/cgroup/user.slice/x.service/memory.current": "800\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.high": "max\n",
       "/sys/fs/cgroup/user.slice/x.service/memory.max": "max\n",
     };
     expect(readCgroupMemory({ readFile: (path) => files[path] ?? "" })).toBeNull();
@@ -287,6 +318,30 @@ describe("memory admission", () => {
         cgroupMaxBytes: 1000,
       }),
     ).toContain("own memory budget");
+  });
+
+  test("defers above MemoryHigh even while under 85% of MemoryMax", () => {
+    // Default budget on a 16 GiB host: high 50%, max 65%. 85% of max is ~55%
+    // of RAM, above MemoryHigh, so a max-only check admitted into a throttled cgroup.
+    const total = 16 * GIB;
+    const high = Math.floor(total * 0.5);
+    const max = Math.floor(total * 0.65);
+    const used = Math.floor(high * 1.08);
+    expect(used).toBeLessThan(max * 0.85);
+    const reason = memoryAdmissionBlockReason({
+      totalBytes: total,
+      availableBytes: 6 * GIB,
+      cgroupUsedBytes: used,
+      cgroupHighBytes: high,
+      cgroupMaxBytes: max,
+    });
+    expect(reason).toContain("MemoryHigh");
+  });
+
+  test("defers at 90% of MemoryHigh and admits below it", () => {
+    const base = { ...snapshot, cgroupHighBytes: 1000, cgroupMaxBytes: 2000 };
+    expect(memoryAdmissionBlockReason({ ...base, cgroupUsedBytes: 900 })).toContain("MemoryHigh");
+    expect(memoryAdmissionBlockReason({ ...base, cgroupUsedBytes: 899 })).toBeNull();
   });
 
   test("can be disabled with DEVINTERN_MEMORY_ADMISSION=0", () => {
@@ -370,6 +425,37 @@ describe("supervisor memory backpressure", () => {
     ]);
     expect(started).toBe(true);
     expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  test("reports when pressure starts and stops holding back a task job", async () => {
+    let blocked = true;
+    const changes: (string | null)[] = [];
+    const supervisor = createTaskSupervisor(
+      { maxConcurrency: 2, maxConcurrencyPerRepo: 2 },
+      {
+        backpressure: () => (blocked ? "host memory is low" : null),
+        backpressureRetryMs: 5,
+        onBackpressureChange: (reason) => changes.push(reason),
+      },
+    );
+    const job = supervisor.schedule(request("held", async () => {}));
+    expect(changes).toEqual(["host memory is low"]);
+    // Retries while still blocked must not log again.
+    await Bun.sleep(30);
+    expect(changes).toEqual(["host memory is low"]);
+    blocked = false;
+    await job;
+    expect(changes).toEqual(["host memory is low", null]);
+  });
+
+  test("does not report pressure when no queued job is held back by it", async () => {
+    const changes: (string | null)[] = [];
+    const supervisor = createTaskSupervisor(
+      { maxConcurrency: 1, maxConcurrencyPerRepo: 1 },
+      { backpressure: () => null, onBackpressureChange: (reason) => changes.push(reason) },
+    );
+    await supervisor.schedule(request("runs", async () => {}));
+    expect(changes).toEqual([]);
   });
 
   test("a throwing probe fails open", async () => {
