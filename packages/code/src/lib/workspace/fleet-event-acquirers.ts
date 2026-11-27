@@ -11,6 +11,7 @@ import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
 import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { createGatedFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
+import { relayMentionGitHub, reviewFeedGitHub } from "./fleet-mention-github";
 import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
@@ -908,84 +909,6 @@ export async function buildFleetEventAcquirers(
   }
 
   return acquirers;
-}
-
-/** One submitted review as the mention feeds read it. */
-interface RawReview {
-  id: number;
-  body: string | null;
-  user: { login: string; type?: string } | null;
-  submitted_at?: string | null;
-  html_url?: string;
-}
-
-/** List a PR's submitted reviews (first 100). */
-async function listPrReviews(
-  client: FleetGitHubClient,
-  slug: string,
-  prNumber: number,
-): Promise<RawReview[]> {
-  const [owner, name] = slug.split("/") as [string, string];
-  const result = await client.conditionalGet<RawReview[]>(
-    `/repos/${slug}/pulls/${prNumber}/reviews?per_page=100`,
-    owner,
-    name,
-  );
-  return result.data ?? [];
-}
-
-/** GitHub reads for the mention sweep's reviews feed on one repository. */
-function reviewFeedGitHub(
-  client: FleetGitHubClient,
-  slug: string,
-): import("../acquirers/mention-sweep").ReviewFeedGitHub {
-  const [owner, name] = slug.split("/") as [string, string];
-  return {
-    listOpenPrsByUpdated: async () =>
-      (
-        await client.conditionalGet<Array<{ number: number; updated_at: string; url: string }>>(
-          `/repos/${slug}/pulls?state=open&sort=updated&direction=desc&per_page=30`,
-          owner,
-          name,
-        )
-      ).data ?? [],
-    listReviews: (prNumber) => listPrReviews(client, slug, prNumber),
-  };
-}
-
-/** GitHub reads for the relay mention handlers on one repository. */
-function relayMentionGitHub(
-  client: FleetGitHubClient,
-  slug: string,
-): import("../relay/mention-handlers").RelayMentionGitHub {
-  const [owner, name] = slug.split("/") as [string, string];
-  type Item = import("../relay/mention-handlers").RelayMentionItem;
-  return {
-    getIssueComment: async (commentId) => {
-      try {
-        const result = await client.conditionalGet<Item>(
-          `/repos/${slug}/issues/comments/${commentId}`,
-          owner,
-          name,
-        );
-        return result.data;
-      } catch (error) {
-        const { isGitHubNotFound } = await import("../code-host/github/github-errors");
-        if (isGitHubNotFound(error)) return null;
-        throw error;
-      }
-    },
-    listReviews: (prNumber) => listPrReviews(client, slug, prNumber),
-    listReviewComments: async (prNumber, reviewId) =>
-      (
-        await client.conditionalGet<Item[]>(
-          `/repos/${slug}/pulls/${prNumber}/reviews/${reviewId}/comments?per_page=100`,
-          owner,
-          name,
-        )
-      ).data ?? [],
-    getBotUsername: () => client.getBotUsername(owner, name),
-  };
 }
 
 /**
