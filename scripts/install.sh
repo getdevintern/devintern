@@ -158,7 +158,7 @@ persist_path() {
 # True when any coding-agent CLI DevIntern can drive is on PATH. Keep in sync
 # with the harnesses' `defaultPath` in packages/agent-harness/src/harnesses.
 have_agent_cli() {
-  for agent in claude codex cursor-agent opencode agy cline reasonix goose grok kilo kimi muse pi qwen; do
+  for agent in claude codex cursor-agent opencode agy cline dsh reasonix goose grok kilo kimi muse pi qwen; do
     have "$agent" && return 0
   done
   return 1
