@@ -88,6 +88,16 @@ describe("manual runs in a workspace checkout", () => {
     expect(
       await findWorkspaceRepoForCheckout({ cwd: checkout, workspaceDir: workspace }),
     ).toBeNull();
+    // Read-only lookups (the doctor route) opt back in; they compose no env.
+    expect(
+      (
+        await findWorkspaceRepoForCheckout({
+          cwd: checkout,
+          workspaceDir: workspace,
+          ignoreWorkerSubprocess: true,
+        })
+      )?.repo.name,
+    ).toBe("web");
     delete process.env[WORKER_SUBPROCESS_ENV];
     expect(
       await findWorkspaceRepoForCheckout({ cwd: checkout, workspaceDir: join(root, "none") }),

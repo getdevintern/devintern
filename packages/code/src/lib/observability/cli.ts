@@ -261,6 +261,9 @@ export async function runWorkerRepoDoctor(
   const run = await findWorkspaceRepoForCheckout({
     cwd: deps.cwd,
     workspaceDir: deps.workspaceDir,
+    // The route only reads the workspace; it composes no environment, so the
+    // worker-subprocess marker (which guards env composition) does not apply.
+    ignoreWorkerSubprocess: true,
   });
   if (!run || run.repo.manualOnly) return null;
   const { workspaceConfigPath } = await import("../workspace/paths");

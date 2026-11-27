@@ -101,6 +101,15 @@ describe("devintern doctor routing", () => {
     expect((await run("git@github.com:acme/web.git", warned, true)).code).toBe(2);
   });
 
+  test("a worker task subprocess still routes to the worker checks", async () => {
+    process.env[WORKER_SUBPROCESS_ENV] = "1";
+    const { code, calls } = await run("git@github.com:acme/web.git", result());
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([`${workspace}|${join(workspace, "workspace.toml")}`]);
+    expect(logs.join("\n")).toContain('worker repository "web"');
+  });
+
   test("manual-only and unregistered checkouts keep the per-repo doctor", async () => {
     const manual = await run("git@github.com:acme/api.git", result());
     expect(manual.code).toBeNull();
