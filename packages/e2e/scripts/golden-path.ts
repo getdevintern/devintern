@@ -19,6 +19,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { cliPath } from "../helpers/fixture-workspace";
 import { resolveGitHubConfig } from "../helpers/github-config";
+import {
+  NPM_NOT_VISIBLE_MARKER,
+  NpmNotVisibleError,
+  waitForNpmVersion,
+} from "../helpers/npm-visibility";
 import { buildImage } from "../helpers/systemd-container";
 
 const packageRoot = resolve(import.meta.dir, "..");
@@ -34,34 +39,14 @@ interface CliSource {
   release: boolean;
 }
 
-async function registryVersion(tag: string): Promise<string | undefined> {
-  const response = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE}/${tag}`, {
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (response.status === 404) return undefined;
-  if (!response.ok) throw new Error(`npm registry: HTTP ${response.status} for ${tag}`);
-  return ((await response.json()) as { version: string }).version;
-}
-
 /**
- * Resolve `npm:<version|latest>`. A just-published version can take a few
- * minutes to reach the registry, so an exact version is polled for up to
- * five minutes.
+ * Resolve `npm:<version|latest>`. A just-published version can take several
+ * minutes to reach the registry, so an exact version is polled with backoff
+ * for up to 15 minutes (see helpers/npm-visibility.ts).
  */
 async function npmSource(spec: string): Promise<CliSource> {
-  const requested = spec.trim() || "latest";
-  const deadline = Date.now() + 300_000;
-  for (;;) {
-    const version = await registryVersion(requested);
-    if (version) {
-      return { install: { npmSpec: `${NPM_PACKAGE}@${version}` }, version, release: true };
-    }
-    if (requested === "latest" || Date.now() >= deadline) {
-      throw new Error(`${NPM_PACKAGE}@${requested} is not on the npm registry`);
-    }
-    console.log(`Waiting for ${NPM_PACKAGE}@${requested} to appear on the npm registry...`);
-    await Bun.sleep(15_000);
-  }
+  const { version } = await waitForNpmVersion({ packageName: NPM_PACKAGE, spec });
+  return { install: { npmSpec: `${NPM_PACKAGE}@${version}` }, version, release: true };
 }
 
 function packSource(destination: string): CliSource {
@@ -118,7 +103,19 @@ if (docker.exitCode !== 0) {
 
 const packDir = mkdtempSync(join(tmpdir(), "devintern-e2e-golden-pack-"));
 try {
-  const source = await resolveSource(process.env.DEVINTERN_CLI_SOURCE?.trim() || "source", packDir);
+  const source = await resolveSource(
+    process.env.DEVINTERN_CLI_SOURCE?.trim() || "source",
+    packDir,
+  ).catch((error: unknown) => {
+    if (error instanceof NpmNotVisibleError) {
+      // The workflow greps the marker to report a propagation delay, not a regression.
+      console.error(`${NPM_NOT_VISIBLE_MARKER} ${error.message}`);
+      if (process.env.GITHUB_ACTIONS) {
+        console.error(`::error title=Not visible on npm::${error.message}`);
+      }
+    }
+    throw error;
+  });
   const label = "npmSpec" in source.install ? source.install.npmSpec : source.install.tarball;
   console.log(
     `Golden path: ${label} (v${source.version}, ${source.release ? "release" : "development"} build) against ${github.repository}`,

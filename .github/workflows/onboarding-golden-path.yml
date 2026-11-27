@@ -46,6 +46,7 @@ on:
     paths:
       - .github/workflows/onboarding-golden-path.yml
       - packages/e2e/scripts/golden-path.ts
+      - packages/e2e/helpers/npm-visibility.ts
       - packages/e2e/tests/golden-path/**
       - packages/e2e/infrastructure/golden-path/**
       - packages/e2e/helpers/systemd-container.ts
@@ -57,7 +58,8 @@ permissions:
 jobs:
   golden-path:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # npm mode may first wait up to 15 minutes for a fresh publish to propagate.
+    timeout-minutes: 45
     # The fixture repository is shared: never run two golden paths at once
     # (job level, so it also holds when another workflow calls this one).
     concurrency:
@@ -123,6 +125,26 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           log="$RUNNER_TEMP/golden-path.log"
+          # The published version never showed up on npm: a propagation delay,
+          # not an onboarding regression. Report it apart from regressions.
+          not_visible="$(grep -m 1 -F 'npm-not-visible:' "$log" | sed -E 's/^.*npm-not-visible: //' || true)"
+          if [ -n "$not_visible" ]; then
+            body="$RUNNER_TEMP/issue.md"
+            {
+              echo "The post-release onboarding smoke test did not run (CLI source: \`$CLI_SOURCE\`, ref \`$GITHUB_REF_NAME\`, commit $GITHUB_SHA)."
+              echo
+              echo "**$not_visible.**"
+              echo
+              echo "This is not an onboarding regression: the publish may still be propagating. Check \`npm view @getdevintern/code versions\`, then re-run the failed job."
+              echo
+              echo "Run: $RUN_URL"
+            } > "$body"
+            gh label create npm-propagation --color FBCA04 \
+              --description "Published version not visible on npm yet" 2>/dev/null || true
+            gh issue create --label npm-propagation \
+              --title "Post-release smoke test could not run: ${CLI_SOURCE#npm:} not visible on npm" --body-file "$body"
+            exit 0
+          fi
           failed="$(grep -E '^\(fail\)' "$log" | grep -v 'Not run: the earlier step' | head -n 1 | sed -E 's/^\(fail\) onboarding golden path > //; s/ \[[0-9.]+m?s\]$//')"
           [ -n "$failed" ] || failed="the suite did not reach a test (see the run log)"
           body="$RUNNER_TEMP/issue.md"

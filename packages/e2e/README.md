@@ -231,7 +231,10 @@ source and under a minute against npm, plus about a minute the first time the
 The **onboarding-golden-path** workflow runs it nightly (a failure opens or
 updates an issue labelled `onboarding-regression`), before every
 `@getdevintern/code` release, on pull requests that change the suite, and
-against the package just published after each release. Without the variable
+against the package just published after each release. That post-release run
+first waits up to 15 minutes for the new version to appear on npm; if it never
+does, the job fails with "not visible on npm after 15 minutes" and opens an
+`npm-propagation` issue instead of an `onboarding-regression` one. Without the variable
 and secret (forks) it skips with a notice. Step-by-step coverage is in
 [docs/coverage/onboarding.md](docs/coverage/onboarding.md).
 
