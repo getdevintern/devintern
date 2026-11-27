@@ -457,13 +457,52 @@ describe("devintern worker read-only dashboard commands", () => {
       writeFileSync(join(empty, "workspace.toml"), WORKSPACE_TOML);
       const result = run("queue", ["--workspace", empty]);
       expect(result.code).toBe(0);
+      expect(result.stdout).toContain(`No worker database at ${workspaceDbPath(empty)}`);
+      expect(result.stdout).toContain("pass --workspace");
+      expect(result.stdout).toContain("DEVINTERN_WORKSPACE_DIR");
       expect(result.stdout).toContain(
-        "The worker has not started yet; see devintern worker service status",
+        "The worker has not started yet; check `devintern worker service status`",
       );
       expect(result.stderr).toBe("");
       expect(existsSync(workspaceStateDir(empty))).toBe(false);
     } finally {
       rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  test("queue --json before the first worker start stays an error", () => {
+    const empty = mkdtempSync(join(tmpdir(), "worker-read-empty-queue-json-"));
+    try {
+      writeFileSync(join(empty, "workspace.toml"), WORKSPACE_TOML);
+      const result = run("queue", ["--workspace", empty, "--json"]);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(`No worker database at ${workspaceDbPath(empty)}`);
+      expect(existsSync(workspaceStateDir(empty))).toBe(false);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  test("queue with an inaccessible state directory is an error, not an empty queue", () => {
+    if (process.getuid?.() === 0) return; // root ignores directory modes
+    const denied = mkdtempSync(join(tmpdir(), "worker-read-denied-"));
+    const stateDir = workspaceStateDir(denied);
+    try {
+      writeFileSync(join(denied, "workspace.toml"), WORKSPACE_TOML);
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(workspaceDbPath(denied), "");
+      chmodSync(stateDir, 0o000);
+      const result = run("queue", ["--workspace", denied]);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(
+        `Cannot read the worker database at ${workspaceDbPath(denied)}`,
+      );
+      expect(result.stderr).not.toContain("The worker has not started yet");
+    } finally {
+      chmodSync(stateDir, 0o755);
+      rmSync(denied, { recursive: true, force: true });
     }
   });
 

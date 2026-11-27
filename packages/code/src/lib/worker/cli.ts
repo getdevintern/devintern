@@ -7,7 +7,7 @@ import {
   loadEnvironment,
   loadSupabaseConfig,
 } from "../cli/bootstrap";
-import { isPromptAbort, isPromptAbortReported, promptAbortReason } from "../cli/prompt-abort";
+import { isPromptAbort } from "../cli/prompt-abort";
 import { flushAnalytics, trackWorkerConnect } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
 import { TaskTrackerManager } from "../trackers/manager";
@@ -394,7 +394,8 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     process.exit(1);
   }
   loadEnvironment();
-  const { checkWorkerEntitlement, runWorkerInit } = await import("../init/worker-init");
+  const { checkWorkerEntitlement, reportWorkerInitAbort, runWorkerInit } =
+    await import("../init/worker-init");
   const { isInteractive } = await import("../init/wizard");
   if (!isInteractive(args, process.stdin)) {
     console.log("❌ 'devintern worker init' needs a terminal for its prompts.");
@@ -445,11 +446,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
   } catch (error) {
     if (!isPromptAbort(error)) throw error;
     // The wizard already said setup paused and where the answers were saved.
-    if (!isPromptAbortReported(error)) {
-      console.log(
-        `\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern worker init\`.`,
-      );
-    }
+    exitCode = reportWorkerInitAbort(error, console.log);
   }
   await flushAnalytics();
   process.exit(exitCode);

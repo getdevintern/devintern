@@ -36,6 +36,9 @@ export const WORKER_INJECTED_ENV_VARS = [
   "DEVINTERN_WORKSPACE_PIPELINE_DEFAULT",
   "DEVINTERN_ACTIONED_SOURCE",
   "DEVINTERN_HARNESS_CHAIN",
+  // The worker exports its resolved harness to every task subprocess; inherited,
+  // it changes harness-dependent output (install hints, selection defaults).
+  "AGENT_HARNESS",
   // Runtime limits and auth policy (fleet-events.ts, fleet-event-acquirers.ts).
   "DEVINTERN_MAX_CONCURRENCY_PER_REPO",
   "DEVINTERN_GITHUB_AUTH_MODE",
