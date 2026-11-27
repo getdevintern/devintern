@@ -43,6 +43,15 @@ export const WORKER_CAPTURE_ROTATE_BYTES = 8 * 1024 * 1024;
 /** The capture currently teeing console output, if any (one per process). */
 let activeCapture: WorkerCaptureHandle | null = null;
 
+/**
+ * Whether this process is teeing its console into capture files. Worker
+ * subprocesses pipe their output through the console while it is, so their
+ * lines land in the same log files (see `child-output.ts`).
+ */
+export function isWorkerCaptureActive(): boolean {
+  return activeCapture !== null;
+}
+
 interface Originals {
   log: typeof console.log;
   info: typeof console.info;

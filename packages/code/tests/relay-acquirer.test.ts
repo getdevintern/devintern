@@ -61,6 +61,7 @@ describe("RelayAcquirer", () => {
       evaluateTask?: RelayHandlers["evaluateTask"];
       addressPr?: RelayHandlers["addressPr"];
       handlePrComment?: RelayHandlers["handlePrComment"];
+      handlePrReview?: RelayHandlers["handlePrReview"];
       /** Override the shared queue (e.g. a lower retry ceiling for a test). */
       queue?: WebhookQueue;
     } = {},
@@ -115,6 +116,7 @@ describe("RelayAcquirer", () => {
             log.comments.push([repo, pr, commentId]);
             return true;
           }),
+        ...(options.handlePrReview ? { handlePrReview: options.handlePrReview } : {}),
         evaluateTask:
           options.evaluateTask ??
           (async (taskKey, trackerSource, team) => {
@@ -192,6 +194,58 @@ describe("RelayAcquirer", () => {
     // Not an agent PR → never addressed; second delivery deduped either way.
     expect(log.addressed.length).toBe(0);
     expect(queue.hasProcessed("relay", "github:dup")).toBe(true);
+  });
+
+  test("reviews on non-agent PRs go to the mention review handler, not addressPr", async () => {
+    const reviews: Array<[string, number, string]> = [];
+    const ts = "2026-11-26T10:00:00Z";
+    const { acquirer } = makeAcquirer(
+      [
+        {
+          events: [
+            envelope({ seq: 1, ref: { pr: 47 }, deliveryId: "human-review", ts }),
+            envelope({ seq: 2, ref: { pr: 5 }, deliveryId: "agent-review" }),
+          ],
+          cursor: 2,
+        },
+        { events: [] },
+      ],
+      {
+        agentPrs: [["acme/webapp", 5]],
+        handlePrReview: async (repo, pr, submittedAt) => {
+          reviews.push([repo, pr, submittedAt]);
+          return true;
+        },
+      },
+    );
+
+    acquirer.start();
+    await waitFor(() => (workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue ?? "0") === "2");
+    await acquirer.stop();
+
+    expect(reviews).toEqual([["acme/webapp", 47, ts]]);
+    // Agent PRs keep the regular review path.
+    expect(log.addressed).toEqual([["acme/webapp", 5]]);
+  });
+
+  test("a deferred mention review stays retryable and holds the cursor", async () => {
+    let calls = 0;
+    const review = envelope({ seq: 1, ref: { pr: 47 }, deliveryId: "deferred-review" });
+    const { acquirer } = makeAcquirer([{ events: [review], cursor: 1 }], {
+      handlePrReview: async () => {
+        calls++;
+        return "deferred";
+      },
+    });
+
+    acquirer.start();
+    try {
+      await waitFor(() => calls === 1);
+    } finally {
+      await acquirer.stop();
+    }
+    expect(queue.hasProcessed("relay", "github:deferred-review")).toBe(false);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue ?? "0").toBe("0");
   });
 
   test("dispatches valid provider-neutral v2 code-host hints", async () => {

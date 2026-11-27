@@ -46,6 +46,7 @@ import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
 import { classifyAgentPrState, resolveAgentPrMerge } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
+import { childOutputMode, forwardChildOutput } from "../observability/child-output";
 import { WORKTREE_BUSY_EXIT_CODE } from "../worker/usage-limit-protocol";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
@@ -247,12 +248,13 @@ export function runCiFixViaCli(
             ...(opts.expectedHeadSha ? ["--expected-head", opts.expectedHeadSha] : []),
           ],
           {
-            stdio: "inherit",
+            stdio: ["inherit", childOutputMode(), childOutputMode()],
             cwd: opts.cwd,
             env: opts.env ?? process.env,
             detached,
           },
         );
+        forwardChildOutput(child, `ci-fix ${prUrl}`);
         abort = () => {
           if (child.pid === undefined) return;
           try {

@@ -7,6 +7,9 @@ import { spawn } from "child_process";
 import { captureError } from "@devintern/utils";
 
 import { parseEnvInteger } from "../config/env-integer";
+import { childOutputMode, forwardChildOutput } from "../observability/child-output";
+import { formatMentionArg } from "../review/mention-trigger";
+import type { MentionTrigger } from "../review/mention-trigger";
 import type { TaskExecutionResult } from "./task-polling";
 import {
   cliResultToTaskResult,
@@ -107,7 +110,8 @@ export async function serializePrRun<T>(
  * @param prNumber - Pull request number
  * @param opts - Working directory and environment for the subprocess;
  *               the workspace worker runs from the repo's base worktree with
- *               per-repo env; direct callers inherit both.
+ *               per-repo env; direct callers inherit both. `mention` is the
+ *               @mention that triggered the run, addressed as feedback itself.
  */
 export function runAddressReviewViaCli(
   repo: string,
@@ -116,10 +120,17 @@ export function runAddressReviewViaCli(
     cwd?: string;
     env?: Record<string, string | undefined>;
     signal?: AbortSignal;
+    mention?: MentionTrigger;
+    entrypoint?: string;
+    outputStdio?: "inherit" | "ignore";
   } = {},
 ): Promise<TaskExecutionResult> {
+  const { mention, ...rest } = opts;
   return serializePrRun(repo, prNumber, () =>
-    runSubcommandViaCli("address-review", repo, prNumber, opts),
+    runSubcommandViaCli("address-review", repo, prNumber, {
+      ...rest,
+      extraArgs: mention ? ["--mention", formatMentionArg(mention)] : [],
+    }),
   );
 }
 
@@ -293,16 +304,18 @@ function spawnResolveOnce(
     const maxResultBytes = 64 * 1024;
     // Detached so the whole process group (agent harnesses included) can be
     // signalled on timeout.
+    const output = childOutputMode(opts.outputStdio);
     const child = spawn(
       process.execPath,
       [opts.entrypoint ?? process.argv[1], "resolve-conflicts", prUrl, ...extraArgs],
       {
         detached: true,
-        stdio: ["inherit", opts.outputStdio ?? "inherit", opts.outputStdio ?? "inherit", "pipe"],
+        stdio: ["inherit", output, output, "pipe"],
         cwd: opts.cwd,
         env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" },
       },
     );
+    forwardChildOutput(child, `resolve-conflicts ${prUrl}`);
     let aborted = false;
     abort = () => {
       aborted = true;
@@ -391,6 +404,7 @@ async function runSubcommandViaCli(
     webUrl?: string;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
+    extraArgs?: string[];
   } = {},
 ): Promise<TaskExecutionResult> {
   const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
@@ -407,16 +421,18 @@ async function runSubcommandViaCli(
           resolve(1);
           return;
         }
+        const output = childOutputMode(opts.outputStdio);
         const child = spawn(
           process.execPath,
-          [opts.entrypoint ?? process.argv[1], subcommand, prUrl],
+          [opts.entrypoint ?? process.argv[1], subcommand, prUrl, ...(opts.extraArgs ?? [])],
           {
-            stdio: opts.outputStdio ?? "inherit",
+            stdio: ["inherit", output, output],
             cwd: opts.cwd,
             env,
             detached: process.platform !== "win32",
           },
         );
+        forwardChildOutput(child, `${subcommand} ${prUrl}`);
         const abort = () => {
           interrupted = true;
           killProcessTree(child);

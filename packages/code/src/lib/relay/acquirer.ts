@@ -89,6 +89,19 @@ export interface RelayHandlers {
     prNumber: number,
     commentId: number,
   ): Promise<boolean | "deferred" | "skipped" | "interrupted">;
+  /**
+   * Review submitted on a PR the agent did not open → act only when the
+   * review @mentions the bot (body or line comments), after the same push
+   * access gate as comment mentions. Reviews without a mention stay ignored.
+   * Same outcome semantics as {@link handlePrComment}.
+   *
+   * @param submittedAt - The envelope timestamp (the review's `submitted_at`)
+   */
+  handlePrReview?(
+    repo: string,
+    prNumber: number,
+    submittedAt: string,
+  ): Promise<boolean | "deferred" | "skipped" | "interrupted">;
   /** Tracker task changed → re-evaluate the matching team/default source. */
   evaluateTask(taskKey: string, trackerSource: string, team?: string): Promise<void>;
   /** Provider-neutral change hint; implementation must re-fetch authoritative state. */
@@ -353,10 +366,15 @@ export class RelayAcquirer implements Acquirer {
           return;
         }
         if (!this.options.isAgentPr(repo, pr)) {
-          // Reviews on human PRs act only via @mention comments.
-          if (this.options.verbose) {
-            console.log(`   [relay] ignoring review on non-agent PR ${repo}#${pr}`);
+          // Reviews on human PRs act only when they @mention the bot.
+          if (!handlers.handlePrReview) {
+            if (this.options.verbose) {
+              console.log(`   [relay] ignoring review on non-agent PR ${repo}#${pr}`);
+            }
+            return;
           }
+          const outcome = await handlers.handlePrReview(repo, pr, envelope.ts);
+          this.settleMentionOutcome(outcome, repo, pr);
           return;
         }
         console.log(`📌 [relay] review feedback on ${repo}#${pr}`);
@@ -401,22 +419,7 @@ export class RelayAcquirer implements Acquirer {
           return;
         }
         const outcome = await handlers.handlePrComment(repo, pr, commentId);
-        if (outcome === "deferred") {
-          throw new RelayDeferredError(
-            `Relay mention ${repo}#${pr} deferred until a harness is available`,
-          );
-        }
-        if (outcome === "interrupted") {
-          throw new RelayInterruptedError(`Relay mention ${repo}#${pr} was interrupted`);
-        }
-        if (outcome === false) {
-          // Same as reviews: the run reports its own failure, so acknowledge
-          // instead of re-running the whole pipeline on every backoff cycle.
-          console.warn(
-            `⚠️  [relay] mention run on ${repo}#${pr} did not complete cleanly; ` +
-              "acknowledging the delivery instead of retrying it",
-          );
-        }
+        this.settleMentionOutcome(outcome, repo, pr);
         return;
       }
       case "task.changed": {
@@ -445,6 +448,30 @@ export class RelayAcquirer implements Acquirer {
         if (this.options.verbose) {
           console.log(`   [relay] ignoring unknown event type ${envelope.eventType as string}`);
         }
+    }
+  }
+
+  /** Map a mention run outcome onto the delivery: retry, or acknowledge. */
+  private settleMentionOutcome(
+    outcome: boolean | "deferred" | "skipped" | "interrupted",
+    repo: string,
+    pr: number,
+  ): void {
+    if (outcome === "deferred") {
+      throw new RelayDeferredError(
+        `Relay mention ${repo}#${pr} deferred until a harness is available`,
+      );
+    }
+    if (outcome === "interrupted") {
+      throw new RelayInterruptedError(`Relay mention ${repo}#${pr} was interrupted`);
+    }
+    if (outcome === false) {
+      // Same as reviews: the run reports its own failure, so acknowledge
+      // instead of re-running the whole pipeline on every backoff cycle.
+      console.warn(
+        `⚠️  [relay] mention run on ${repo}#${pr} did not complete cleanly; ` +
+          "acknowledging the delivery instead of retrying it",
+      );
     }
   }
 
