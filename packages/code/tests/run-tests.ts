@@ -1,8 +1,17 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 
 import { GUARD_FILES } from "./setup/guard-files";
+import { mutatingServiceCalls, SERVICE_MANAGER_COMMANDS } from "./setup/service-stubs";
 import { normalizeTestArgs } from "./setup/test-args";
 import { stripWorkerInjectedEnv } from "./setup/worker-env";
 
@@ -36,6 +45,25 @@ process.on("exit", () => {
   }
 });
 
+// Service-manager commands resolve through PATH, so shadow them with stubs
+// that never reach the real systemd/launchd. The service unit name is fixed
+// (`devintern-worker`), so a test that fakes `homedir` but forgets to inject
+// `run` would otherwise `systemctl --user restart` the developer's live worker
+// — and, when the suite runs inside a worker task, kill every running task.
+// Each stub logs its call and fails; a state-changing call fails the suite.
+const serviceStubDir = join(queueDbTempDir, "service-stubs");
+const serviceStubLog = join(queueDbTempDir, "service-stub-calls.log");
+mkdirSync(serviceStubDir, { recursive: true });
+for (const command of SERVICE_MANAGER_COMMANDS) {
+  const stub = join(serviceStubDir, command);
+  writeFileSync(
+    stub,
+    `#!/bin/sh\nprintf '%s\\n' "${command} $*" >> ${JSON.stringify(serviceStubLog)}\n` +
+      `echo "${command} is stubbed in tests; inject a run function instead" >&2\nexit 1\n`,
+  );
+  chmodSync(stub, 0o755);
+}
+
 // Ambient prompt overrides make prompt-rendering tests non-hermetic: a
 // developer's DEVINTERN_PROMPTS_DIR would silently change their results. The same applies to the rest of the
 // worker-injected environment when an agent runs the suite from inside a
@@ -65,6 +93,7 @@ const child = Bun.spawn(["bun", "test", "--timeout=30000", ...GUARD_PRELOADS, ..
   cwd: import.meta.dir,
   env: {
     ...childEnv,
+    PATH: [serviceStubDir, childEnv.PATH].filter(Boolean).join(delimiter),
     GIT_CEILING_DIRECTORIES: gitCeilingDirectories,
     WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
     DEVINTERN_WORKSPACE_DIR: join(queueDbTempDir, "workspace"),
@@ -77,4 +106,15 @@ const child = Bun.spawn(["bun", "test", "--timeout=30000", ...GUARD_PRELOADS, ..
   stderr: "inherit",
 });
 
-process.exit(await child.exited);
+const exitCode = await child.exited;
+const calls = existsSync(serviceStubLog) ? readFileSync(serviceStubLog, "utf8") : "";
+const mutating = mutatingServiceCalls(calls);
+if (mutating.length > 0) {
+  console.error(
+    "\n❌ Tests ran state-changing service-manager commands (stubbed, so nothing reached the real " +
+      "service). Inject `run` into the service code instead:\n" +
+      mutating.map((call) => `   ${call}`).join("\n"),
+  );
+  process.exit(exitCode === 0 ? 1 : exitCode);
+}
+process.exit(exitCode);
