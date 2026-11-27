@@ -376,19 +376,26 @@ describe.concurrent("runCLI timeout diagnostic", () => {
       ].join("\n"),
     );
 
+    // The startup deadline runs from spawn, so it must cover bun's own startup
+    // (well over 300ms when the machine is loaded) or the stub is legitimately
+    // killed before its first write and the scenario never happens. The run
+    // deadline starts on first output and is at least as long, so the run is
+    // still alive when the startup deadline passes however fast bun started.
+    const startupDeadlineMs = 5_000;
+    const runTimeoutMs = startupDeadlineMs;
     try {
       let error: unknown;
       try {
-        await runCLI([], testDir, {}, STUB_TIMEOUT_MS, stubCli, {
+        await runCLI([], testDir, {}, runTimeoutMs, stubCli, {
           startTimeoutOnFirstOutput: true,
-          startupDeadlineMs: 300,
+          startupDeadlineMs,
         });
       } catch (caught) {
         error = caught;
       }
       expect(error).toBeInstanceOf(Error);
       const message = (error as Error).message;
-      expect(message).toContain(`CLI timed out after ${STUB_TIMEOUT_MS}ms`);
+      expect(message).toContain(`CLI timed out after ${runTimeoutMs}ms`);
       expect(message).not.toContain("wrote no stdout");
       expect(message).toContain("slow stub before hang");
     } finally {
