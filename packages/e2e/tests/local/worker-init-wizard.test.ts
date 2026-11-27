@@ -178,9 +178,10 @@ function tailAfter(output: string, prompt: RegExp): string {
 }
 
 /**
- * Aborted prompts end with one clean `❌` line naming how the input stopped.
- * Once the workspace is written (`paused`), a `⏸️  Setup paused` line before
- * it says where the answers so far are saved.
+ * Aborted prompts end with one clean closing line. Before the workspace is
+ * written it is a `❌` line naming how the input stopped. Once it is written
+ * (`paused`), the closing line is `⏸️  Setup paused`, saying where the answers
+ * so far are saved, and the generic `❌ … setup stopped` line is not repeated.
  */
 function expectCleanAbort(
   run: WizardRun,
@@ -194,13 +195,16 @@ function expectCleanAbort(
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "");
-  expect(tail).toHaveLength(options.paused ? 2 : 1);
+  expect(tail).toHaveLength(1);
   if (options.paused) {
     expect(tail[0]).toStartWith("⏸️  Setup paused. Your answers so far are saved in");
     expect(tail[0]).toContain("workspace.toml");
+    expect(tail[0]).toContain("run `devintern worker init` to continue");
+    expect(run.output).not.toContain("setup stopped");
+    return;
   }
-  expect(tail.at(-1)).toStartWith("❌");
-  expect(tail.at(-1)).toContain(reason);
+  expect(tail[0]).toStartWith("❌");
+  expect(tail[0]).toContain(reason);
 }
 
 ptyTest(
