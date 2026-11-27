@@ -29,6 +29,7 @@ import {
 import type { ReadinessResult } from "../observability/readiness-json";
 import { parseEnvFile } from "../workspace/env";
 import { resolveWorkspaceDir, workspaceEnvPath } from "../workspace/paths";
+import { sampleTaskAddCommand } from "./worker-init-first-task";
 import { errorMessage } from "./worker-init-fs";
 import { rollbackWrites } from "./worker-init-noninteractive-plan";
 import type { Plan } from "./worker-init-noninteractive-plan";
@@ -514,6 +515,16 @@ function nextStepsFor(options: {
     options.checks.some((check) => check.name === "entitlement" && check.status === "action");
   if (!options.relayConnected && !signInPending && !args.noRelay) {
     steps.push(connectStep(workspaceDir, home));
+  }
+  // Optional and last, once nothing but starting the worker is left; flags
+  // mode never creates a sample automatically.
+  if (options.hasRepo && !signInPending) {
+    steps.push({
+      id: "try-first-task",
+      message:
+        "Optional: once the worker runs, queue a small docs-only sample task and watch its run in the dashboard",
+      command: sampleTaskAddCommand(workspaceDir, undefined, home),
+    });
   }
   return steps;
 }

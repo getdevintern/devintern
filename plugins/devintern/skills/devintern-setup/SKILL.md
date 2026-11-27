@@ -104,6 +104,7 @@ Stdout is `schema` `devintern.worker-init`, `version` 1. Read:
 | `update` | init | With `code` `workspace_exists`: the exact re-run with `--yes` |
 | `service` | init, doctor | Install and start the background service (step 5) |
 | `connect` | init | Optional relay pairing (step 6); only when already signed in and not paired |
+| `try-first-task` | init | Optional, last: queues a small docs-only sample task with `worker add` so the user can watch a first run. It opens a PR, so ask the user before running it |
 
 `service` and `connect` are withheld while a check fails. `service` is left out once `--start` installed the service or deferred it to the sign-in, and `connect` while a sign-in is pending (completing it pairs the relay).
 

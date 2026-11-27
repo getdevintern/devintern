@@ -23,6 +23,7 @@ import {
   resultFor,
   runNonInteractiveWorkerInit,
 } from "../src/lib/init/worker-init-noninteractive";
+import { sampleTaskAddCommand } from "../src/lib/init/worker-init-first-task";
 import { renderNonInteractiveReport } from "../src/lib/init/worker-init-noninteractive-text";
 import type {
   NonInteractiveInitArgs,
@@ -232,10 +233,19 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(env).toContain("JIRA_API_TOKEN=ATATT-very-secret-token");
     expect(statSync(join(workspaceDir, ".env")).mode & 0o777).toBe(0o600);
     // The background service comes first; nothing blocks an agent waiting for a browser.
-    expect(report.nextSteps.map((step) => step.id)).toEqual(["service", "connect"]);
+    expect(report.nextSteps.map((step) => step.id)).toEqual([
+      "service",
+      "connect",
+      "try-first-task",
+    ]);
+    // Optional and runnable; nothing is created in flags mode.
+    const firstTask = report.nextSteps.find((step) => step.id === "try-first-task")!;
+    expect(firstTask.message).toStartWith("Optional:");
+    expect(firstTask.command).toContain("devintern worker add --title ");
     expect(report.nextSteps.map((step) => step.command)).toEqual([
       `DEVINTERN_WORKSPACE_DIR=${workspaceDir} devintern worker service install --json`,
       `devintern worker connect github --no-wait --json --workspace ${join(workspaceDir, "workspace.toml")}`,
+      sampleTaskAddCommand(workspaceDir),
     ]);
     expect(report.changed).toBe(true);
     expect(report.persisted).toBe(true);

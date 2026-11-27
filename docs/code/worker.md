@@ -128,6 +128,7 @@ Every `nextSteps` entry has `id`, `message`, and `command`, plus `url` when a pe
 | `fix-credentials`, `fix-query`, `fix-repo-access`, `fix-…` | The fix for a failed check: a corrected re-run of this command, or the page to change token access |
 | `update`, `retry`                                       | Re-run with `--yes` to change an existing workspace, or re-run after the fixes above               |
 | `add-repo`, `service`, `connect`                        | Register a repository, install the background service (left out once `--start` installed it or deferred it to the sign-in), pair the relay (only when you are signed in already and not paired) |
+| `try-first-task`                                        | Optional, last: queue a small docs-only sample task with `devintern worker add` and watch its run. Listed once a repository is registered and no sign-in is pending; nothing is created for you |
 
 `code` values when the command stops early: `invalid_arguments`, `unsupported_tracker`, `env_file_unreadable`, `missing_input` (with a `missing` list), `invalid_query` (for example Jira JQL given to the `github` tracker), `not_a_repository`, `workspace_exists`, `workspace_invalid`, `workspace_busy`, and `write_failed`. After a failed check it is the first failure: `credentials_rejected`, `query_rejected`, `repo_access_denied`, `agent_missing`, `not_entitled`, `service_start_failed`, or `check_failed`.
 

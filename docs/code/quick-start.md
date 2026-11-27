@@ -93,7 +93,17 @@ From then on the worker polls your tracker every 60 seconds for tickets that mat
 
 ## 4. Watch the first task run
 
-Make a ticket match your query, for example by adding the `devintern` label to a GitHub issue. Within a minute or two the worker picks it up. Follow it in:
+When the wizard has started the worker, it ends with one more question: "Create a sample ticket so you can watch the first run? [Y/n]". The sample is a small docs-only task (add a short note to `CONTRIBUTING.md`) whose title says it is a DevIntern sample:
+
+| Tracker           | What the wizard creates                                                                                     |
+| ----------------- | ----------------------------------------------------------------------------------------------------------- |
+| GitHub, GitLab    | An issue with the labels your query selects on (`label:devintern`)                                          |
+| Markdown          | A task file in your tasks folder with the fields your query filters on (`status=todo`)                     |
+| Any other tracker | An ad-hoc task queued with [`devintern worker add`](./delegation.md); no ticket                             |
+
+It then waits up to two minutes for the worker to start the task and prints the dashboard link to the run. Answer `n` and nothing is created. If your query selects on something setup cannot set (an assignee, a milestone), the wizard tells you to make the ticket match it yourself. `worker init --non-interactive` never creates a sample; it lists the command as the optional `try-first-task` next step.
+
+To try your own ticket, make it match your query, for example by adding the `devintern` label to a GitHub issue. Within a minute or two the worker picks it up. Follow it in:
 
 - The dashboard at `http://localhost:4400`. On a remote machine, forward it first: `ssh -L 4400:127.0.0.1:4400 you@host`
 - `devintern worker runs` for the run list, and `devintern worker logs --level warn` for problems
