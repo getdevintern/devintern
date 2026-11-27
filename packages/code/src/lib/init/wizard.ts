@@ -435,6 +435,14 @@ async function trackerTokenSteps(options: {
   return values.GITHUB_TOKEN ? steps.filter((step) => step.key !== "GITHUB_TOKEN") : steps;
 }
 
+/** Intro shown before offering or prompting for the optional pull-request token. */
+export function logGitHubPrTokenIntro(log: LogFn): void {
+  log(
+    "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
+  );
+  log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
+}
+
 /** Offer the optional PR token, falling back to the pasted-token prompt. */
 async function promptGitHubPrToken(options: {
   values: Record<string, string>;
@@ -445,10 +453,7 @@ async function promptGitHubPrToken(options: {
   log: LogFn;
   probe: ProbeFn;
 }): Promise<void> {
-  options.log(
-    "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
-  );
-  options.log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
+  logGitHubPrTokenIntro(options.log);
   const reused = await reuseGitHubCliToken({ ...options, stepDefaults: options.existing });
   if (!reused) {
     await promptSteps(

@@ -16,6 +16,7 @@ import { stdinClosedError } from "@devintern/auth";
 
 import { isPromptAbort } from "../src/lib/cli/prompt-abort";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { parseEnvFileContent } from "../src/lib/workspace/env";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/code-host/github/app-setup";
 import { readGitHubCliToken } from "../src/lib/init/github-cli-token";
 import {
@@ -34,6 +35,7 @@ import {
   workerAuthSessionPath,
   workspaceGitHubRepos,
 } from "../src/lib/init/worker-init";
+import { runNonInteractiveWorkerInit } from "../src/lib/init/worker-init-noninteractive";
 
 /** Start of the one-question worker-settings prompt. */
 const RECOMMENDED_QUESTION = "Use the recommended worker settings";
@@ -280,9 +282,49 @@ describe("runWorkerInit", () => {
       expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
         true,
       );
+      expect(logs.join("\n")).toContain("DevIntern opens pull requests on GitHub");
       expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
         "GITHUB_TOKEN=ghp_from_prompt",
       );
+    });
+
+    test("asks for the token when the remote is not GitHub", async () => {
+      writeFileSync(
+        path.join(workspaceDir, "workspace.toml"),
+        '[defaults]\ntracker = "markdown"\n\n[[repos]]\nname = "mirror"\nremote = "https://git.example.com/acme/api.git"\n',
+      );
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => null,
+          prompt: scriptedPrompt(questions, "ghp_from_mirror"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        true,
+      );
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=ghp_from_mirror",
+      );
+    });
+
+    test("persists a shell GITHUB_TOKEN to the workspace .env without prompting", async () => {
+      process.env.GITHUB_TOKEN = "ghp_from_shell";
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => ({ token: "gho_should_not_be_read" }),
+          prompt: scriptedPrompt(questions, "ghp_from_prompt"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        false,
+      );
+      const env = readFileSync(path.join(workspaceDir, ".env"), "utf8");
+      expect(env).toContain("GITHUB_TOKEN=ghp_from_shell");
+      expect(env).not.toContain("gho_should_not_be_read");
     });
 
     test("asks for the token when gh is signed out", async () => {
@@ -327,6 +369,69 @@ describe("runWorkerInit", () => {
       const env = readFileSync(path.join(workspaceDir, ".env"), "utf8");
       expect(env).toContain("GITHUB_TOKEN=ghp_replacement");
       expect(env).not.toContain("gho_rejected");
+    });
+
+    test("a wizard-saved token can be rotated with --env-file", async () => {
+      // The legacy `.env` template carries a commented token placeholder, which
+      // the parser ignores. Saving must leave exactly one assignment, or the
+      // rotation rewrites that line while an older appended value still wins.
+      writeFileSync(
+        path.join(workspaceDir, ".env"),
+        "# GITHUB_TOKEN=your-github-token-here\nMARKDOWN_TASKS_DIR=tasks\n",
+        { mode: 0o600 },
+      );
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => ({ token: "gho_old", account: "octocat" }),
+          githubTokenProbe: async () => {},
+          prompt: async (question: string) => {
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            if (question.startsWith("Use your GitHub CLI")) return "";
+            return "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const saved = readFileSync(path.join(workspaceDir, ".env"), "utf8");
+      expect(saved.match(/^GITHUB_TOKEN=/gm)).toHaveLength(1);
+      expect(parseEnvFileContent(saved).GITHUB_TOKEN).toBe("gho_old");
+
+      const envFile = path.join(tempDir, "rotate.env");
+      writeFileSync(envFile, "GITHUB_TOKEN=ghp_rotated\nMARKDOWN_TASKS_DIR=tasks\n", {
+        mode: 0o600,
+      });
+      const rotated = await runNonInteractiveWorkerInit(
+        {
+          tracker: "markdown",
+          taskQuery: "status=todo",
+          envFile,
+          json: true,
+          yes: true,
+          repoFromCwd: false,
+        },
+        {
+          cwd: tempDir,
+          workspaceDir,
+          processEnv: {},
+          probe: async () => {},
+          probeTimeoutMs: 2_000,
+          githubCliToken: () => null,
+          doctor: {
+            dryRunQuery: async () => 1,
+            checkRepoAccess: async () => ({ ok: true, detail: "readable" }),
+            checkEntitlement: async () => ({ valid: true, source: "license-key", message: "ok" }),
+            checkHarness: async () => ({ id: "harness", label: "Agent harness", status: "ok" }),
+            checkSandbox: async () => ({ id: "sandbox", label: "Agent sandbox", status: "ok" }),
+            checkGitIdentity: async () => ({ id: "git-identity", label: "Git", status: "ok" }),
+            isPortInUse: async () => false,
+            workerStatus: () => ({ status: "stopped" }),
+          },
+        },
+      );
+      expect(rotated.result).toBe("success");
+      const finalEnv = readFileSync(path.join(workspaceDir, ".env"), "utf8");
+      expect(finalEnv.match(/^GITHUB_TOKEN=/gm)).toHaveLength(1);
+      expect(parseEnvFileContent(finalEnv).GITHUB_TOKEN).toBe("ghp_rotated");
     });
   });
 
@@ -1377,6 +1482,55 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
       const all = logs.join("\n");
       expect(all).toContain("No tracker config yet");
       expect(all).not.toContain("Using github from");
+    });
+
+    test("persists a shell-only GITHUB_TOKEN to the workspace .env", async () => {
+      process.env.GITHUB_TOKEN = "ghp_shell_only";
+      process.env.GITHUB_REPO = "acme/app";
+      const result = await runWorkerInit(
+        deps([], {
+          ensureTracker: undefined,
+          githubCliToken: () => null,
+          prompt: async (question: string) => (question.startsWith("Ready-tasks") ? "" : "n"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=ghp_shell_only",
+      );
+    });
+
+    test("offers the signed-in gh token when an existing workspace lost its GITHUB_TOKEN", async () => {
+      // TASK_TRACKER in the shared .env makes the tracker step return early,
+      // so it never sees the missing token.
+      writeFileSync(path.join(workspaceDir, ".env"), "TASK_TRACKER=github\n", { mode: 0o600 });
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          ensureTracker: undefined,
+          githubCliToken: () => ({ token: "gho_available", account: "octocat" }),
+          githubTokenProbe: async () => {},
+          prompt: async (question: string) => {
+            questions.push(question);
+            if (question.startsWith("Ready-tasks") || question.startsWith("Use your GitHub CLI")) {
+              return "";
+            }
+            return "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(
+        questions.some((question) =>
+          question.startsWith("Use your GitHub CLI token (account octocat"),
+        ),
+      ).toBe(true);
+      expect(
+        questions.some((question) => question.startsWith("GitHub personal access token")),
+      ).toBe(false);
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=gho_available",
+      );
     });
   });
 });

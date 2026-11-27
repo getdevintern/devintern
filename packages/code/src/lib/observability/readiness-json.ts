@@ -78,6 +78,7 @@ export function failureCodeFor(
   switch (failed.name) {
     case "tracker-auth":
     case "credentials":
+    case "github-token":
       return "credentials_rejected";
     case "query":
       return "query_rejected";
@@ -294,6 +295,7 @@ function fixStep(
       };
     case "tracker-auth":
     case "credentials":
+    case "github-token":
       return {
         id: "fix-credentials",
         message: `${summary}. Put corrected credentials in a 0600 file and re-run setup with it`,

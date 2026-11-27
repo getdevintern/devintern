@@ -8,6 +8,8 @@
 
 import { spawnSync } from "child_process";
 
+import { classifyGitHubAuthError } from "../code-host/github/github-errors";
+
 /** Where a run's `GITHUB_TOKEN` came from. Never a token value. */
 export type GitHubTokenSource = "env" | "env-file" | "gh";
 
@@ -59,10 +61,9 @@ const GH_TIMEOUT_MS = 5_000;
 /** True when `gh` is on PATH and `gh auth token` returns a non-empty token. */
 export function readGitHubCliToken(deps: GitHubCliDeps = {}): GitHubCliToken | null {
   const env = deps.env ?? process.env;
-  const which =
-    deps.which ??
-    ((command: string) =>
-      Bun.which(command, env.PATH !== undefined ? { PATH: env.PATH } : undefined));
+  // A caller-supplied env (a run's sanitized environment) must never fall back
+  // to the host's PATH: that would read the host's signed-in `gh` token.
+  const which = deps.which ?? ((command: string) => Bun.which(command, { PATH: env.PATH ?? "" }));
   const run =
     deps.run ??
     ((command: string, args: string[]) => {
@@ -93,4 +94,27 @@ export function describeGitHubCliToken(token: GitHubCliToken): string {
   const account = token.account ? `account ${token.account}` : "account unknown";
   const scopes = token.scopes ? `scopes ${token.scopes}` : "scopes unavailable";
   return `${account}, ${scopes}`;
+}
+
+/**
+ * True when a GitHub probe error means GitHub rejected the token (HTTP 401,
+ * or a repository the token cannot see), not when the request failed for
+ * another reason (DNS, timeout, 5xx, rate limit).
+ *
+ * GitHub reuses 403 for primary/secondary rate limits, abuse detection,
+ * archived repositories, and locked issues, so a 403 alone does not prove the
+ * credential is bad. `verifyRepoAccess` only uses its `GitHub token cannot
+ * access ... (HTTP 403)` wording for a non-rate-limited 403; other 403s go
+ * through the credential-denial classifier in
+ * `code-host/github/github-errors.ts`.
+ */
+export function isGitHubAuthRejection(message: string): boolean {
+  if (
+    /GitHub API error \(401\)/.test(message) ||
+    /\(HTTP (401|404)\)/.test(message) ||
+    /GitHub token cannot access .* \(HTTP 403\)/.test(message)
+  ) {
+    return true;
+  }
+  return classifyGitHubAuthError(new Error(message)) !== null;
 }

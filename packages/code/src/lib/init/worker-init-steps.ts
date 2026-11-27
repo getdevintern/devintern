@@ -21,7 +21,7 @@ import {
   parseEnvContent,
   promptSteps,
 } from "@devintern/task-trackers";
-import { findProjectRoot } from "@devintern/utils";
+import { findProjectRoot, upsertEnvVars } from "@devintern/utils";
 
 import {
   WORKER_PILOT_OFFER,
@@ -67,7 +67,7 @@ import {
 } from "./worker-init-activation";
 import { describeGitHubCliToken, readGitHubCliToken } from "./github-cli-token";
 import type { GitHubCliToken } from "./github-cli-token";
-import { GITHUB_PR_TOKEN_STEP } from "./scaffold";
+import { GITHUB_PR_TOKEN_STEP, TRACKER_SETUP } from "./scaffold";
 import { errorMessage } from "./worker-init-fs";
 import {
   applyPlan,
@@ -94,7 +94,7 @@ import type { LogFn, PromptFn } from "./worker-init-policy";
 import { DEFAULT_PROBE_TIMEOUT_MS, secretValues, withTimeout } from "./worker-init-run";
 import type { FlagsRun, PromptRun, ReadinessBlocker, SetupRun } from "./worker-init-run";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
-import { offerGitHubCliToken, runTrackerSetup } from "./wizard";
+import { offerGitHubCliToken, logGitHubPrTokenIntro, runTrackerSetup } from "./wizard";
 
 /** One setup step. Returns false to stop setup (the step has said why). */
 export interface WorkerInitStep {
@@ -300,19 +300,33 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
 }
 
 /**
- * Pull-request token. A workspace with a GitHub remote needs `GITHUB_TOKEN`
- * for PRs even when the tracker is elsewhere; when it is not set, offer the
- * signed-in `gh` session. Flags mode resolved it while planning the query.
- * Without a usable `gh` session (absent, signed out, declined, or rejected),
- * ask for a token exactly as before.
+ * Pull-request token. When the tracker is not GitHub, the worker still opens
+ * pull requests on GitHub, so ask for the optional token as before. When the
+ * workspace `.env` has no token, offer the signed-in `gh` session; a token
+ * only exported in the shell is saved to the workspace `.env` so the service
+ * (which does not inherit the shell) can use it. The GitHub tracker gets the
+ * same shell-token persistence even though its token normally comes from the
+ * tracker step: an existing workspace whose `.env` already names the tracker
+ * skips that step, so a removed or expired token is recovered here, and a
+ * `GITHUB_TOKEN` that only the shell exports is saved too. Flags mode resolved
+ * all of this while planning the query.
  */
 async function githubTokenStep(run: SetupRun): Promise<boolean> {
-  if (run.input === "flags" || run.trackerType === "github") return true;
+  if (run.input === "flags") return true;
   const envPath = workspaceEnvPath(run.workspaceDir);
   const existing = existsSync(envPath) ? parseEnvContent(readFileSync(envPath, "utf8")) : {};
-  if (existing.GITHUB_TOKEN || process.env.GITHUB_TOKEN) return true;
+  if (existing.GITHUB_TOKEN) return true;
+  if (process.env.GITHUB_TOKEN) {
+    // The installed service carries only PATH and DEVINTERN_WORKSPACE_DIR, so a
+    // shell export would be lost when the worker starts; persist it instead.
+    saveGitHubToken(envPath, process.env.GITHUB_TOKEN, run.log);
+    return true;
+  }
+  // The GitHub tracker's token normally comes from the tracker step, but that
+  // step returns early for an existing workspace whose `.env` has TASK_TRACKER.
+  const githubTracker = run.trackerType === "github";
+  if (!githubTracker) logGitHubPrTokenIntro(run.log);
   const repoSlug = await githubSlugForWorkspace(run);
-  if (!repoSlug) return true;
 
   let token: GitHubCliToken | null;
   try {
@@ -334,9 +348,13 @@ async function githubTokenStep(run: SetupRun): Promise<boolean> {
   }
   // No usable `gh` session (absent, signed out, declined, or rejected): ask for
   // a token as before. The rejection warning is already logged when the probe
-  // refused it; an empty answer still skips the optional token.
+  // refused it; for the optional PR token an empty answer still skips it, while
+  // the GitHub tracker's own token is required.
+  const tokenStep = githubTracker
+    ? (TRACKER_SETUP.github?.find((step) => step.key === "GITHUB_TOKEN") ?? GITHUB_PR_TOKEN_STEP)
+    : GITHUB_PR_TOKEN_STEP;
   const values: Record<string, string> = {};
-  await promptSteps([GITHUB_PR_TOKEN_STEP], run.prompt, run.log, values, run.promptSecret);
+  await promptSteps([tokenStep], run.prompt, run.log, values, run.promptSecret);
   if (values.GITHUB_TOKEN) saveGitHubToken(envPath, values.GITHUB_TOKEN, run.log);
   return true;
 }
@@ -357,12 +375,22 @@ async function githubSlugForWorkspace(run: PromptRun): Promise<string | undefine
   return undefined;
 }
 
-/** Append `GITHUB_TOKEN` to the workspace `.env` with owner-only permissions. */
+/**
+ * Save `GITHUB_TOKEN` to the workspace `.env` with owner-only permissions.
+ *
+ * Every earlier assignment is removed first (including a commented template
+ * placeholder): `upsertEnvVars` replaces only the first match, and
+ * `parseEnvFile` reads the last, so leaving a duplicate would make a later
+ * `--env-file` rotation rewrite one line while the old token still won.
+ */
 function saveGitHubToken(envPath: string, token: string, log: LogFn): void {
   const existingText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  const withoutToken = existingText
+    .split("\n")
+    .filter((line) => !/^\s*#?\s*(?:export\s+)?GITHUB_TOKEN=/.test(line))
+    .join("\n");
   mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
-  const separator = existingText === "" || existingText.endsWith("\n") ? "" : "\n";
-  writeSecretFile(envPath, `${existingText}${separator}GITHUB_TOKEN=${token}\n`);
+  writeSecretFile(envPath, upsertEnvVars(withoutToken, { GITHUB_TOKEN: token }));
   process.env.GITHUB_TOKEN = token;
   log(`💾 Saved GITHUB_TOKEN to ${envPath}`);
 }
@@ -386,11 +414,14 @@ async function queryStep(run: SetupRun): Promise<boolean> {
     });
     if (!planned.ok) return failFlags(run, planned);
     run.plan = planned.plan;
-    if (planned.plan.tokenSource) run.report.tokenSource = planned.plan.tokenSource;
-    if (planned.plan.githubTokenRejected) {
+    if (planned.plan.githubTokenProbeFailed) {
+      const reason = planned.plan.githubTokenAuthRejected
+        ? "was rejected"
+        : "could not be verified";
+      const detail = planned.plan.githubTokenFailure ? ` (${planned.plan.githubTokenFailure})` : "";
       run.report.warnings.push(
-        "The GitHub CLI token was rejected, so it was not saved; use a token with repository " +
-          "access or pass one with --env-file.",
+        `The GitHub CLI token ${reason}${detail}, so it was not saved; use a token with ` +
+          "repository access or pass one with --env-file.",
       );
     }
     return true;
@@ -570,6 +601,9 @@ async function saveStep(run: SetupRun): Promise<boolean> {
     for (const file of applied.filesWritten) log(`💾 Wrote ${file}`);
     if (applied.seededProject) log(`   Seeded routing rule: project = ${applied.seededProject}`);
   }
+  // Report the token only once the workspace `.env` holds it: a run that
+  // refuses to update an existing workspace must not claim a token was saved.
+  if (plan.tokenSource) report.tokenSource = plan.tokenSource;
   report.changed = run.writes.length > 0;
   noteRepo(run);
   return true;
@@ -700,18 +734,20 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
     // when nobody is signed in yet, `fail` for anything else.
     checks.push(mapped);
   }
-  // A rejected CLI token is never written. The credential check above may
-  // still see it transiently (or not cover it at all for a non-GitHub
-  // tracker), so report it as a credentials failure unconditionally: every run
-  // stops with the same `fix-credentials` next step.
-  if (plan.githubTokenRejected) {
+  // A CLI token whose probe failed is never written. For the GitHub tracker
+  // that token is required, so the run fails with `fix-credentials`; for a
+  // non-GitHub tracker it is only the optional PR token, so a warning keeps an
+  // otherwise valid tracker setup alive. A distinct name keeps this row apart
+  // from the tracker `credentials` row above.
+  if (plan.githubTokenProbeFailed) {
+    const prefix = plan.githubTokenAuthRejected
+      ? "GitHub CLI token rejected"
+      : "GitHub CLI token could not be verified";
     checks.push({
-      name: "credentials",
+      name: "github-token",
       label: "GitHub credential probe",
-      status: "fail",
-      message: plan.githubTokenRejection
-        ? `GitHub CLI token rejected: ${plan.githubTokenRejection}`
-        : "GitHub CLI token rejected",
+      status: plan.tracker === "github" ? "fail" : "warn",
+      message: plan.githubTokenFailure ? `${prefix}: ${plan.githubTokenFailure}` : prefix,
       hint: "Use a GITHUB_TOKEN that can open pull requests, or pass one with --env-file",
     });
   }

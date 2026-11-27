@@ -215,6 +215,10 @@ ptyTest(
       for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
       expect(run.output).not.toMatch(SIGN_IN_PROMPT);
       expect(run.output).toContain("✅ Query works: 1 task(s) match right now.");
+      expect(run.output).toContain("📦 DevIntern opens pull requests on GitHub.");
+      expect(run.output).toContain(
+        "Token permissions and GitHub App setup: https://devintern.com/docs/code/github-integration",
+      );
       expect(run.output).toContain("Sentry auto-fixes skipped");
       expect(run.output).toContain("Relay skipped.");
       expect(run.output).toContain("📋 Readiness (the same checks as `devintern worker doctor`):");
@@ -289,9 +293,11 @@ ptyTest(
       const init = await fixture.init(["--json"]);
       expect(init.exitCode, init.stderr).toBe(0);
 
-      // Drop the tracker, tasks-directory and PR-token prompts (already configured).
-      // The query prompt shows the saved query as its default: keep it.
+      // Drop the tracker and tasks-directory prompts (already configured); the
+      // PR token is still optional and unset, so skip it. The query prompt
+      // shows the saved query as its default: keep it.
       const answers: Answer[] = [
+        [TOKEN_PROMPT, "\r"],
         [/Ready-tasks query[^\n]*: $/, "\r"],
         ...markdownAnswers(fixture, { licensing: false }).slice(
           markdownAnswers(fixture).findIndex(([prompt]) => prompt === QUERY_PROMPT) + 1,
@@ -354,11 +360,12 @@ for (const [name, key, reason] of [
         // half-initialised workspace is not left on the "jira" default.
         expect(fixture.config().defaults).toMatchObject({ tracker: "markdown" });
 
-        // The re-run recovers instead of refusing the half-initialised workspace.
+        // The re-run recovers instead of refusing the half-initialised
+        // workspace. The PR token was skipped earlier, so it asks again first.
         const rerun = await runWizard(
           fixture,
           proxy,
-          [[QUERY_PROMPT, "status=todo\r"], ...answers.slice(queryIndex + 1)],
+          [[TOKEN_PROMPT, "\r"], [QUERY_PROMPT, "status=todo\r"], ...answers.slice(queryIndex + 1)],
           { licensing: false },
         );
         expect(rerun.exitCode, rerun.output).toBe(0);
