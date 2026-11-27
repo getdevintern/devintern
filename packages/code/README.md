@@ -22,6 +22,14 @@ Pair with **[`@getdevintern/pm`](https://www.npmjs.com/package/@getdevintern/pm)
 
 ## Install
 
+On Linux and macOS, one command installs [Bun](https://bun.sh) if it is missing, then DevIntern ([details](https://devintern.com/docs/code/quick-start#1-install)):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh
+```
+
+Or, with Bun or npm already installed:
+
 ```bash
 bun install -g @getdevintern/code
 # or
