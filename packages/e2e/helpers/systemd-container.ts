@@ -202,6 +202,16 @@ export class SystemdContainer {
     if (result.exitCode !== 0) throw new Error(`could not write ${path}: ${result.stderr}`);
   }
 
+  /** Append `content` to `path` as `user`, like {@link writePrivateFile}; a new file is 0600. */
+  async appendPrivateFile(user: string, path: string, content: string): Promise<void> {
+    const result = await docker(
+      ["exec", "-i", "-u", user, this.name, "sh", "-c", 'umask 077 && cat >> "$1"', "sh", path],
+      30_000,
+      content,
+    );
+    if (result.exitCode !== 0) throw new Error(`could not append to ${path}: ${result.stderr}`);
+  }
+
   /** Copy a host file into the container, readable by every user. */
   async copyIn(source: string, target: string): Promise<void> {
     const copied = await docker(["cp", source, `${this.name}:${target}`]);

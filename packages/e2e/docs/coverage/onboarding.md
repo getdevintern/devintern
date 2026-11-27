@@ -12,19 +12,19 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Status: `live`
 - Evidence: `tests/golden-path/golden-path.test.ts` (`bun run --filter @devintern/e2e test:e2e:golden-path`; needs Docker and the GitHub fixture). Runs nightly, before every `@getdevintern/code` release, and on pull requests that change the suite (`.github/workflows/onboarding-golden-path.yml`). Cleanup: `afterAll` closes the run's issue and PR, deletes its `e2e/golden-<id>` base and `feature/<issue>` branches and its `e2e-golden-<id>` label, and removes the container; the shared `e2e: …` status labels are kept.
 - Missing: real sign-in (the license skip flag stands in for it), relay pairing, a real agent CLI, launchd/macOS.
-- Last reviewed: 2026-11-26
+- Last reviewed: 2026-11-27
 
 ### Golden path against the published npm package (release build)
 
 - Surface: External dependency: npm registry, GitHub.com | `devintern worker` surface
 - Status: `live`
 - Evidence: `tests/golden-path/golden-path.test.ts` with `DEVINTERN_CLI_SOURCE=npm:<version|latest>` (or `release-tarball:<path>` for a local release build). Runs after every code release against the version just published (`smoke-published-code` in `npm-release.yml`) and opens or updates an `onboarding-regression` issue on failure.
-- Missing: the PR and service lifecycle steps, which need a signed-in account in a release build.
-- Last reviewed: 2026-11-26
+- Missing: the PR and service lifecycle steps when `E2E_LICENSE_KEY` is not set (with it, a paid `LICENSE_KEY` in the workspace `.env` replaces sign-in and the release build runs the full path); the Worker Pilot sign-in itself.
+- Last reviewed: 2026-11-27
 
 ## Backlog
 
-- Priority 20: a CI account that can complete the Worker Pilot sign-in headlessly (`worker login --no-wait` / `--complete`), so the release-build golden path can run the service and PR steps too.
+- Priority 20: a CI account that can complete the Worker Pilot sign-in headlessly (`worker login --no-wait` / `--complete`), so the release-build golden path covers the Pilot as well as a paid `LICENSE_KEY`.
 
 ## Test notes
 
@@ -37,6 +37,7 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
   4. Source build: `worker service install --json` from a plain `docker exec` (no `XDG_RUNTIME_DIR` or bus address) reports `running` with the pid systemd reports, and the unit runs the user's Bun; installing again reports `unchanged` with the same pid, and doctor then says `setup: complete`. Release build: install refuses with `action_required` (exit 2), next steps `sign-in` then `service`, and writes no unit.
   5. Source build: a labelled issue is picked up by the service worker, which clones with `GITHUB_TOKEN` (no git config on the host), opens a PR from `feature/<issue>` into the unique base with only `src/greeting.ts` changed, moves the status labels, posts the implementation comment, and skips the issue on a later poll; the agent ran once.
   6. Source build: `service stop` leaves the unit `inactive` with `Result=success` and status `stopped`; `restart` reports the new pid; `uninstall` removes the unit and status says `not_installed`.
+     Release build with `E2E_LICENSE_KEY`: after the sign-in checks in steps 3 and 4, the key is appended to the workspace `.env` (still 0600) and steps 3 to 6 then run as in source mode (doctor `ready`, a running service, the issue to PR, stop/restart/uninstall). The relay is not paired.
   7. Both builds: the wizard on a PTY (`docker exec -it` inside a Bun terminal) for a second user with an untouched home: markdown tracker, the recommended worker settings accepted, sign-in, relay and service declined. It must end with "One step left: sign in", no `❌`, no "setup complete", and exit 2.
 - How: `scripts/golden-path.ts` resolves the GitHub fixture (as `test:e2e`), packs the built CLI (or resolves the npm version, waiting up to 5 minutes for a fresh publish), and builds `infrastructure/golden-path/Dockerfile`: systemd as PID 1, Bun in each user's `~/.bun/bin` with its `PATH` line in `~/.profile`, and no CLI. `helpers/systemd-container.ts` starts one privileged container per run and enables lingering as root (a stand-in for a login session); `login()` runs every user command with `bash -l` and no TTY. Secrets reach the container on stdin only. The test edits `workspace.toml` after init to pin the unique base (`default_branch`, `--pr-target-branch`), poll every 5 s, and set status labels. The deterministic agent is linked as `~/.local/bin/claude`.
 - Run: `bun run --filter @devintern/e2e test:e2e:golden-path`; `DEVINTERN_CLI_SOURCE=npm:latest` for the published package.
