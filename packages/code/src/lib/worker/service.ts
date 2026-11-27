@@ -295,8 +295,12 @@ export function commandDetail(result: RunCommandResult): string {
  * `RestartPreventExitStatus=` stops the 30 s restart loop when the worker
  * exits with {@link WORKER_CONFIG_EXIT_CODE} (no license, invalid config):
  * the unit ends `failed` with the reason in the log until the user fixes it
- * and restarts. `TimeoutStopSec=` leaves room for the worker's own bounded
- * graceful shutdown (`DEFAULT_SHUTDOWN_DEADLINE_MS`).
+ * and restarts. `KillMode=mixed` sends the stop signal to the daemon only, so
+ * running task children get the worker's drain (finish within the grace
+ * period, or be stopped and resumed on the next start) instead of a direct
+ * SIGTERM that would end them as failures; anything left at the timeout is
+ * still SIGKILLed. `TimeoutStopSec=` leaves room for that bounded graceful
+ * shutdown (`DEFAULT_SHUTDOWN_DEADLINE_MS`).
  *
  * @param options - Binary path, working directory, and whether to run the direct webhook service
  */
@@ -335,6 +339,7 @@ ${environment}ExecStart=${executable} ${command}
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=${WORKER_CONFIG_EXIT_CODE}
+KillMode=mixed
 TimeoutStopSec=120
 
 [Install]

@@ -19,7 +19,10 @@ name: onboarding-golden-path
 #
 # Needs the repository variable E2E_GITHUB_REPOSITORY and the secret
 # E2E_GITHUB_TOKEN (the same pair as github-e2e.yml). Without them (forks)
-# the job skips with a notice instead of failing.
+# the job skips with a notice instead of failing. The optional secret
+# E2E_LICENSE_KEY (a paid LICENSE_KEY) lets release-build runs (the npm
+# smoke after a release) go all the way to a PR; without it they stop at
+# the sign-in checks.
 
 on:
   schedule:
@@ -72,6 +75,8 @@ jobs:
       E2E_GITHUB_REPOSITORY: ${{ vars.E2E_GITHUB_REPOSITORY }}
       # Contents, Pull requests and Issues write on the fixture repository.
       E2E_GITHUB_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
+      # Optional: used only by release-build runs, never to pair the relay.
+      E2E_LICENSE_KEY: ${{ secrets.E2E_LICENSE_KEY }}
     steps:
       - name: Check fixture credentials
         id: creds
@@ -136,9 +141,13 @@ jobs:
             echo '<details><summary>Log excerpt (last 120 lines)</summary>'
             echo
             echo '```'
-            # The issue body is not masked like the job log: redact the token.
+            # The issue body is not masked like the job log: redact the secrets.
             excerpt="$(tail -n 120 "$log")"
-            echo "${excerpt//"$E2E_GITHUB_TOKEN"/[REDACTED]}"
+            excerpt="${excerpt//"$E2E_GITHUB_TOKEN"/[REDACTED]}"
+            if [ -n "$E2E_LICENSE_KEY" ]; then
+              excerpt="${excerpt//"$E2E_LICENSE_KEY"/[REDACTED]}"
+            fi
+            echo "$excerpt"
             echo '```'
             echo '</details>'
           } > "$body"

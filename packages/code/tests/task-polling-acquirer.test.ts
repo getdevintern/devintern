@@ -82,6 +82,65 @@ describe("runTaskViaCli", () => {
     }
   });
 
+  test("reports a child that exits on its own SIGTERM during a drain as interrupted", async () => {
+    // A service manager (systemd's default KillMode) signals every process in
+    // the service at once, so the child can exit 143 before the drain aborts it.
+    const dir = uniqueDir("task-via-cli-drain-143");
+    mkdirSync(dir, { recursive: true });
+    const script = join(dir, "fake-sigterm.ts");
+    writeFileSync(script, "process.exit(143)\n");
+    const originalArgv1 = process.argv[1];
+    try {
+      process.argv[1] = script;
+      const result = await runTaskViaCli("local-drain-143", [], {
+        env: { ...process.env },
+        isDraining: () => true,
+      });
+      expect(result).toBe("interrupted");
+    } finally {
+      process.argv[1] = originalArgv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps a termination exit a failure when the worker is not draining", async () => {
+    const dir = uniqueDir("task-via-cli-143");
+    mkdirSync(dir, { recursive: true });
+    const script = join(dir, "fake-sigterm.ts");
+    writeFileSync(script, "process.exit(143)\n");
+    const originalArgv1 = process.argv[1];
+    try {
+      process.argv[1] = script;
+      const result = await runTaskViaCli("local-143", [], {
+        env: { ...process.env },
+        isDraining: () => false,
+      });
+      expect(result).toBe(false);
+    } finally {
+      process.argv[1] = originalArgv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps a genuine failure during a drain a failure", async () => {
+    const dir = uniqueDir("task-via-cli-drain-fail");
+    mkdirSync(dir, { recursive: true });
+    const script = join(dir, "fake-fail.ts");
+    writeFileSync(script, "process.exit(1)\n");
+    const originalArgv1 = process.argv[1];
+    try {
+      process.argv[1] = script;
+      const result = await runTaskViaCli("local-drain-fail", [], {
+        env: { ...process.env },
+        isDraining: () => true,
+      });
+      expect(result).toBe(false);
+    } finally {
+      process.argv[1] = originalArgv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("keeps a genuine non-zero exit a failure even when it is not interrupted", async () => {
     const dir = uniqueDir("task-via-cli-fail");
     mkdirSync(dir, { recursive: true });

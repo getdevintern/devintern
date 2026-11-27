@@ -123,6 +123,12 @@ try {
   console.log(
     `Golden path: ${label} (v${source.version}, ${source.release ? "release" : "development"} build) against ${github.repository}`,
   );
+  // Never print the key itself.
+  console.log(
+    source.release
+      ? `License: ${process.env.E2E_LICENSE_KEY?.trim() ? "E2E_LICENSE_KEY set, running the full path" : "no E2E_LICENSE_KEY, stopping at the sign-in checks"}`
+      : "License: DEVINTERN_SKIP_LICENSE_CHECK stands in for sign-in (development build)",
+  );
   await buildImage(GOLDEN_PATH_IMAGE, {
     Dockerfile: "infrastructure/golden-path/Dockerfile",
     "fake-agent.ts": "helpers/fake-agent.ts",
