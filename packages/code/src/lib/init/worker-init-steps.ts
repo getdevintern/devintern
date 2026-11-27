@@ -65,6 +65,7 @@ import {
   relayStep,
   serviceStep,
 } from "./worker-init-activation";
+import { recordRepoDefaultBranch } from "./worker-init-branch";
 import { errorMessage } from "./worker-init-fs";
 import { hostStep, withoutRepeatedHostFailures } from "./worker-init-host";
 import { defaultDevinternLabelOps } from "./worker-init-label";
@@ -283,6 +284,10 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
   writeWorkspaceDefaults(workspace.workspaceDir, { tracker: trackerType });
   run.workspaceDir = workspace.workspaceDir;
   run.repoName = workspace.repoName;
+
+  if (workspace.repoName) {
+    await recordRepoDefaultBranch(run, workspace.workspaceDir, workspace.repoName);
+  }
 
   ensureWorkspaceCodeState(run.workspaceDir);
   try {
@@ -546,7 +551,7 @@ function noteRepo(run: FlagsRun): void {
   if (repo.added && branch && defaultBranch && branch !== defaultBranch) {
     report.warnings.push(
       `The checkout is on ${branch}, but tasks start from and pull requests target ` +
-        `${defaultBranch} (recorded as default_branch). To open pull requests against ` +
+        `${defaultBranch} (recorded as default_branch). To base tasks and pull requests on ` +
         `${branch} instead, add "--pr-target-branch ${branch}" to [defaults].worker_task_args ` +
         "in workspace.toml.",
     );

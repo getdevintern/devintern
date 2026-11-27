@@ -549,7 +549,7 @@ export interface RepoEntryExtras {
   conflicts?: Record<string, string>;
   /** Seeds a `[[routing.rules]]` entry unless a rule already claims this project. */
   projectKey?: string;
-  /** Written as the entry's `default_branch` (the branch task worktrees start from). */
+  /** Written as the entry's `default_branch` (the base task worktrees and task PRs use). */
   defaultBranch?: string;
 }
 
@@ -591,6 +591,100 @@ export function appendRepoEntry(
   }
   const separator = content.endsWith("\n") ? "" : "\n";
   return { content: content + separator + block, name, added: true, seededProject };
+}
+
+/**
+ * Set or add the `default_branch` key of one existing `[[repos]]` entry
+ * without rewriting unrelated comments or tables.
+ *
+ * @param content - Current workspace.toml text
+ * @param name - The entry's `name`
+ * @param defaultBranch - Branch task worktrees start from and task pull requests target
+ * @returns Updated text; unchanged when no entry has that name
+ */
+export function upsertRepoDefaultBranch(
+  content: string,
+  name: string,
+  defaultBranch: string,
+): string {
+  const lines = content.split("\n");
+  const isHeader = (line: string) => /^\s*\[/.test(line);
+  const isRepoHeader = (line: string) => /^\s*\[\[repos\]\]\s*(#.*)?$/.test(line);
+  for (let start = 0; start < lines.length; start++) {
+    if (!isRepoHeader(lines[start] ?? "")) continue;
+    // The entry's own keys run until the next table header (a `[repos.env]`
+    // sub-table or the next entry).
+    let end = start + 1;
+    while (end < lines.length && !isHeader(lines[end] ?? "")) end++;
+    const bodyStart = start + 1;
+    const body = lines.slice(bodyStart, end);
+    if (!body.some((line) => tomlNameValue(line) === name)) continue;
+
+    const activeIndex = body.findIndex((line) => /^\s*default_branch\s*=/.test(line));
+    if (activeIndex >= 0) {
+      lines[bodyStart + activeIndex] = `default_branch = ${tomlString(defaultBranch)}`;
+      return lines.join("\n");
+    }
+
+    // Insert after the entry's last key, before any trailing comments that
+    // belong to the next table.
+    let insertAt = bodyStart;
+    body.forEach((line, index) => {
+      if (line.trim() !== "" && !line.trim().startsWith("#")) insertAt = bodyStart + index + 1;
+    });
+    lines.splice(insertAt, 0, `default_branch = ${tomlString(defaultBranch)}`);
+    return lines.join("\n");
+  }
+  return content;
+}
+
+/** Validate and persist one repo's `default_branch` in `workspace.toml`. */
+export function writeRepoDefaultBranch(
+  workspaceDir: string,
+  name: string,
+  defaultBranch: string,
+): void {
+  const configPath = workspaceConfigPath(workspaceDir);
+  const updated = upsertRepoDefaultBranch(readFileSync(configPath, "utf8"), name, defaultBranch);
+  parseWorkspaceConfig(updated, configPath);
+  writeFileSync(configPath, updated);
+}
+
+/**
+ * Remove one repo's `default_branch` key, so the worker follows the clone's
+ * remote default again. Pure text edit that leaves unrelated lines intact.
+ *
+ * @param content - Current workspace.toml text
+ * @param name - The entry's `name`
+ * @returns Updated text; unchanged when the entry or key is absent
+ */
+export function removeRepoDefaultBranch(content: string, name: string): string {
+  const lines = content.split("\n");
+  const isHeader = (line: string) => /^\s*\[/.test(line);
+  const isRepoHeader = (line: string) => /^\s*\[\[repos\]\]\s*(#.*)?$/.test(line);
+  for (let start = 0; start < lines.length; start++) {
+    if (!isRepoHeader(lines[start] ?? "")) continue;
+    let end = start + 1;
+    while (end < lines.length && !isHeader(lines[end] ?? "")) end++;
+    const bodyStart = start + 1;
+    const body = lines.slice(bodyStart, end);
+    if (!body.some((line) => tomlNameValue(line) === name)) continue;
+    const activeIndex = body.findIndex((line) => /^\s*default_branch\s*=/.test(line));
+    if (activeIndex < 0) return content;
+    lines.splice(bodyStart + activeIndex, 1);
+    return lines.join("\n");
+  }
+  return content;
+}
+
+/** Validate and remove one repo's `default_branch` from `workspace.toml`. */
+export function clearRepoDefaultBranch(workspaceDir: string, name: string): void {
+  const configPath = workspaceConfigPath(workspaceDir);
+  const content = readFileSync(configPath, "utf8");
+  const updated = removeRepoDefaultBranch(content, name);
+  if (updated === content) return;
+  parseWorkspaceConfig(updated, configPath);
+  writeFileSync(configPath, updated);
 }
 
 /** The comment `devintern init` writes above a repo's `manual_only = true`. */

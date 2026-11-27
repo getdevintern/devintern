@@ -18,20 +18,6 @@ import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 const REMOTE = "git@github.com:acme/app.git";
 
 /**
- * Known, deliberate difference: only `--non-interactive` records the
- * checkout's detected branch as `[[repos]].default_branch` (the wizard's
- * add-repo follows origin/HEAD at run time). Everything else must match.
- */
-const HEADLESS_ONLY_LINE = 'default_branch = "main"';
-
-function withoutHeadlessOnlyLines(content: string): string {
-  return content
-    .split("\n")
-    .filter((line) => line.trim() !== HEADLESS_ONLY_LINE)
-    .join("\n");
-}
-
-/**
  * The TOML a file actually sets: every non-blank, non-comment line, sorted.
  * Ignores ordering and comments but notices any key one path writes and the
  * other does not, even when the parsed value would equal the default.
@@ -66,10 +52,14 @@ describe("worker init parity: interactive and non-interactive write the same wor
     root = mkdtempSync(join(tmpdir(), "worker-init-parity-"));
     repoDir = join(root, "repo");
     mkdirSync(repoDir, { recursive: true });
-    execSync(`git init -q -b main && git remote add origin ${REMOTE}`, {
-      cwd: repoDir,
-      stdio: "ignore",
-    });
+    execSync(
+      "git init -q -b main && " +
+        "git -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m init && " +
+        `git remote add origin ${REMOTE} && ` +
+        "git update-ref refs/remotes/origin/main HEAD && " +
+        "git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main",
+      { cwd: repoDir, stdio: "ignore" },
+    );
   });
 
   afterEach(() => {
@@ -133,9 +123,8 @@ describe("worker init parity: interactive and non-interactive write the same wor
   for (const { tracker, query, env } of CASES) {
     test(`${tracker}: same settings, recommended worker policy written explicitly`, async () => {
       const wizard = await interactive(tracker, query);
-      const headlessRaw = await nonInteractive(tracker, query, env);
-      expect(headlessRaw).toContain(HEADLESS_ONLY_LINE);
-      const headless = withoutHeadlessOnlyLines(headlessRaw);
+      const headless = await nonInteractive(tracker, query, env);
+      expect(wizard).toContain('default_branch = "main"');
 
       expect(settingLines(headless)).toEqual(settingLines(wizard));
       const configPath = join(root, "workspace.toml");
