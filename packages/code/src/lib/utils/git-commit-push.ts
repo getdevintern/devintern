@@ -2,6 +2,7 @@ import { executeGitCommandWithConfigLockRetry, hasConfigLockError } from "./git-
 import { hasUncommittedWork, stageWorkTreeChanges } from "./git-stage";
 import { classifyCommitConfigError } from "./git-identity";
 import { describeRemotePushRejection, findRemotePushRejection } from "./git-push-rejection";
+import type { RemotePushRejection } from "./git-push-rejection";
 import { Utils } from "./registry";
 
 /**
@@ -391,6 +392,8 @@ export async function pushCurrentBranch(options?: {
   success: boolean;
   message: string;
   hookError?: string;
+  /** Set when the remote itself refused the update; callers class it `environment`. */
+  remoteRejection?: RemotePushRejection;
 }> {
   const verbose = options?.verbose ?? false;
   const cwd = options?.cwd;
@@ -550,6 +553,7 @@ export async function pushCurrentBranch(options?: {
       return {
         success: false,
         message: describeRemotePushRejection(rejection, currentBranch),
+        remoteRejection: rejection,
       };
     }
 

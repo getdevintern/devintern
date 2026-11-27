@@ -270,6 +270,9 @@ describe("verifyPushHookFix", () => {
 
       expect(result.success).toBe(false);
       expect(result.hookError).toBeUndefined();
+      expect(result.remoteRejection?.workflowFile).toBe(
+        ".github/workflows/onboarding-golden-path.yml",
+      );
       expect(result.message).toContain("`workflow` scope");
       expect(result.message).toContain("Workflows read and write");
       expect(result.message).toContain(".github/workflows/onboarding-golden-path.yml");
@@ -297,6 +300,7 @@ describe("verifyPushHookFix", () => {
 
       expect(result.success).toBe(false);
       expect(result.hookError).toBeUndefined();
+      expect(result.remoteRejection?.reason).toBe(reason);
       expect(result.message).toContain(reason);
     } finally {
       gitCommands.mockRestore();
@@ -313,6 +317,7 @@ describe("verifyPushHookFix", () => {
 
     expect(result.success).toBe(false);
     expect(result.hookError).toBeUndefined();
+    expect(result.remoteRejection?.reason).toBe("pre-receive hook declined");
     expect(result.message).toContain("pre-receive hook declined");
   });
 
@@ -330,6 +335,7 @@ describe("verifyPushHookFix", () => {
 
     expect(result.success).toBe(false);
     expect(result.hookError).toContain("fixture output from a git test");
+    expect(result.remoteRejection).toBeUndefined();
   });
 
   test("remoteTrackingRefMatchesHead is false after a local-only commit", async () => {
