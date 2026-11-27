@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "child_process";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -244,6 +244,92 @@ describe("verifyPushHookFix", () => {
     expect(result.success).toBe(false);
     expect(result.message).toContain("branch diverged");
     expect(result.hookError).toBeUndefined();
+  });
+
+  function stubPushOutput(stderr: string) {
+    const executeGitCommand = Utils.executeGitCommand;
+    return spyOn(Utils, "executeGitCommand").mockImplementation((args, options) => {
+      if (args[0] === "push") {
+        return Promise.resolve({ success: false, output: "", error: stderr });
+      }
+      return executeGitCommand(args, options);
+    });
+  }
+
+  test("pushCurrentBranch does not send GitHub's workflow scope rejection to the hook fixer", async () => {
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    const gitCommands = stubPushOutput(
+      [
+        "To https://github.com/getdevintern/devintern",
+        " ! [remote rejected] HEAD -> feature/dev-74 (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/onboarding-golden-path.yml` without `workflow` scope)",
+        "error: failed to push some refs to 'https://github.com/getdevintern/devintern'",
+      ].join("\n"),
+    );
+    try {
+      const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+      expect(result.success).toBe(false);
+      expect(result.hookError).toBeUndefined();
+      expect(result.message).toContain("`workflow` scope");
+      expect(result.message).toContain("Workflows read and write");
+      expect(result.message).toContain(".github/workflows/onboarding-golden-path.yml");
+      expect(result.message).not.toMatch(/^[^:]*: To https/);
+      expect(result.message.startsWith("Push of 'feature/dev-74' rejected by the remote")).toBe(
+        true,
+      );
+    } finally {
+      gitCommands.mockRestore();
+    }
+  });
+
+  test.each([
+    "protected branch hook declined",
+    "GH006: Protected branch update failed for refs/heads/feature/dev-74.",
+    "push declined due to repository rule violations",
+    "GH013: Repository rule violations found for refs/heads/feature/dev-74.",
+  ])("pushCurrentBranch does not send server rejection %p to the hook fixer", async (reason) => {
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    const gitCommands = stubPushOutput(
+      `To https://github.com/acme/repo\n ! [remote rejected] feature/dev-74 -> feature/dev-74 (${reason})\nerror: failed to push some refs to 'https://github.com/acme/repo'`,
+    );
+    try {
+      const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+      expect(result.success).toBe(false);
+      expect(result.hookError).toBeUndefined();
+      expect(result.message).toContain(reason);
+    } finally {
+      gitCommands.mockRestore();
+    }
+  });
+
+  test("pushCurrentBranch does not send a real server pre-receive refusal to the hook fixer", async () => {
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    const hookPath = join(remoteDir, "hooks", "pre-receive");
+    writeFileSync(hookPath, "#!/bin/sh\necho 'server policy says no' >&2\nexit 1\n", "utf8");
+    chmodSync(hookPath, 0o755);
+
+    const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+    expect(result.success).toBe(false);
+    expect(result.hookError).toBeUndefined();
+    expect(result.message).toContain("pre-receive hook declined");
+  });
+
+  test("pushCurrentBranch still sends a local hook's echoed rejection text for another ref to the hook fixer", async () => {
+    git(repoDir, "commit --allow-empty -m 'local-only commit'");
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    writeFileSync(
+      hookPath,
+      "#!/bin/sh\necho ' ! [remote rejected] main -> main (fixture output from a git test)'\nexit 1\n",
+      "utf8",
+    );
+    chmodSync(hookPath, 0o755);
+
+    const result = await Utils.pushCurrentBranch({ cwd: repoDir });
+
+    expect(result.success).toBe(false);
+    expect(result.hookError).toContain("fixture output from a git test");
   });
 
   test("remoteTrackingRefMatchesHead is false after a local-only commit", async () => {
