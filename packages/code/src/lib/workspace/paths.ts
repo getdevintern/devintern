@@ -10,36 +10,15 @@ import {
   statSync,
   writeFileSync,
 } from "fs";
-import { homedir } from "os";
 import { join, resolve } from "path";
+
+import { resolveWorkspaceDir, workspaceConfigPath } from "@devintern/workspace";
 
 import { readOwnPidNamespace } from "../lock-manager.ts";
 
-/**
- * Resolve the workspace home directory.
- *
- * Defaults to `~/.devintern`; `DEVINTERN_WORKSPACE_DIR` overrides it
- * (required by tests, which cannot chdir or touch the real home).
- *
- * @returns Absolute path of the workspace directory.
- */
-export function resolveWorkspaceDir(): string {
-  const override = process.env.DEVINTERN_WORKSPACE_DIR;
-  if (override && override.trim()) {
-    return override.trim();
-  }
-  return join(homedir(), ".devintern");
-}
-
-/** Path of the workspace config file (`workspace.toml`). */
-export function workspaceConfigPath(workspaceDir: string = resolveWorkspaceDir()): string {
-  return join(workspaceDir, "workspace.toml");
-}
-
-/** Path of the shared workspace `.env` file. */
-export function workspaceEnvPath(workspaceDir: string = resolveWorkspaceDir()): string {
-  return join(workspaceDir, ".env");
-}
+// Shared with `devpm` and the desktop app, so every product resolves the
+// same workspace home and files.
+export { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "@devintern/workspace";
 
 /**
  * Directory holding worker runtime state: the shared queue database, the auth

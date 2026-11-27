@@ -14,6 +14,7 @@ import { redactUrlCredentials } from "../observability/dashboard-workspace";
 import { trackersSupportingPolling } from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
 import { Utils } from "../utils";
+import { detectCheckoutBranches } from "../workspace/checkout-branches";
 import { gitHubSlugFromRemote, parseWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import { parseEnvFile, parseEnvFileContent } from "../workspace/env";
@@ -21,7 +22,6 @@ import {
   CONFIG_TEMPLATE,
   ENV_TEMPLATE,
   appendRepoEntry,
-  detectCheckoutBranches,
   readRepoEnv,
   repoDefaultProjectKey,
   splitRepoEnv,

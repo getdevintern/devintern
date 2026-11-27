@@ -63,7 +63,8 @@ export type SetupFailureReason =
   | "tracker_not_pollable"
   | "workspace_error"
   | "workspace_tracker_mismatch"
-  | "non_interactive_input";
+  | "non_interactive_input"
+  | "host_check_declined";
 
 /** How `devintern worker init` ran: the guided wizard or flag-driven setup. */
 export type WorkerInitSource = "wizard" | "non_interactive";
