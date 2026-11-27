@@ -1,7 +1,7 @@
 /**
  * Interactive onboarding polish for `devintern worker init`: reusing the
- * tracker settings `devintern init` saved, the one-question recommended
- * settings, sign-in skip/stop handling, and readable query errors.
+ * tracker settings `devintern init` saved, the recommended settings written
+ * without a question (and `--customize`), sign-in skip/stop handling, and readable query errors.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -87,12 +87,13 @@ describe("worker init onboarding", () => {
   }
 
   describe("recommended worker settings", () => {
-    test("one Enter writes the recommended settings and skips the four questions", async () => {
+    test("a new workspace gets the recommended settings without a question", async () => {
       const { questions, deps: d } = deps(() => "");
       const result = await runWorkerInit(d);
       expect(result.ok).toBe(true);
-      expect(questions.some((question) => question.startsWith(RECOMMENDED))).toBe(true);
+      expect(questions.some((question) => question.startsWith(RECOMMENDED))).toBe(false);
       for (const skipped of [
+        "worker settings",
         "repair failing CI",
         "Conflict handling",
         "active hours",
@@ -100,6 +101,10 @@ describe("worker init onboarding", () => {
       ]) {
         expect(questions.some((question) => question.includes(skipped))).toBe(false);
       }
+      expect(logs.join("\n")).toContain(
+        "💾 Wrote the recommended worker settings to workspace.toml (",
+      );
+      expect(logs.join("\n")).toContain("`devintern worker init --customize`");
       const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
       expect(config.workspace.ciFailureFix).toBe(false);
       expect(config.workspace.conflictResolution).toBe("auto");
@@ -109,32 +114,28 @@ describe("worker init onboarding", () => {
       expect(toml).toContain("ci_failure_fix = false");
     });
 
-    test('"n" walks through the expanded questions', async () => {
-      const { questions, deps: d } = deps((question) =>
-        question.startsWith(RECOMMENDED) ? "n" : "",
-      );
+    test("--customize walks through the expanded questions", async () => {
+      const { questions, deps: d } = deps(() => "", { customize: true });
       const result = await runWorkerInit(d);
       expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith(RECOMMENDED))).toBe(false);
       expect(questions.some((question) => question.includes("repair failing CI"))).toBe(true);
       expect(questions.some((question) => question.includes("Conflict handling"))).toBe(true);
       expect(questions.some((question) => question.includes("active hours"))).toBe(true);
       expect(questions.some((question) => question.includes("Sentry project"))).toBe(true);
     });
 
-    test("customized settings are offered as-is and Enter keeps them", async () => {
+    test("customized settings are kept without a question", async () => {
       writeFileSync(
         path.join(workspaceDir, "workspace.toml"),
         '[workspace]\nci_failure_fix = true\n\n[defaults]\ntracker = "markdown"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n\n[worker.schedule]\nactive = ["22:00-06:00"]\n',
       );
       const { questions, deps: d } = deps(() => "");
       await runWorkerInit(d);
-      expect(
-        questions.some((question) =>
-          question.startsWith(
-            "Keep the current worker settings (CI repair on, active hours 22:00-06:00)?",
-          ),
-        ),
-      ).toBe(true);
+      expect(questions.some((question) => question.includes("worker settings"))).toBe(false);
+      expect(logs.join("\n")).toContain(
+        "Kept the current worker settings (CI repair on, active hours 22:00-06:00)",
+      );
       const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
       expect(config.workspace.ciFailureFix).toBe(true);
       expect(config.worker.schedule?.active.map((window) => window.spec)).toEqual(["22:00-06:00"]);

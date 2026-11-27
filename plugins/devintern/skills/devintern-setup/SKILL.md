@@ -171,7 +171,7 @@ Report separately, citing the doctor `setup` and `summary`: **configured** (host
 
 ## Beyond basic setup
 
-- A person at a terminal can run the guided `devintern worker init` wizard instead of steps 3 to 6. `--no-service` skips its service offer.
+- A person at a terminal can run the guided `devintern worker init` wizard instead of steps 3 to 6. It checks the agent CLI and git first and writes the recommended worker settings without asking; `--customize` asks each setting and offers Sentry, and `--no-service` skips its service offer.
 - Credential layers: shared worker credentials in the workspace `.env`, repository credentials in repo env layers, tracker credentials in team layers. A checkout's own `.env` is not loaded by the worker. See [workspace configuration](https://devintern.com/docs/code/workspaces).
 - Several tracker sources use `[[teams]]` and routing rules; a single repository needs none. For ongoing workspace changes, automations, Sentry monitors, and policies, use `devintern-workspace` when available. For one-off dispatch, use `devintern-delegate`.
 - Sentry without a terminal: `devintern worker connect sentry --org <slug> --project <slug> [--repo <name>] --json`, with `SENTRY_AUTH_TOKEN` in the environment or a `0600` `--env-file`. Changing an existing monitor needs `--yes`; confirm first.

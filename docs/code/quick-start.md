@@ -67,11 +67,11 @@ In your project's checkout:
 devintern worker init
 ```
 
-You don't need to run `devintern init` first; if you already did, the wizard reuses the tracker settings it saved. The wizard asks for:
+You don't need to run `devintern init` first; if you already did, the wizard reuses the tracker settings it saved. The wizard first checks this machine: the agent CLI from step 1, git, and whether a background service can be installed. If the agent CLI or git is missing, it tells you right away how to install it, and you can continue anyway or stop. It then asks for:
 
 1. Your tracker and its token. It links to the page where you create the token and checks the connection.
 2. The ready-tasks query: which tickets the worker picks up, for example `is:open label:devintern` on GitHub Issues. Keep it narrow at first.
-3. "Use the recommended worker settings?": no CI repair, automatic conflict resolution, task pickup at any hour, and no Sentry project. Answer `n` to choose each one.
+3. Nothing about worker settings: a new workspace gets the recommended ones (no CI repair, automatic conflict resolution, task pickup at any hour, no Sentry project). Change them in `~/.devintern/workspace.toml`, or run `devintern worker init --customize` to choose each one and add a Sentry project.
 4. Sign-in, which starts the [14-day free Worker Pilot](./worker.md#worker-pilot-and-licenses) (no card required) when you have no license. While it waits for the browser, press Enter to skip and sign in later with `devintern worker login github`.
 5. [Relay](./relay.md) pairing when you are signed in, so PR reviews reach the worker in seconds. Without it the worker polls.
 6. Installing the background service (step 3 below).
