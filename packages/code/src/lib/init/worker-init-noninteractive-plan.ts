@@ -1,7 +1,8 @@
 /**
- * Phases 1 and 2 of `worker init --non-interactive`: validate every input
- * without touching the filesystem, then write `workspace.toml` and `.env`
- * atomically under the workspace lock (and put them back when the checks fail).
+ * Flags-mode input of the `worker init` steps: the tracker, workspace, and
+ * query steps validate every input without touching the filesystem, then the
+ * save step writes `workspace.toml` and `.env` atomically under the workspace
+ * lock (and puts them back when the checks fail).
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "fs";
@@ -14,6 +15,7 @@ import { trackersSupportingPolling } from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
 import { Utils } from "../utils";
 import { gitHubSlugFromRemote, parseWorkspaceConfig } from "../workspace/config";
+import type { WorkspaceConfig } from "../workspace/config";
 import { parseEnvFile, parseEnvFileContent } from "../workspace/env";
 import {
   CONFIG_TEMPLATE,
@@ -152,6 +154,8 @@ export interface Plan {
   configSnapshot: string | null;
   /** Absolute `--env-file` path, when one was given. */
   envFilePath?: string;
+  /** Write the recommended worker settings explicitly (the settings step decides). */
+  writeRecommendedPolicy: boolean;
 }
 
 /** A planning failure: one message and its stable code. */
@@ -168,7 +172,7 @@ function readExistingWorkspace(workspaceDir: string):
   | {
       ok: true;
       configSnapshot: string | null;
-      existing?: ReturnType<typeof parseWorkspaceConfig>;
+      existing?: WorkspaceConfig;
     }
   | PlanFailure {
   const configPath = workspaceConfigPath(workspaceDir);
@@ -295,11 +299,22 @@ function missingInputFailure(tracker: string | undefined, missing: string[]): Pl
   };
 }
 
-/** Phase 1: validate every input. Touches nothing on disk. */
-export async function planInit(
+/** Inputs the tracker and workspace steps validated; the query step completes the plan. */
+export interface PlanDraft {
+  /** `--tracker`, lowercased (undefined: keep the workspace's). */
+  flagTracker?: string;
+  envFilePath?: string;
+  envFileValues: Record<string, string>;
+  configSnapshot: string | null;
+  existing?: WorkspaceConfig;
+  repo?: Plan["repo"];
+}
+
+/** Tracker step: check `--tracker` and read `--env-file`. Touches nothing on disk. */
+export function planTracker(
   args: NonInteractiveInitArgs,
-  ctx: { cwd: string; processEnv: Env; workspaceDir: string },
-): Promise<{ ok: true; plan: Plan } | PlanFailure> {
+  cwd: string,
+): { ok: true; draft: PlanDraft } | PlanFailure {
   const supported = trackersSupportingPolling();
   const flagTracker = args.tracker?.trim().toLowerCase();
   if (flagTracker && !supported.includes(flagTracker)) {
@@ -309,38 +324,55 @@ export async function planInit(
       error: `Unsupported --tracker "${args.tracker}". Supported trackers: ${supported.join(", ")}.`,
     };
   }
-
-  let envFileValues: Record<string, string> = {};
-  const envFilePath = args.envFile ? resolve(ctx.cwd, args.envFile) : undefined;
-  if (envFilePath) {
-    const read = readEnvFile(envFilePath);
+  const draft: PlanDraft = { flagTracker, envFileValues: {}, configSnapshot: null };
+  if (args.envFile) {
+    draft.envFilePath = resolve(cwd, args.envFile);
+    const read = readEnvFile(draft.envFilePath);
     if (!read.ok) return { ...read, code: "env_file_unreadable" };
-    envFileValues = read.values;
+    draft.envFileValues = read.values;
   }
+  return { ok: true, draft };
+}
 
+/** Workspace step: read the existing workspace.toml and resolve `--repo-from-cwd`. */
+export async function planWorkspace(
+  args: NonInteractiveInitArgs,
+  draft: PlanDraft,
+  ctx: { cwd: string; workspaceDir: string },
+): Promise<PlanFailure | null> {
   const read = readExistingWorkspace(ctx.workspaceDir);
   if (!read.ok) return read;
-  const { configSnapshot, existing } = read;
+  draft.configSnapshot = read.configSnapshot;
+  draft.existing = read.existing;
+  if (!args.repoFromCwd) return null;
+  const detected = await detectCwdRepo(ctx.cwd);
+  if (!detected.ok) return { ...detected, code: "not_a_repository" };
+  draft.repo = {
+    remote: detected.remote,
+    slug: detected.slug,
+    root: detected.root,
+    conflicts: {},
+    branch: detected.branch,
+    defaultBranch: detected.defaultBranch,
+  };
+  return null;
+}
 
-  let repo: Plan["repo"];
-  if (args.repoFromCwd) {
-    const detected = await detectCwdRepo(ctx.cwd);
-    if (!detected.ok) return { ...detected, code: "not_a_repository" };
-    repo = {
-      remote: detected.remote,
-      slug: detected.slug,
-      root: detected.root,
-      conflicts: {},
-      branch: detected.branch,
-      defaultBranch: detected.defaultBranch,
-    };
-  }
-
+/**
+ * Query step: the query and the credentials it runs with complete the plan
+ * (every missing flag and variable is reported at once). Touches nothing on disk.
+ */
+export function planQuery(
+  args: NonInteractiveInitArgs,
+  draft: PlanDraft,
+  ctx: { cwd: string; processEnv: Env; workspaceDir: string },
+): { ok: true; plan: Plan } | PlanFailure {
+  const { flagTracker, configSnapshot, existing, repo, envFilePath } = draft;
+  let { envFileValues } = draft;
   const tracker = flagTracker ?? existing?.defaults.tracker;
   const taskQuery = args.taskQuery?.trim() || existing?.defaults.taskQuery;
-  const workspaceEnvFile = workspaceEnvPath(ctx.workspaceDir);
   // Same parser the worker and `worker doctor` use, so all three agree.
-  const workspaceEnv = parseEnvFile(workspaceEnvFile);
+  const workspaceEnv = parseEnvFile(workspaceEnvPath(ctx.workspaceDir));
   const credentialEnv: Env = { ...workspaceEnv, ...ctx.processEnv, ...envFileValues };
   if (tracker === "github" && !credentialEnv.GITHUB_REPO && repo?.slug) {
     credentialEnv.GITHUB_REPO = repo.slug;
@@ -383,6 +415,7 @@ export async function planInit(
       envUpdates,
       notes,
       configSnapshot,
+      writeRecommendedPolicy: false,
       ...(envFilePath ? { envFilePath } : {}),
     },
   };
@@ -417,11 +450,8 @@ export function renderPlannedConfig(
       ...(plan.repo.branch ? { branch: plan.repo.branch } : {}),
     };
   }
-  if (current === null) {
-    // A new workspace gets the recommended worker settings written explicitly,
-    // last, exactly as the wizard's "Use the recommended worker settings" step
-    // does. An existing workspace keeps its own settings, like the wizard's
-    // "Keep the current worker settings" answer.
+  if (plan.writeRecommendedPolicy) {
+    // Last, exactly where the wizard's settings step writes them.
     content = upsertWorkerOperatingPolicy(content, {
       ...RECOMMENDED_WORKER_POLICY,
       activeWindows: [],
