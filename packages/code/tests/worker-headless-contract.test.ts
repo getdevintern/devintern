@@ -246,6 +246,17 @@ describe("worker init --non-interactive (headless contract)", () => {
     expect(removed.envFileRemoved).toBe(true);
     expect(existsSync(envFile)).toBe(false);
     expect(readFileSync(join(workspaceDir, ".env"), "utf8")).toContain("GITHUB_TOKEN=");
+
+    // The skill's re-run rule: the removed file cannot be passed again, and
+    // without it the workspace `.env` alone supplies the credentials.
+    const sameFlags = await run(
+      { ...GITHUB_ARGS, envFile, removeEnvFile: true },
+      { processEnv: {} },
+    );
+    expect(sameFlags.result).toBe("failure");
+    expect(sameFlags.code).toBe("env_file_unreadable");
+    const withoutEnvFile = await run(GITHUB_ARGS, { processEnv: {} });
+    expect(withoutEnvFile.result).toBe("unchanged");
   });
 
   test("a failed run never removes the --env-file", async () => {
