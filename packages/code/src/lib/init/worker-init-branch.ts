@@ -5,6 +5,7 @@
  * branch differs from the remote default.
  */
 
+import { MAX_PROMPT_ATTEMPTS, createPromptAttempts } from "@devintern/task-trackers";
 import { detectCheckoutBranches, remoteTrackingBranchExists } from "../workspace/checkout-branches";
 import { loadWorkspaceConfig } from "../workspace/config";
 import { clearRepoDefaultBranch, writeRepoDefaultBranch } from "../workspace/init";
@@ -78,6 +79,7 @@ async function promptRepoDefaultBranch(
 ): Promise<string> {
   const fallback = ctx.saved ?? ctx.remote;
   const choices = [ctx.current, ctx.remote];
+  const reject = createPromptAttempts("default branch");
   for (;;) {
     const answer = (
       await run.prompt(`Base tasks and PRs on ${choices.join(" or ")}? [${fallback}]: `)
@@ -88,5 +90,8 @@ async function promptRepoDefaultBranch(
     if (answer.toLowerCase() === "default") return ctx.remote;
     if (answer === ctx.saved) return answer;
     run.log(`   Enter ${choices.join(" or ")}, or press Enter for ${fallback}.`);
+    reject(
+      `No valid default branch after ${MAX_PROMPT_ATTEMPTS} attempts; enter ${choices.join(" or ")}`,
+    );
   }
 }

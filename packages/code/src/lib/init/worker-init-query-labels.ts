@@ -7,7 +7,11 @@
  * next step. No API call when the query has no label term.
  */
 
-import { condenseMessage } from "@devintern/task-trackers";
+import {
+  MAX_PROMPT_ATTEMPTS,
+  condenseMessage,
+  createPromptAttempts,
+} from "@devintern/task-trackers";
 
 import { TRACKER_CAPABILITIES, supportsLabelCreation } from "../trackers/capabilities";
 import { extractQueryLabels } from "../trackers/query-labels";
@@ -96,6 +100,7 @@ export async function reviewQueryLabels(
   if (missing.length === 0) return "keep";
   const where = ops.location ?? trackerName;
   const labelWord = missing.length === 1 ? "label" : "labels";
+  const reject = createPromptAttempts("query labels");
   for (;;) {
     const answer = (
       await run.prompt(
@@ -111,6 +116,7 @@ export async function reviewQueryLabels(
     }
     if (answer === "c" || answer === "create") break;
     run.log("   Enter f (fix the query), c (create), or k (continue).");
+    reject(`No valid label choice after ${MAX_PROMPT_ATTEMPTS} attempts; enter f, c, or k`);
   }
   for (const name of missing) {
     try {

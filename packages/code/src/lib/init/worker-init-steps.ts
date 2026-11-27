@@ -15,7 +15,13 @@
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
-import { condenseMessage, defaultProbe, parseEnvContent } from "@devintern/task-trackers";
+import {
+  MAX_PROMPT_ATTEMPTS,
+  condenseMessage,
+  createPromptAttempts,
+  defaultProbe,
+  parseEnvContent,
+} from "@devintern/task-trackers";
 import { findProjectRoot } from "@devintern/utils";
 
 import {
@@ -342,6 +348,7 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
   }
 
   let query = "";
+  const rejectQuery = createPromptAttempts("ready-tasks query");
   for (;;) {
     query =
       (
@@ -351,6 +358,7 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
       "";
     if (!query) {
       run.log("❌ A query is required — it defines what 'ready for the agent' means.");
+      rejectQuery();
       continue;
     }
     // Offer the devintern label only once the query works; the default query's
@@ -358,7 +366,10 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
     const handled = isDefaultTaskQuery(run.trackerType, query) ? [DEVINTERN_LABEL] : [];
     if (!run.deps.dryRunQuery) {
       await offerDevinternLabel(run, query);
-      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") continue;
+      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") {
+        rejectQuery(`No usable ready-tasks query after ${MAX_PROMPT_ATTEMPTS} attempts`);
+        continue;
+      }
       break;
     }
     try {
@@ -373,7 +384,10 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
         );
       }
       await offerDevinternLabel(run, query);
-      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") continue;
+      if ((await reviewQueryLabels(run, query, process.env, handled)) === "fix") {
+        rejectQuery(`No usable ready-tasks query after ${MAX_PROMPT_ATTEMPTS} attempts`);
+        continue;
+      }
       break;
     } catch (error) {
       const failure = describeQueryFailure((error as Error).message, process.env.GITHUB_REPO);
@@ -391,6 +405,7 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
         run.log("   Keeping the query as entered; fix it later in workspace.toml.");
         break;
       }
+      rejectQuery(`No working ready-tasks query after ${MAX_PROMPT_ATTEMPTS} attempts`);
     }
   }
   return query;

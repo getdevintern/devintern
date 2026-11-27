@@ -22,6 +22,51 @@ import {
 export const PROBE_TIMEOUT_MS = 10_000;
 export const MAX_EDIT_ATTEMPTS = 3;
 
+/**
+ * Unusable answers one prompt loop tolerates before the wizard stops.
+ * Interactive users who press Enter a couple of times by mistake are still
+ * re-asked; a scripted or non-TTY prompt that always answers "" (or an
+ * invalid menu choice) fails instead of looping forever.
+ */
+export const MAX_PROMPT_ATTEMPTS = 3;
+
+/**
+ * A prompt kept returning an unusable answer, so its loop stopped. A
+ * scripted caller that answers the same invalid value to every prompt would
+ * otherwise hang (and grow memory without bound).
+ */
+export class PromptAttemptsExceededError extends Error {
+  /** Env var key, tracker id, or setting the prompt was collecting. */
+  readonly promptKey: string;
+
+  constructor(promptKey: string, message = `${promptKey} is required`) {
+    super(message);
+    this.name = "PromptAttemptsExceededError";
+    this.promptKey = promptKey;
+  }
+}
+
+/**
+ * Count unusable answers to one prompt. Call the returned function for each
+ * answer the loop refuses; after {@link MAX_PROMPT_ATTEMPTS} it throws
+ * {@link PromptAttemptsExceededError}.
+ *
+ * @param promptKey - Step key or setting named in the default error
+ * @param message - Clear explanation used instead of `<key> is required`
+ */
+export function createPromptAttempts(
+  promptKey: string,
+  message?: string,
+): (overrideMessage?: string) => void {
+  let attempts = 0;
+  return (overrideMessage?: string) => {
+    attempts += 1;
+    if (attempts >= MAX_PROMPT_ATTEMPTS) {
+      throw new PromptAttemptsExceededError(promptKey, overrideMessage ?? message);
+    }
+  };
+}
+
 export type PromptFn = (question: string) => Promise<string>;
 export type ProbeFn = (trackerId: string, env: Record<string, string>) => Promise<void>;
 export type LogFn = (message: string) => void;
@@ -171,6 +216,7 @@ export async function promptForTracker(
     );
   });
 
+  const reject = createPromptAttempts("TASK_TRACKER");
   for (;;) {
     const answer = (await prompt(`Enter a number (1-${trackerIds.length}) or tracker id: `)).trim();
     const byNumber = trackerIds[parseInt(answer, 10) - 1];
@@ -178,6 +224,9 @@ export async function promptForTracker(
     if (trackerIds.includes(answer.toLowerCase())) return answer.toLowerCase();
     log(
       `❌ Invalid choice: '${answer}'. Pick 1-${trackerIds.length} or one of: ${trackerIds.join(", ")}`,
+    );
+    reject(
+      `No valid tracker choice after ${MAX_PROMPT_ATTEMPTS} attempts; enter 1-${trackerIds.length} or one of: ${trackerIds.join(", ")}`,
     );
   }
 }
@@ -187,6 +236,8 @@ export async function promptForTracker(
  *
  * @param promptSecret - Hidden-input prompt for `secret` steps; without one
  *   they use `prompt`
+ * @throws {@link PromptAttemptsExceededError} when a required step keeps
+ *   getting empty answers, naming the step key
  */
 export async function promptSteps(
   steps: EnvPromptStep[],
@@ -211,6 +262,7 @@ export async function promptSteps(
     else if (step.optional && !step.defaultValue) hints.push("optional, Enter to skip");
     const suffix = hints.length > 0 ? ` (${hints.join("; ")})` : "";
     const label = inlineDefault ? `${step.label} [${inlineDefault}]` : step.label;
+    const reject = createPromptAttempts(step.key);
 
     for (;;) {
       const answer = (await ask(`${label}${suffix}: `)).trim();
@@ -226,6 +278,7 @@ export async function promptSteps(
         delete values[step.key];
         break;
       }
+      reject();
       log(`❌ ${step.key} is required.`);
     }
   }
@@ -313,6 +366,8 @@ export async function promptReuseExistingConfig(
  * fix values later (e.g. `.devintern-pm/.env`).
  * @returns true when validated (or skipped), false is never returned — the
  * loop only exits via success or explicit skip
+ * @throws {@link PromptAttemptsExceededError} when the "what next" answer stays
+ *   unusable, instead of re-asking forever
  */
 export async function validateConnection(
   trackerId: string,
@@ -323,6 +378,7 @@ export async function validateConnection(
 ): Promise<boolean> {
   const { prompt, probe, log, promptSecret } = io;
   let edits = 0;
+  const reject = createPromptAttempts(trackerId);
   for (;;) {
     log("\n🔌 Checking the connection...");
     try {
@@ -350,8 +406,15 @@ export async function validateConnection(
           values[step.key] ? { ...step, defaultValue: values[step.key] } : step,
         );
         await promptSteps(editable, prompt, log, values, promptSecret);
+        continue;
       }
-      // anything else (including 'r') retries with current values
+      if (answer === "r" || (answer === "e" && !canEdit)) {
+        // retry with the current values
+        continue;
+      }
+      reject(
+        `No choice for the ${trackerId} connection check after ${MAX_PROMPT_ATTEMPTS} attempts; enter ${canEdit ? "r, e, or s" : "r or s"}`,
+      );
     }
   }
 }
