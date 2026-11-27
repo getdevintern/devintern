@@ -22,6 +22,7 @@ import {
   readRepoEnv,
   repoDefaultProjectKey,
   splitRepoEnv,
+  upsertWorkerOperatingPolicy,
   upsertWorkspaceDefaults,
 } from "../workspace/init";
 import {
@@ -31,6 +32,7 @@ import {
 } from "../workspace/paths";
 import { TRACKER_SETUP } from "./scaffold";
 import { acquireWorkspaceInitLock, errorMessage, writeFileAtomic } from "./worker-init-fs";
+import { RECOMMENDED_WORKER_POLICY } from "./worker-init-policy";
 import type {
   Env,
   InitErrorCode,
@@ -395,17 +397,17 @@ export function renderPlannedConfig(
     tracker: plan.setTracker ? plan.tracker : undefined,
     taskQuery: plan.setTaskQuery ? plan.taskQuery : undefined,
   });
-  if (!plan.repo) return { content, repo: null };
-  const appended = appendRepoEntry(content, plan.repo.remote, {
-    conflicts: plan.repo.conflicts,
-    projectKey: plan.repo.projectKey,
-    defaultBranch: plan.repo.defaultBranch,
-  });
-  content = appended.content;
-  return {
-    content,
-    seededProject: appended.seededProject,
-    repo: {
+  let repo: InitRepo | null = null;
+  let seededProject: string | undefined;
+  if (plan.repo) {
+    const appended = appendRepoEntry(content, plan.repo.remote, {
+      conflicts: plan.repo.conflicts,
+      projectKey: plan.repo.projectKey,
+      defaultBranch: plan.repo.defaultBranch,
+    });
+    content = appended.content;
+    seededProject = appended.seededProject;
+    repo = {
       name: appended.name,
       remote: redactUrlCredentials(plan.repo.remote),
       added: appended.added,
@@ -413,8 +415,19 @@ export function renderPlannedConfig(
         ? { defaultBranch: plan.repo.defaultBranch }
         : {}),
       ...(plan.repo.branch ? { branch: plan.repo.branch } : {}),
-    },
-  };
+    };
+  }
+  if (current === null) {
+    // A new workspace gets the recommended worker settings written explicitly,
+    // last, exactly as the wizard's "Use the recommended worker settings" step
+    // does. An existing workspace keeps its own settings, like the wizard's
+    // "Keep the current worker settings" answer.
+    content = upsertWorkerOperatingPolicy(content, {
+      ...RECOMMENDED_WORKER_POLICY,
+      activeWindows: [],
+    });
+  }
+  return { content, repo, seededProject };
 }
 
 /** True when applying the plan would change neither workspace.toml nor `.env`. */
