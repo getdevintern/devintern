@@ -443,6 +443,7 @@ function nextStepsFor(options: {
       env: options.env,
       home,
       which: options.which,
+      noRelay: args.noRelay,
       fixes: {
         credentials: initRerunCommand(args, ctx, {
           envFile: options.envFilePath ?? "<path>",

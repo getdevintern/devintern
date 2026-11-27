@@ -5,12 +5,17 @@
  * install and start the background service (the same as
  * `worker service install --json`). The results are added to the login
  * `--json` document as `relay`, `service`, and `nextSteps`.
+ *
+ * A relay-only `--no-relay` intent applies only to the sign-in setup reported
+ * it: one recorded before the pending sign-in being completed is forgotten.
  */
 
 import type { NextStep } from "../observability/readiness-json";
+import { serviceInstallCommand } from "../observability/readiness-json";
 import { loadWorkspaceConfig } from "../workspace/config";
 import type { ServiceCommandReport } from "../worker/service-command";
 import { clearWorkerStartIntent, loadWorkerStartIntent } from "../worker/start-intent";
+import type { WorkerStartIntent } from "../worker/start-intent";
 import {
   runWorkerConnectCommand,
   workspaceGitLabRelayProjects,
@@ -45,6 +50,8 @@ export interface WorkerSignInFollowUpOptions {
   noRelay: boolean;
   /** This login completed a sign-in (only then does a deferred service start run). */
   signedIn: boolean;
+  /** When the pending sign-in this login completed began (ISO 8601), if known. */
+  pendingSignInStartedAt?: string;
   /** Human progress lines (stderr while `--json` owns stdout). */
   log?: (line: string) => void;
 }
@@ -61,7 +68,13 @@ export async function runWorkerSignInFollowUp(
   deps: WorkerSignInFollowUpDeps = {},
 ): Promise<WorkerSignInFollowUp> {
   const log = options.log ?? ((line: string) => console.log(line));
-  const intent = options.signedIn ? loadWorkerStartIntent(options.workspaceDir) : null;
+  const recorded = options.signedIn ? loadWorkerStartIntent(options.workspaceDir) : null;
+  // A relay-only intent belongs to the sign-in setup reported. One recorded
+  // before the sign-in being completed belongs to an earlier run: forget it
+  // rather than make this deliberate login skip pairing.
+  const stale = predatesSignIn(recorded, options.pendingSignInStartedAt);
+  const intent = stale ? null : recorded;
+  if (stale) clearWorkerStartIntent(options.workspaceDir);
   const noRelay = options.noRelay || intent?.relay === false;
   const relay: SignInRelayReport = noRelay
     ? { result: "skipped", code: "no_relay", message: "Relay pairing skipped (--no-relay)." }
@@ -69,11 +82,38 @@ export async function runWorkerSignInFollowUp(
   if (relay.result === "skipped") log(`ℹ️  ${relay.message}`);
 
   const followUp: WorkerSignInFollowUp = { relay };
-  if (intent) followUp.service = await startService(options, deps, log);
+  if (intent?.start) {
+    // A completed sign-in always spends the request: one attempt per sign-in,
+    // even when the install cannot run or fails.
+    try {
+      followUp.service = await startService(options, deps, log);
+    } catch (error) {
+      followUp.service = serviceFailureReport(options.workspaceDir, error);
+    } finally {
+      clearWorkerStartIntent(options.workspaceDir);
+    }
+  } else if (intent) {
+    // A relay-only intent (`--no-relay` without `--start`) applies once.
+    clearWorkerStartIntent(options.workspaceDir);
+  }
   const relaySteps = relay.result === "skipped" ? [] : (relay.nextSteps ?? []);
   const nextSteps = [...relaySteps, ...(followUp.service?.nextSteps ?? [])];
   if (nextSteps.length > 0) followUp.nextSteps = nextSteps;
   return followUp;
+}
+
+/**
+ * True when a relay-only intent (a `--no-relay` choice recorded without
+ * `--start`) predates the pending sign-in being completed. Such an intent
+ * describes an earlier setup, not this sign-in, so it must not apply.
+ */
+function predatesSignIn(
+  intent: WorkerStartIntent | null,
+  pendingSignInStartedAt: string | undefined,
+): boolean {
+  if (!intent || intent.start !== false || pendingSignInStartedAt === undefined) return false;
+  const startedAt = Date.parse(pendingSignInStartedAt);
+  return Number.isFinite(startedAt) && Date.parse(intent.requestedAt) < startedAt;
 }
 
 /** `worker connect --no-wait --json` for the workspace; its text goes to `log`. */
@@ -100,32 +140,51 @@ async function pairRelay(
   log("🔌 Pairing the DevIntern relay for instant events...");
   let stdout = "";
   let pending = "";
-  await (deps.connect ?? runWorkerConnectCommand)(["--no-wait", "--json"], {
-    workspaceDir: options.workspaceDir,
-    workspacePath: options.configPath,
-    writeStdout: (text) => {
-      stdout += text;
-    },
-    writeStderr: (text) => {
-      pending += text;
-      const lines = pending.split("\n");
-      pending = lines.pop() ?? "";
-      for (const line of lines) log(line);
-    },
-  });
+  try {
+    await (deps.connect ?? runWorkerConnectCommand)(["--no-wait", "--json"], {
+      workspaceDir: options.workspaceDir,
+      workspacePath: options.configPath,
+      writeStdout: (text) => {
+        stdout += text;
+      },
+      writeStderr: (text) => {
+        pending += text;
+        const lines = pending.split("\n");
+        pending = lines.pop() ?? "";
+        for (const line of lines) log(line);
+      },
+    });
+  } catch (error) {
+    // Pairing failed, but the caller still owns the rest of the follow-up (a
+    // deferred service start): report the failure instead of aborting it.
+    if (pending) log(pending);
+    return connectFailure(`Relay pairing did not run: ${errorMessage(error)}`);
+  }
   if (pending) log(pending);
   try {
     return JSON.parse(stdout) as ConnectJsonDocument;
   } catch (error) {
-    return {
-      schema: "devintern.worker-connect",
-      version: 1,
-      target: "all",
-      result: "failure",
-      code: "connect_failed",
-      error: `Relay pairing did not report a result: ${errorMessage(error)}`,
-    };
+    return connectFailure(`Relay pairing did not report a result: ${errorMessage(error)}`);
   }
+}
+
+/** A relay-pairing failure in the login document, with the command that retries it. */
+function connectFailure(error: string): ConnectJsonDocument {
+  return {
+    schema: "devintern.worker-connect",
+    version: 1,
+    target: "all",
+    result: "failure",
+    code: "connect_failed",
+    error,
+    nextSteps: [
+      {
+        id: "pair-relay",
+        message: "Pair the relay for instant events now that the sign-in is complete",
+        command: "devintern worker connect",
+      },
+    ],
+  };
 }
 
 /** Install and start the service that `worker init --start` deferred, then forget the request. */
@@ -156,20 +215,31 @@ async function startService(
           { workspaceDir, collectReadiness: collectServiceReadiness },
         );
   } catch (error) {
-    report = {
-      schema: "devintern.worker-service",
-      version: 1,
-      action: "install",
-      result: "error",
-      code: "service_command_failed",
-      error: errorMessage(error),
-      workspaceDir,
-      warnings: [],
-      nextSteps: [],
-    };
+    report = serviceFailureReport(workspaceDir, error);
   }
   if (!options.json) {
     for (const line of renderServiceReport(report, deps.platform ?? process.platform)) log(line);
   }
   return report;
+}
+
+/** The service command could not run: report it with the command that retries it. */
+function serviceFailureReport(workspaceDir: string, error: unknown): ServiceCommandReport {
+  return {
+    schema: "devintern.worker-service",
+    version: 1,
+    action: "install",
+    result: "error",
+    code: "service_command_failed",
+    error: errorMessage(error),
+    workspaceDir,
+    warnings: [],
+    nextSteps: [
+      {
+        id: "service",
+        message: "Install and start the background service",
+        command: serviceInstallCommand(workspaceDir),
+      },
+    ],
+  };
 }

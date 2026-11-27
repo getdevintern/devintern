@@ -28,6 +28,7 @@ import type {
   NonInteractiveInitArgs,
   NonInteractiveInitDeps,
 } from "../src/lib/init/worker-init-noninteractive";
+import { runWorkerSignInFollowUp } from "../src/lib/init/worker-sign-in-followup";
 import { gitCommitIdentityCheck } from "../src/lib/observability/git-identity-readiness";
 import type { WorkerDoctorDeps } from "../src/lib/observability/worker-readiness";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
@@ -865,6 +866,74 @@ describe("runNonInteractiveWorkerInit", () => {
         );
         expect(entitled.nextSteps.some((step) => step.id === "connect")).toBe(false);
         expect(entitled.nextSteps.some((step) => step.id === "service")).toBe(true);
+      });
+
+      test("--no-relay without --start carries the choice into the sign-in step and the completion", async () => {
+        const report = await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, noRelay: true },
+          {
+            processEnv: { ...JIRA_ENV },
+            doctorOverrides: { checkEntitlement: notSignedIn },
+          },
+        );
+        expect(report.start).toBeUndefined();
+        const signIn = report.nextSteps.find((step) => step.id === "sign-in");
+        expect(signIn?.command).toEndWith("github --no-wait --json --no-relay");
+        expect(loadWorkerStartIntent(workspaceDir)).toMatchObject({ relay: false, start: false });
+
+        // What runs after the generated `--complete` must not pair the relay.
+        const connects: string[][] = [];
+        const followUp = await runWorkerSignInFollowUp(
+          {
+            workspaceDir,
+            configPath: join(workspaceDir, "workspace.toml"),
+            json: true,
+            noRelay: false,
+            signedIn: true,
+          },
+          {
+            connect: async (args) => {
+              connects.push(args);
+              return 0;
+            },
+            installService: async () => {
+              throw new Error("a relay-only intent must not install the service");
+            },
+          },
+        );
+        expect(connects).toEqual([]);
+        expect(followUp.relay).toMatchObject({ result: "skipped", code: "no_relay" });
+        expect(followUp.service).toBeUndefined();
+      });
+
+      test("a passing --no-relay run leaves no intent, so a later login still pairs", async () => {
+        const report = await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, noRelay: true },
+          { processEnv: { ...JIRA_ENV } },
+        );
+        expect(report.result).toBe("success");
+        expect(report.nextSteps.some((step) => step.id === "sign-in")).toBe(false);
+        expect(existsSync(workerStartIntentPath(workspaceDir))).toBe(false);
+
+        const connects: string[][] = [];
+        const followUp = await runWorkerSignInFollowUp(
+          {
+            workspaceDir,
+            configPath: join(workspaceDir, "workspace.toml"),
+            json: true,
+            noRelay: false,
+            signedIn: true,
+          },
+          {
+            connect: async (args) => {
+              connects.push(args);
+              return 0;
+            },
+          },
+        );
+        expect(connects).toEqual([["--no-wait", "--json"]]);
+        // Pairing ran; the stub reported nothing, so it is not a --no-relay skip.
+        expect((followUp.relay as { result: string }).result).not.toBe("skipped");
       });
 
       test("a pending sign-in without --start pairs the relay itself: no connect step", async () => {

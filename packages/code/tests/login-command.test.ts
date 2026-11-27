@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -176,6 +176,23 @@ describe("executeLogin", () => {
     });
   });
 
+  test("--no-wait --no-relay carries --no-relay into the --complete command", async () => {
+    const code = await executeLogin(
+      { method: "github", noWait: true, json: true, noRelay: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        startPendingLogin: async () => started,
+        currentUser: async () => null,
+      },
+    );
+    expect(code).toBe(0);
+    const doc = JSON.parse(stdout.join(""));
+    expect(doc.complete).toBe(`${CMD} --complete '<address>' --no-relay`);
+    expect(doc.relay).toBeUndefined();
+  });
+
   test("--no-wait text names the URL and the complete command", async () => {
     const code = await executeLogin(
       { method: "github", noWait: true, json: false, help: false },
@@ -252,6 +269,44 @@ describe("executeLogin", () => {
       user: { id: "user-1" },
       relay: { result: "skipped", code: "no_relay" },
     });
+  });
+
+  test("worker login: --complete tells the follow-up when the pending sign-in began", async () => {
+    writeFileSync(
+      join(dir, ".auth-pending.json"),
+      JSON.stringify({
+        version: 1,
+        method: "github",
+        redirectTo: "http://127.0.0.1:17865/auth/callback",
+        url: "https://x.supabase.co/auth/v1/authorize?provider=github",
+        codeVerifier: "verifier",
+        createdAt: "2026-11-26T12:00:00.000Z",
+        expiresAt: "2026-11-26T12:30:00.000Z",
+      }),
+    );
+    const contexts: unknown[] = [];
+    const code = await executeLogin(
+      { complete: "code=abc", noWait: false, json: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        completePendingLogin: async () => user,
+        afterSignIn: async (ctx) => {
+          contexts.push(ctx);
+          return {};
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(contexts).toEqual([
+      {
+        json: true,
+        noRelay: false,
+        signedIn: true,
+        pendingSignInStartedAt: "2026-11-26T12:00:00.000Z",
+      },
+    ]);
   });
 
   test("worker login: a failing follow-up never fails the sign-in", async () => {
@@ -386,5 +441,10 @@ describe("worker-pilot helpers", () => {
       expiresAt: "e",
       complete: `${CMD} --complete '<address>'`,
     });
+    expect(
+      pendingSignInSummary({ method: "github", url: "u", redirectTo: "r", expiresAt: "e" }, CMD, {
+        noRelay: true,
+      }).complete,
+    ).toBe(`${CMD} --complete '<address>' --no-relay`);
   });
 });

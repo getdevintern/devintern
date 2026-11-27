@@ -17,11 +17,15 @@ import {
   pollGitHubPairing,
 } from "../relay/github-pairing";
 import type { GitHubPairingPoll, PendingGitHubPairing } from "../relay/github-pairing";
-import { loadRelayState } from "../relay/state";
+import { loadRelayState, verifiedGitHubRelayRepositories } from "../relay/state";
 import type { LogFn } from "./worker-init-policy";
 
-/** `installed`: the relay verified the App; anything else leaves the pairing to finish later. */
-export type GitHubAppWaitResult = "installed" | "skipped" | "expired" | "failed";
+/**
+ * `installed`: the relay verified the App for the paired repositories;
+ * `partial`: the pairing completed but did not grant every paired repository;
+ * anything else leaves the pairing to finish later.
+ */
+export type GitHubAppWaitResult = "installed" | "partial" | "skipped" | "expired" | "failed";
 
 /** A running Enter-to-skip listener. */
 export interface SkipWatch {
@@ -38,6 +42,8 @@ export interface GitHubAppWaitDeps {
   watchSkip?: () => SkipWatch;
   /** Check the pairing once (default: the relay pairing status). */
   poll?: (pairing: PendingGitHubPairing) => Promise<GitHubPairingPoll>;
+  /** Reports paired repositories a completed pairing did not grant (the App step names them). */
+  onMissingRepositories?: (repos: string[]) => void;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 }
@@ -128,7 +134,22 @@ export async function waitForGitHubAppInstall(
         continue;
       }
       if (polled.kind === "complete") {
+        // A complete pairing only means the App authorization finished. Like
+        // `connect github --status`, confirm the relay actually granted every
+        // repository this pairing asked for before calling it installed.
+        const verified = new Set(
+          verifiedGitHubRelayRepositories(polled.state).map((repository) => repository.repo),
+        );
+        const missing = pairing.repos.filter((repo) => !verified.has(repo.toLowerCase()));
         clearPendingGitHubPairing(workspaceDir);
+        if (missing.length > 0) {
+          log(`⚠️  The App installation did not grant: ${missing.join(", ")}.`);
+          log(
+            "   Add them to the App installation, then run `devintern worker connect github` again.",
+          );
+          deps.onMissingRepositories?.(missing);
+          return "partial";
+        }
         log("✅ DevIntern GitHub App installed and verified.");
         return "installed";
       }

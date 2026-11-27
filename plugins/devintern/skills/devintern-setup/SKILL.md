@@ -68,7 +68,7 @@ Inside the checkout:
 
 ```bash
 devintern worker init --non-interactive --tracker <id> [--task-query '<query>'] [--create-label] \
-  --repo-from-cwd --env-file ~/devintern.env --remove-env-file --sign-in <method> --start --json
+  --repo-from-cwd --env-file ~/devintern.env --remove-env-file --sign-in <method> [--start] --json
 ```
 
 Pass `--start` only with the user's go-ahead to start the worker (step 0.6): it installs and starts the background service when every check passes, or, when only sign-in is left, the `worker login --complete` of step 4 does it. Without the go-ahead, leave it out and install in step 5. Add `--no-relay` when the user chose polling only.

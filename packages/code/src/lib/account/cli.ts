@@ -1,9 +1,13 @@
+import { readFileSync } from "fs";
+
 import {
   completePendingLogin,
   getAuthenticatedUser,
   login,
   logout,
+  parsePendingLogin,
   PendingLoginError,
+  pendingLoginPath,
   promptForEmail,
   promptForLoginMethod,
   startPendingLogin,
@@ -86,17 +90,20 @@ export interface PendingSignIn {
  *
  * @param started - Result of `startPendingLogin`.
  * @param commandName - Login command (may include `--workspace <path>`).
+ * @param options.noRelay - Carry `--no-relay` over to the `--complete` command,
+ *   so finishing the sign-in skips relay pairing like the start did.
  * @returns The `{url, method, expiresAt, complete}` summary.
  */
 export function pendingSignInSummary(
   started: StartedPendingLogin,
   commandName: string,
+  options: { noRelay?: boolean } = {},
 ): PendingSignIn {
   return {
     url: started.url,
     method: started.method,
     expiresAt: started.expiresAt,
-    complete: `${commandName} --complete '<address>'`,
+    complete: `${commandName} --complete '<address>'${options.noRelay ? " --no-relay" : ""}`,
     ...(started.reused ? { reused: true } : {}),
   };
 }
@@ -152,6 +159,12 @@ export interface AfterSignInContext {
   noRelay: boolean;
   /** True when this command completed a sign-in; false for an existing session (`--no-wait`). */
   signedIn: boolean;
+  /**
+   * When the pending sign-in this `--complete` finished began (ISO 8601), if
+   * it could be read. A follow-up uses it to tell this sign-in's deferred
+   * choices apart from an earlier setup's.
+   */
+  pendingSignInStartedAt?: string;
 }
 
 /** Sign-in method from the parsed arguments, prompting when one is missing. */
@@ -196,12 +209,14 @@ export async function executeLogin(
   let method: string | undefined = args.method;
   try {
     if (args.complete !== undefined) {
+      // Read-only: `completePendingLogin` owns rejecting or deleting the file.
+      const startedAt = pendingSignInStartedAt(config);
       const user = await (deps.completePendingLogin ?? completePendingLogin)(
         config,
         args.complete,
         { startCommand },
       );
-      await reportSignedIn(user, args, worker, writeStdout, deps.afterSignIn);
+      await reportSignedIn(user, args, worker, writeStdout, deps.afterSignIn, startedAt);
       await trackLoginResult({ outcome: "succeeded" });
       return 0;
     }
@@ -209,10 +224,11 @@ export async function executeLogin(
     method = resolved.method;
     if (args.noWait) {
       const started = await (deps.startPendingLogin ?? startPendingLogin)(config, resolved);
+      const summary = pendingSignInSummary(started, commandName, {
+        noRelay: args.noRelay === true,
+      });
       if (!args.json) {
-        console.log(
-          renderPendingSignIn(pendingSignInSummary(started, commandName), started.email).join("\n"),
-        );
+        console.log(renderPendingSignIn(summary, started.email).join("\n"));
       }
       // Already signed in: that session pairs the relay now.
       const existing = deps.afterSignIn ? await currentUserOrNull(deps) : null;
@@ -227,7 +243,7 @@ export async function executeLogin(
               schema: LOGIN_JSON_SCHEMA,
               version: LOGIN_JSON_VERSION,
               result: "pending",
-              ...pendingSignInSummary(started, commandName),
+              ...summary,
               ...(existing ? { signedInAs: { id: existing.id, email: existing.email } } : {}),
               ...extra,
             },
@@ -276,6 +292,15 @@ function contextFor(args: LoginArgs): Omit<AfterSignInContext, "signedIn"> {
   return { json: args.json, noRelay: args.noRelay === true };
 }
 
+/** When the pending sign-in at `config` began, or undefined when it cannot be read. */
+function pendingSignInStartedAt(config: SupabaseAuthConfig): string | undefined {
+  try {
+    return parsePendingLogin(readFileSync(pendingLoginPath(config), "utf8"))?.createdAt;
+  } catch {
+    return undefined;
+  }
+}
+
 async function currentUserOrNull(deps: LoginCommandDeps): Promise<AuthenticatedUser | null> {
   try {
     return (await deps.currentUser?.()) ?? null;
@@ -304,6 +329,7 @@ async function reportSignedIn(
   worker: boolean,
   writeStdout: (text: string) => void,
   afterSignIn: LoginCommandDeps["afterSignIn"],
+  pendingSignInStartedAt?: string,
 ): Promise<void> {
   if (!args.json) {
     console.log(`✅ Signed in as ${user.email || user.id}`);
@@ -314,7 +340,11 @@ async function reportSignedIn(
     }
   }
   const extra = afterSignIn
-    ? await safeAfterSignIn(afterSignIn, { ...contextFor(args), signedIn: true })
+    ? await safeAfterSignIn(afterSignIn, {
+        ...contextFor(args),
+        signedIn: true,
+        ...(pendingSignInStartedAt ? { pendingSignInStartedAt } : {}),
+      })
     : {};
   if (args.json) writeStdout(`${JSON.stringify({ ...signedInDoc(user), ...extra }, null, 2)}\n`);
 }

@@ -696,6 +696,18 @@ describe("runWorkerInit", () => {
       }
       return 0;
     };
+    /** A complete-poll state whose verified GitHub repositories are `repos`. */
+    const verifiedState = (repos: string[]) => ({
+      relayUrl: pairing.relayUrl,
+      customerId: "cust-1",
+      connectedAt: new Date().toISOString(),
+      registrations: [],
+      githubRepositories: repos.map((repo, index) => ({
+        repo,
+        installationId: 1,
+        repositoryId: index + 1,
+      })),
+    });
     const signInQuestions = (questions: string[]) =>
       questions.filter((question) => /sign in|relay/i.test(question));
 
@@ -829,7 +841,9 @@ describe("runWorkerInit", () => {
             sleep: async () => {},
             poll: async () => {
               polls += 1;
-              return polls < 2 ? { kind: "pending" } : { kind: "complete", state: {} as never };
+              return polls < 2
+                ? { kind: "pending" }
+                : { kind: "complete", state: verifiedState(["acme/app"]) as never };
             },
           },
         }),
@@ -856,7 +870,7 @@ describe("runWorkerInit", () => {
             poll: async () => {
               polls += 1;
               if (polls === 1) throw new Error("fetch failed");
-              return { kind: "complete", state: {} as never };
+              return { kind: "complete", state: verifiedState(["acme/app"]) as never };
             },
           },
         }),
@@ -867,6 +881,30 @@ describe("runWorkerInit", () => {
       expect(all).toContain("Could not check the pairing (fetch failed); retrying");
       expect(all).toContain("DevIntern GitHub App installed and verified");
       expect(all).not.toContain("Relay setup failed");
+    });
+
+    test("a complete pairing that granted another repository is not reported as installed", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => ({ kind: "complete", state: verifiedState(["acme/other"]) as never }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).not.toContain("installed and verified");
+      expect(all).not.toContain("Relay pairing stored");
+      expect(all).toContain("The App installation did not grant: acme/app");
+      expect(all).toContain(
+        "Add them to the App installation, then run `devintern worker connect github` again.",
+      );
     });
 
     test("after a skipped App wait the other GitHub repositories are not paired", async () => {
@@ -901,6 +939,30 @@ describe("runWorkerInit", () => {
       expect(result.ok).toBe(true);
       expect(githubConnects).toEqual(["acme/other"]);
       expect(logs.join("\n")).toContain("Not pairing acme/app yet: finish acme/other first");
+    });
+
+    test("an expired GitHub App pairing points at a fresh connect, not --status", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo"], {
+          getUser: async () => ({ id: "u1", email: "me@x.test" }),
+          runRelayConnect: pendingGitHub as never,
+          detectGithubRepo: async () => "acme/app",
+          githubAppWait: {
+            openUrl: async () => {},
+            watchSkip: () => ({ skipped: new Promise(() => {}), stop: () => {} }),
+            sleep: async () => {},
+            poll: async () => ({ kind: "expired" }),
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      const all = logs.join("\n");
+      expect(all).toContain("The GitHub App pairing expired");
+      // The recorded pairing is gone, so the App step sends a fresh connect.
+      expect(all).toMatch(
+        /No verified GitHub App pairing was recorded\.\n\s+Run `devintern worker connect github`:/,
+      );
+      expect(all).not.toContain(`Approve the App at ${pairing.installUrl}`);
     });
 
     test("Enter skips the GitHub App wait and the App step says how to finish", async () => {

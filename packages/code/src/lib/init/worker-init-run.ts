@@ -230,6 +230,8 @@ export interface PromptRun {
   githubAppUrl?: string;
   /** How this run's GitHub App wait ended, when relay pairing started one. */
   githubAppWait?: GitHubAppWaitResult;
+  /** Paired repositories a completed App pairing did not grant (set with `partial`). */
+  githubAppMissing?: string[];
   /** Set by the tracker step. */
   trackerType: string;
   trackerName: string;

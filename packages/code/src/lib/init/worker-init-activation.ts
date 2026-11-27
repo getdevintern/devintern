@@ -60,7 +60,11 @@ import {
   FINISH_GITHUB_PAIRING_COMMAND,
   waitForGitHubAppInstall,
 } from "./worker-init-github-app-wait";
-import type { Env, NonInteractiveInitDeps } from "./worker-init-noninteractive-types";
+import type {
+  Env,
+  NonInteractiveInitDeps,
+  NonInteractiveInitReport,
+} from "./worker-init-noninteractive-types";
 import { askYesNo } from "./worker-init-policy";
 import type { LogFn } from "./worker-init-policy";
 import { DEFAULT_PROBE_TIMEOUT_MS, withTimeout } from "./worker-init-run";
@@ -193,7 +197,12 @@ export async function relayStep(run: SetupRun): Promise<boolean> {
           run.githubAppUrl = pairingNextUrl(pairing);
           run.githubAppWait = await waitForGitHubAppInstall(
             { pairing, getAccessToken, workspaceDir, log: run.log, guard: run.guard },
-            run.deps.githubAppWait,
+            {
+              ...run.deps.githubAppWait,
+              onMissingRepositories: (repos) => {
+                run.githubAppMissing = repos;
+              },
+            },
           );
           return run.githubAppWait === "installed";
         },
@@ -245,9 +254,11 @@ export async function githubAppStep(run: SetupRun): Promise<boolean> {
     run.outcome.githubApp = "unavailable";
   } else {
     // A pending pairing (Enter skipped the App wait) is still the relay path:
-    // the App install address it printed is the next step.
+    // the App install address it printed is the next step. A relay attempt
+    // that ended any other way (installed, expired, failed) is still relay
+    // mode even though its address can no longer be finished with --status.
     run.outcome.githubApp =
-      run.outcome.relayConnected || run.githubAppUrl
+      run.outcome.relayConnected || run.outcome.relayConnect !== "skipped"
         ? relayGitHubApp(run, run.workspaceDir, githubRepo)
         : noRelayGitHubApp(run, githubRepo);
   }
@@ -485,7 +496,20 @@ function relayGitHubApp(
     return "existing";
   }
   ctx.log("   No verified GitHub App pairing was recorded.");
-  if (ctx.githubAppUrl) {
+  // A completed pairing that granted other repositories: name what is missing
+  // rather than sending the user to a generic fresh connect.
+  if (ctx.githubAppMissing && ctx.githubAppMissing.length > 0) {
+    ctx.log(`   The App installation did not grant: ${ctx.githubAppMissing.join(", ")}.`);
+    ctx.log(
+      "   Add them to the App installation, then run `devintern worker connect github` again.",
+    );
+    ctx.log("   The relay verifies the installation before it enables event routing.");
+    return "skipped";
+  }
+  // Only an Enter-skipped wait leaves a recording that `connect --status` can
+  // finish; an expired/failed wait, or one that verified other repositories,
+  // needs a fresh `connect github` pairing.
+  if (ctx.githubAppUrl && ctx.githubAppWait === "skipped") {
     ctx.log(
       `   Approve the App at ${ctx.githubAppUrl}, then run \`${FINISH_GITHUB_PAIRING_COMMAND}\`.`,
     );
@@ -532,9 +556,8 @@ async function flagsLicenseStep(run: FlagsRun): Promise<void> {
   const loginCommand = workerLoginCommandFor(workspaceConfigPath(workspaceDir), deps.home);
   try {
     const started = await (deps.startSignIn ?? defaultStartSignIn)(workspaceDir, run.args.signIn);
-    const signIn = pendingSignInSummary(started, loginCommand);
     // The completing `worker login` pairs the relay unless told otherwise.
-    if (run.args.noRelay) signIn.complete = `${signIn.complete} --no-relay`;
+    const signIn = pendingSignInSummary(started, loginCommand, { noRelay: run.args.noRelay });
     run.report.signIn = signIn;
   } catch (error) {
     run.signInCheck = {
@@ -591,6 +614,19 @@ interface ServiceRuntime {
 }
 
 /**
+ * Whether this flags run still leaves a sign-in for a person to finish: it
+ * started one (`--sign-in`), the entitlement check is the `action` row that
+ * says nobody is signed in yet, or `--start` deferred the service to it.
+ */
+function reportsPendingSignIn(report: NonInteractiveInitReport): boolean {
+  return (
+    report.signIn !== undefined ||
+    report.start?.result === "after_sign_in" ||
+    report.checks.some((check) => check.name === "entitlement" && check.status === "action")
+  );
+}
+
+/**
  * Background service (optional). The wizard offers to install and launch it;
  * the foreground command stays an honest supported path on every platform,
  * and a declined offer (or a failed automatic install) keeps the manual
@@ -606,8 +642,20 @@ export async function serviceStep(run: SetupRun): Promise<boolean> {
   } else if (run.args.start) {
     await flagsStartService(run);
   } else {
-    // A re-run without `--start` withdraws an earlier "start once signed in".
-    clearWorkerStartIntent(run.workspaceDir);
+    // A re-run without `--start` withdraws an earlier "start once signed in",
+    // but `--no-relay` still applies to the sign-in this run reports: remember
+    // it for the completing `worker login` (which would otherwise pair). Only
+    // while a sign-in is actually left: a run whose checks all passed leaves
+    // no intent behind, so a later, deliberate login still pairs.
+    if (run.args.noRelay && reportsPendingSignIn(run.report)) {
+      saveWorkerStartIntent(run.workspaceDir, {
+        requestedAt: new Date().toISOString(),
+        relay: false,
+        start: false,
+      });
+    } else {
+      clearWorkerStartIntent(run.workspaceDir);
+    }
   }
   return true;
 }

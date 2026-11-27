@@ -137,7 +137,12 @@ function logWorkerNextSteps(ctx: PromptRun): void {
   if (relayConnected) {
     ctx.log("\n⚠️  Central GitHub App events are not enabled:");
     ctx.log("   @mentions on PRs this worker did not create will not fire.");
-    if (ctx.githubAppUrl) {
+    if (ctx.githubAppMissing && ctx.githubAppMissing.length > 0) {
+      ctx.log(`   The App installation did not grant: ${ctx.githubAppMissing.join(", ")}.`);
+      ctx.log(
+        "   Add them to the App installation, then run `devintern worker connect github` again.",
+      );
+    } else if (ctx.githubAppUrl && ctx.githubAppWait === "skipped") {
       ctx.log(
         `   Approve the App at ${ctx.githubAppUrl}, then run \`devintern worker connect github --status\`.`,
       );
