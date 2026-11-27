@@ -32,6 +32,8 @@ import { gitCommitIdentityCheck } from "../src/lib/observability/git-identity-re
 import type { WorkerDoctorDeps } from "../src/lib/observability/worker-readiness";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
 import { workspaceCodeStateDir } from "../src/lib/workspace/paths";
+import type { ServiceCommandReport } from "../src/lib/worker/service-command";
+import { loadWorkerStartIntent, workerStartIntentPath } from "../src/lib/worker/start-intent";
 
 const JIRA_ENV = {
   JIRA_BASE_URL: "https://acme.atlassian.net",
@@ -99,6 +101,20 @@ describe("parseNonInteractiveInitArgs", () => {
         expect(parsed.error).not.toContain("abc");
       }
     }
+  });
+
+  test("--start, --no-relay, and --no-service", () => {
+    expect(parseNonInteractiveInitArgs(["--start", "--no-relay"])).toMatchObject({
+      ok: true,
+      args: { start: true, noRelay: true },
+    });
+    expect(parseNonInteractiveInitArgs(["--no-service"])).toEqual({
+      ok: true,
+      args: { repoFromCwd: false, json: false, yes: false },
+    });
+    const both = parseNonInteractiveInitArgs(["--start", "--no-service", "--json"]);
+    expect(both).toMatchObject({ ok: false, json: true });
+    if (!both.ok) expect(both.error).toContain("--start and --no-service cannot be combined");
   });
 
   test("requires values for value flags", () => {
@@ -626,6 +642,249 @@ describe("runNonInteractiveWorkerInit", () => {
       expect(text).toContain("https://example.supabase.co/auth/v1/authorize?provider=github");
       expect(text).toContain(complete);
       expect(text).toContain("open the address above, then run");
+    });
+
+    describe("--start and --no-relay", () => {
+      const serviceReport = (result: string): ServiceCommandReport => ({
+        schema: "devintern.worker-service",
+        version: 1,
+        action: "install",
+        result,
+        workspaceDir,
+        warnings: [],
+        nextSteps:
+          result === "starting"
+            ? [
+                {
+                  id: "check-start",
+                  message: "Check",
+                  command: "devintern worker service status --json",
+                },
+              ]
+            : [],
+        ...(result === "error" ? { error: "systemctl failed", code: "install_failed" } : {}),
+      });
+
+      test("checks pass: installs and starts the service and drops the service step", async () => {
+        const installs: string[] = [];
+        const report = await run(
+          { tracker: "jira", taskQuery: "project = APP", start: true },
+          {
+            processEnv: { ...JIRA_ENV },
+            installService: async (dir) => {
+              installs.push(dir);
+              return serviceReport("running");
+            },
+          },
+        );
+        expect(installs).toEqual([workspaceDir]);
+        expect(report.result).toBe("success");
+        expect(report.start).toEqual({ result: "installed" });
+        expect(report.service?.result).toBe("running");
+        expect(report.nextSteps.some((step) => step.id === "service")).toBe(false);
+        expect(existsSync(workerStartIntentPath(workspaceDir))).toBe(false);
+        expect(renderNonInteractiveReport(report).join("\n")).toContain(
+          "The worker is running as a background service.",
+        );
+      });
+
+      test("a still-starting worker keeps the service's own check step", async () => {
+        const report = await run(
+          { tracker: "jira", taskQuery: "project = APP", start: true },
+          { processEnv: { ...JIRA_ENV }, installService: async () => serviceReport("starting") },
+        );
+        expect(report.start).toEqual({ result: "installed" });
+        expect(report.nextSteps.map((step) => step.id)).toContain("check-start");
+      });
+
+      test("a failed install is a failed service check (exit 1)", async () => {
+        const report = await run(
+          { tracker: "jira", taskQuery: "project = APP", start: true },
+          { processEnv: { ...JIRA_ENV }, installService: async () => serviceReport("error") },
+        );
+        expect(report.start).toEqual({ result: "failed" });
+        expect(report.result).toBe("failure");
+        expect(report.code).toBe("service_start_failed");
+        expect(report.checks.find((check) => check.name === "service")?.message).toContain(
+          "systemctl failed",
+        );
+        const fix = report.nextSteps.find((step) => step.id === "fix-service");
+        expect(fix?.command).toContain("devintern worker service install --json");
+      });
+
+      test("a failed check installs nothing", async () => {
+        let installs = 0;
+        const report = await run(
+          { tracker: "jira", taskQuery: "project = APP", start: true },
+          {
+            processEnv: { ...JIRA_ENV },
+            doctorOverrides: { dryRunQuery: async () => Promise.reject(new Error("bad JQL")) },
+            installService: async () => {
+              installs += 1;
+              return serviceReport("running");
+            },
+          },
+        );
+        expect(installs).toBe(0);
+        expect(report.start).toEqual({ result: "not_ready" });
+        expect(existsSync(workerStartIntentPath(workspaceDir))).toBe(false);
+      });
+
+      test("the re-run commands of a failed --start --no-relay run keep both flags", async () => {
+        const report = await run(
+          { tracker: "jira", taskQuery: "project = APP", start: true, noRelay: true },
+          {
+            processEnv: { ...JIRA_ENV },
+            doctorOverrides: { dryRunQuery: async () => Promise.reject(new Error("bad JQL")) },
+            installService: async () => serviceReport("running"),
+          },
+        );
+        // `add-repo` registers another checkout; it is not a re-run of this command.
+        const rerunSteps = report.nextSteps.filter(
+          (step) =>
+            step.id !== "add-repo" &&
+            step.command?.includes("devintern worker init --non-interactive"),
+        );
+        expect(rerunSteps.map((step) => step.id)).toContain("fix-query");
+        expect(rerunSteps.length).toBeGreaterThan(0);
+        for (const step of rerunSteps) {
+          expect(step.command).toContain(" --start");
+          expect(step.command).toContain(" --no-relay");
+        }
+      });
+
+      test("only sign-in left: the intent is recorded for worker login, no service or connect step", async () => {
+        let installs = 0;
+        const report = await run(
+          {
+            tracker: "jira",
+            taskQuery: "project = APP",
+            repoFromCwd: true,
+            signIn: { method: "github" },
+            start: true,
+          },
+          {
+            processEnv: { ...JIRA_ENV },
+            doctorOverrides: { checkEntitlement: notSignedIn },
+            startSignIn: fakeStart([]),
+            installService: async () => {
+              installs += 1;
+              return serviceReport("running");
+            },
+          },
+        );
+        expect(installs).toBe(0);
+        expect(report.result).toBe("action_required");
+        expect(report.start).toEqual({ result: "after_sign_in" });
+        expect(loadWorkerStartIntent(workspaceDir)).toMatchObject({ relay: true });
+        // The headless happy path: one step, the sign-in completion.
+        expect(report.nextSteps.map((step) => step.id)).toEqual(["complete-sign-in"]);
+        expect(report.nextSteps[0].message).toContain(
+          "It also pairs the relay and installs and starts the worker service",
+        );
+        expect(renderNonInteractiveReport(report).join("\n")).toContain(
+          "that also installs and starts the worker service",
+        );
+      });
+
+      test("--start without --sign-in still defers the service and omits the redundant connect step", async () => {
+        const report = await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, start: true },
+          {
+            processEnv: { ...JIRA_ENV },
+            doctorOverrides: { checkEntitlement: notSignedIn },
+          },
+        );
+        expect(report.result).toBe("action_required");
+        expect(report.start).toEqual({ result: "after_sign_in" });
+        expect(loadWorkerStartIntent(workspaceDir)).toMatchObject({ relay: true });
+        // Signing in with the reported command pairs the relay and starts the
+        // service, so neither is a separate next step.
+        expect(report.nextSteps.map((step) => step.id)).toEqual(["sign-in"]);
+      });
+
+      test("a later run without --start, or one that is not ready, forgets the recorded start", async () => {
+        const signInLeft = {
+          processEnv: { ...JIRA_ENV },
+          doctorOverrides: { checkEntitlement: notSignedIn },
+        };
+        const first = await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, start: true },
+          signInLeft,
+        );
+        expect(first.start).toEqual({ result: "after_sign_in" });
+        expect(loadWorkerStartIntent(workspaceDir)).not.toBeNull();
+        const withoutStart = await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true },
+          signInLeft,
+        );
+        expect(withoutStart.start).toBeUndefined();
+        expect(existsSync(workerStartIntentPath(workspaceDir))).toBe(false);
+
+        await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, start: true },
+          signInLeft,
+        );
+        expect(loadWorkerStartIntent(workspaceDir)).not.toBeNull();
+        const notReady = await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, start: true },
+          {
+            ...signInLeft,
+            doctorOverrides: {
+              checkEntitlement: notSignedIn,
+              dryRunQuery: async () => Promise.reject(new Error("bad JQL")),
+            },
+          },
+        );
+        expect(notReady.start).toEqual({ result: "not_ready" });
+        expect(existsSync(workerStartIntentPath(workspaceDir))).toBe(false);
+      });
+
+      test("--no-relay drops the connect step and tells worker login to skip pairing", async () => {
+        const report = await run(
+          {
+            tracker: "jira",
+            taskQuery: "project = APP",
+            signIn: { method: "github" },
+            start: true,
+            noRelay: true,
+          },
+          {
+            processEnv: { ...JIRA_ENV },
+            doctorOverrides: { checkEntitlement: notSignedIn },
+            startSignIn: fakeStart([]),
+          },
+        );
+        expect(report.signIn?.complete).toEndWith("--complete '<address>' --no-relay");
+        expect(loadWorkerStartIntent(workspaceDir)).toMatchObject({ relay: false });
+        expect(report.nextSteps[0].message).not.toContain("pairs the relay");
+
+        const entitled = await run(
+          { tracker: "jira", taskQuery: "project = APP", noRelay: true },
+          { processEnv: { ...JIRA_ENV } },
+        );
+        expect(entitled.nextSteps.some((step) => step.id === "connect")).toBe(false);
+        expect(entitled.nextSteps.some((step) => step.id === "service")).toBe(true);
+      });
+
+      test("a pending sign-in without --start pairs the relay itself: no connect step", async () => {
+        const report = await run(
+          {
+            tracker: "jira",
+            taskQuery: "project = APP",
+            signIn: { method: "github" },
+            repoFromCwd: true,
+          },
+          {
+            processEnv: { ...JIRA_ENV },
+            doctorOverrides: { checkEntitlement: notSignedIn },
+            startSignIn: fakeStart([]),
+          },
+        );
+        expect(report.start).toBeUndefined();
+        expect(report.nextSteps.map((step) => step.id)).toEqual(["complete-sign-in", "service"]);
+        expect(report.nextSteps[0].message).toContain("It also pairs the relay");
+      });
     });
 
     test("--sign-in does nothing when the workspace is already entitled", async () => {

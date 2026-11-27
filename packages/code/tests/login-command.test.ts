@@ -38,6 +38,16 @@ describe("parseLoginArgs", () => {
     });
   });
 
+  test("--no-relay is a worker login option only", () => {
+    expect(parseLoginArgs(["--complete", "code=abc", "--no-relay"], CMD)).toMatchObject({
+      ok: true,
+      args: { complete: "code=abc", noRelay: true },
+    });
+    expect(parseLoginArgs(["github", "--no-relay"], "devintern login")).toMatchObject({
+      ok: false,
+    });
+  });
+
   test("--no-wait, --complete, and --json", () => {
     expect(parseLoginArgs(["github", "--no-wait", "--json"], CMD)).toMatchObject({
       ok: true,
@@ -218,6 +228,92 @@ describe("executeLogin", () => {
     );
     expect(logs.join("\n")).toContain("✅ Signed in as me@acme.test");
     expect(logs.join("\n")).toContain("14-day free Worker Pilot, no card required");
+  });
+
+  test("worker login: --complete runs the follow-up and adds its fields to the JSON", async () => {
+    const contexts: unknown[] = [];
+    const code = await executeLogin(
+      { complete: "code=abc", noWait: false, json: true, noRelay: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        completePendingLogin: async () => user,
+        afterSignIn: async (ctx) => {
+          contexts.push(ctx);
+          return { relay: { result: "skipped", code: "no_relay" } };
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(contexts).toEqual([{ json: true, noRelay: true, signedIn: true }]);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      result: "signed_in",
+      user: { id: "user-1" },
+      relay: { result: "skipped", code: "no_relay" },
+    });
+  });
+
+  test("worker login: a failing follow-up never fails the sign-in", async () => {
+    const code = await executeLogin(
+      { complete: "code=abc", noWait: false, json: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        completePendingLogin: async () => user,
+        afterSignIn: async () => {
+          throw new Error("relay down");
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      result: "signed_in",
+      followUpError: "relay down",
+    });
+  });
+
+  test("worker login --no-wait: an existing session pairs the relay, the new sign-in still starts", async () => {
+    const contexts: unknown[] = [];
+    const code = await executeLogin(
+      { method: "github", noWait: true, json: true, help: false },
+      config,
+      CMD,
+      {
+        writeStdout,
+        startPendingLogin: async () => started,
+        currentUser: async () => user,
+        afterSignIn: async (ctx) => {
+          contexts.push(ctx);
+          return { relay: { result: "connected" } };
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(contexts).toEqual([{ json: true, noRelay: false, signedIn: false }]);
+    const doc = JSON.parse(stdout.join(""));
+    expect(doc).toMatchObject({
+      result: "pending",
+      url: started.url,
+      signedInAs: { id: "user-1", email: "me@acme.test" },
+      relay: { result: "connected" },
+    });
+  });
+
+  test("worker login --no-wait without a session does not run the follow-up", async () => {
+    let ran = false;
+    await executeLogin({ method: "github", noWait: true, json: true, help: false }, config, CMD, {
+      writeStdout,
+      startPendingLogin: async () => started,
+      currentUser: async () => null,
+      afterSignIn: async () => {
+        ran = true;
+        return {};
+      },
+    });
+    expect(ran).toBe(false);
+    expect(JSON.parse(stdout.join("")).relay).toBeUndefined();
   });
 
   test("a pending-login error becomes a JSON failure with its code, exit 1", async () => {

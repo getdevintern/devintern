@@ -91,6 +91,8 @@ export function failureCodeFor(
       return "workspace_config_invalid";
     case "sign-in":
       return "sign_in_failed";
+    case "service":
+      return "service_start_failed";
     default:
       return "check_failed";
   }
@@ -317,6 +319,14 @@ function fixStep(
         ...(github ? { url: GITHUB_TOKEN_SETTINGS_URL } : {}),
       };
     }
+    case "service":
+      // `--start` could not install or start the service: retrying the
+      // install (or running in a terminal) is the fix, not a re-check.
+      return {
+        id: "fix-service",
+        message: `${summary}. Fix the cause, then install and start the service again`,
+        command: serviceInstallCommand(options.workspaceDir, options.home),
+      };
     case "sandbox":
       return {
         id: "fix-sandbox",

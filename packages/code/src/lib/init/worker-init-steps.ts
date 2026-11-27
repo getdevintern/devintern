@@ -180,6 +180,8 @@ export function initRerunCommand(
       `--sign-in ${shellQuote(args.signIn.method === "email" ? (args.signIn.email ?? "email") : args.signIn.method)}`,
     );
   }
+  if (args.start) parts.push("--start");
+  if (args.noRelay) parts.push("--no-relay");
   parts.push("--yes --json");
   const command = parts.join(" ");
   return args.repoFromCwd ? `cd ${shellQuote(ctx.cwd)} && ${command}` : command;

@@ -49,10 +49,22 @@ function loginUsage(commandName: string): string {
     "  --complete <address>    Finish a --no-wait sign-in with the address the browser",
     "                          landed on (a 127.0.0.1 page that does not load)",
     "  --json                  Print one JSON document on stdout",
-    ...(worker ? ["  --workspace <path>      Use this workspace.toml"] : []),
+    ...(worker
+      ? [
+          "  --no-relay              Do not pair the DevIntern relay after signing in",
+          "  --workspace <path>      Use this workspace.toml",
+        ]
+      : []),
     "  -h, --help              Display this help message",
     "",
     "When no method is given, an interactive prompt asks how to sign in.",
+    ...(worker
+      ? [
+          "Once signed in, the workspace is paired with the DevIntern relay for instant",
+          "events (without waiting for the GitHub App approval), and a worker service that",
+          "`worker init --non-interactive --start` deferred is installed and started.",
+        ]
+      : []),
     "If the browser runs on another machine (SSH, a container), paste the address",
     "it ends on into this terminal, or use --no-wait and --complete.",
   ].join("\n");
@@ -123,6 +135,23 @@ export interface LoginCommandDeps {
   promptForEmail?: typeof promptForEmail;
   /** stdout writer for the JSON document. */
   writeStdout?: (text: string) => void;
+  /**
+   * `worker login`: what follows a sign-in (relay pairing; with `signedIn`, a
+   * service `worker init --start` deferred). Prints its own text; the fields
+   * it returns are added to the JSON document. Never fails the sign-in.
+   */
+  afterSignIn?: (ctx: AfterSignInContext) => Promise<Record<string, unknown>>;
+  /** `worker login --no-wait`: the user already signed in, whose session pairs the relay. */
+  currentUser?: () => Promise<AuthenticatedUser | null>;
+}
+
+/** What {@link LoginCommandDeps.afterSignIn} is told about the login. */
+export interface AfterSignInContext {
+  json: boolean;
+  /** `--no-relay`: skip relay pairing. */
+  noRelay: boolean;
+  /** True when this command completed a sign-in; false for an existing session (`--no-wait`). */
+  signedIn: boolean;
 }
 
 /** Sign-in method from the parsed arguments, prompting when one is missing. */
@@ -172,7 +201,7 @@ export async function executeLogin(
         args.complete,
         { startCommand },
       );
-      reportSignedIn(user, args.json, worker, writeStdout);
+      await reportSignedIn(user, args, worker, writeStdout, deps.afterSignIn);
       await trackLoginResult({ outcome: "succeeded" });
       return 0;
     }
@@ -180,6 +209,17 @@ export async function executeLogin(
     method = resolved.method;
     if (args.noWait) {
       const started = await (deps.startPendingLogin ?? startPendingLogin)(config, resolved);
+      if (!args.json) {
+        console.log(
+          renderPendingSignIn(pendingSignInSummary(started, commandName), started.email).join("\n"),
+        );
+      }
+      // Already signed in: that session pairs the relay now.
+      const existing = deps.afterSignIn ? await currentUserOrNull(deps) : null;
+      const extra =
+        existing && deps.afterSignIn
+          ? await safeAfterSignIn(deps.afterSignIn, { ...contextFor(args), signedIn: false })
+          : {};
       if (args.json) {
         writeStdout(
           `${JSON.stringify(
@@ -188,20 +228,18 @@ export async function executeLogin(
               version: LOGIN_JSON_VERSION,
               result: "pending",
               ...pendingSignInSummary(started, commandName),
+              ...(existing ? { signedInAs: { id: existing.id, email: existing.email } } : {}),
+              ...extra,
             },
             null,
             2,
           )}\n`,
         );
-      } else {
-        console.log(
-          renderPendingSignIn(pendingSignInSummary(started, commandName), started.email).join("\n"),
-        );
       }
       return 0;
     }
     const user = await (deps.login ?? login)(config, resolved);
-    reportSignedIn(user, args.json, worker, writeStdout);
+    await reportSignedIn(user, args, worker, writeStdout, deps.afterSignIn);
     await trackLoginResult({ outcome: "succeeded", method: resolved.method });
     return 0;
   } catch (error) {
@@ -234,22 +272,51 @@ export async function executeLogin(
   }
 }
 
-function reportSignedIn(
+function contextFor(args: LoginArgs): Omit<AfterSignInContext, "signedIn"> {
+  return { json: args.json, noRelay: args.noRelay === true };
+}
+
+async function currentUserOrNull(deps: LoginCommandDeps): Promise<AuthenticatedUser | null> {
+  try {
+    return (await deps.currentUser?.()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Run the follow-up; a failure there is reported, never a failed sign-in. */
+async function safeAfterSignIn(
+  afterSignIn: NonNullable<LoginCommandDeps["afterSignIn"]>,
+  ctx: AfterSignInContext,
+): Promise<Record<string, unknown>> {
+  try {
+    return await afterSignIn(ctx);
+  } catch (error) {
+    const message = (error as Error).message;
+    console.error(`⚠️  Signed in, but the follow-up setup failed: ${message}`);
+    return { followUpError: message };
+  }
+}
+
+async function reportSignedIn(
   user: AuthenticatedUser,
-  json: boolean,
+  args: LoginArgs,
   worker: boolean,
   writeStdout: (text: string) => void,
-): void {
-  if (json) {
-    writeStdout(`${JSON.stringify(signedInDoc(user), null, 2)}\n`);
-    return;
+  afterSignIn: LoginCommandDeps["afterSignIn"],
+): Promise<void> {
+  if (!args.json) {
+    console.log(`✅ Signed in as ${user.email || user.id}`);
+    if (worker) {
+      console.log(
+        `   Your ${WORKER_PILOT_OFFER} starts when the worker first starts. Check with \`devintern worker doctor\`.`,
+      );
+    }
   }
-  console.log(`✅ Signed in as ${user.email || user.id}`);
-  if (worker) {
-    console.log(
-      `   Your ${WORKER_PILOT_OFFER} starts when the worker first starts. Check with \`devintern worker doctor\`.`,
-    );
-  }
+  const extra = afterSignIn
+    ? await safeAfterSignIn(afterSignIn, { ...contextFor(args), signedIn: true })
+    : {};
+  if (args.json) writeStdout(`${JSON.stringify({ ...signedInDoc(user), ...extra }, null, 2)}\n`);
 }
 
 const LOGOUT_USAGE = [
@@ -276,11 +343,13 @@ const WHOAMI_USAGE = [
  * @param argv - Process-style argv (`["devintern", "login", ...]`).
  * @param configDir - State directory that receives the session file.
  * @param commandName - Command shown in hints (`devintern worker login` for workers).
+ * @param followUp - `worker login`: relay pairing and a deferred service start after signing in.
  */
 export async function runLoginCommand(
   argv: string[],
   configDir?: string,
   commandName = "devintern login",
+  followUp: Pick<LoginCommandDeps, "afterSignIn" | "currentUser"> = {},
 ): Promise<never> {
   const loginIndex = argv.indexOf("login");
   const rest = loginIndex >= 0 ? argv.slice(loginIndex + 1) : [];
@@ -317,6 +386,7 @@ export async function runLoginCommand(
     console.warn = toStderr;
   }
   const code = await executeLogin(parsed.args, loadSupabaseConfig(configDir), commandName, {
+    ...followUp,
     writeStdout: (text) => {
       stdoutWrite(text);
     },

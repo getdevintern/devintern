@@ -590,7 +590,7 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
       const wizard = await runWizard();
       const output = wizard.output;
       expect(wizard.seen, output).toEqual(
-        expect.arrayContaining(["tracker", "tasks-dir", "query", "sign-in", "relay"]),
+        expect.arrayContaining(["tracker", "tasks-dir", "query", "sign-in"]),
       );
       expect(output).toContain("✅ Query works: 1 task(s) match right now.");
       // No settings question: the recommended settings are written.
@@ -659,12 +659,11 @@ describe.skipIf(!enabled)("onboarding golden path", () => {
       ],
       ["token", /GitHub token for creating pull requests[^\n]*: $/, "\r"],
       ["query", /Ready-tasks query[^\n]*: $/, "status=todo\r"],
-      ["relay-sign-in", /Sign in now to connect the relay[^\n]*\]: $/, "n\r"],
       ["ci-repair", /Automatically repair failing CI[^\n]*\]: $/, "n\r"],
       ["hours", /Limit new-task pickup to active hours[^\n]*\]: $/, "n\r"],
       ["sentry", /Sentry[^\n]*\]: $/, "n\r"],
-      ["sign-in", /Sign in now[^\n]*Worker Pilot[^\n]*\]: $/, "n\r"],
-      ["relay", /React in seconds through the DevIntern relay[^\n]*\]: $/, "n\r"],
+      // One sign-in step: declining it also leaves relay pairing out.
+      ["sign-in", /Sign in with GitHub now to start the Worker Pilot[^\n]*\]: $/, "n\r"],
       ["service", /background service[^\n]*\]: $/, "n\r"],
       ["default", /\]: $/, "\r"],
     ];
