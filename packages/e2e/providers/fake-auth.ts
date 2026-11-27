@@ -60,10 +60,16 @@ export function basicPatAuthorization(pat: string): string {
 /**
  * Azure DevOps' answer to a wrong or missing PAT (a bare HTTP 401), or
  * undefined when no PAT is enforced or the request carries the right one.
+ * `onReject` runs before each 401 so the fake can record the rejected request.
  */
-export function rejectWrongPat(request: Request, pat: string | undefined): Response | undefined {
+export function rejectWrongPat(
+  request: Request,
+  pat: string | undefined,
+  onReject: () => void,
+): Response | undefined {
   if (pat === undefined || request.headers.get("authorization") === basicPatAuthorization(pat)) {
     return undefined;
   }
+  onReject();
   return new Response(null, { status: 401, headers: { "www-authenticate": "Basic" } });
 }

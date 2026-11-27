@@ -355,6 +355,7 @@ test.skipIf(!builtCli)(
           `❌ Task query — ${label}: not run (missing tracker credentials)`,
           NOT_READY,
         ]);
+        expect(tracker.unauthorizedRequests).toBe(0);
         expect(tracker.wiqlRequests).toEqual([]);
         expect(tracker.unexpectedRequests).toEqual([]);
       },
