@@ -521,7 +521,10 @@ export function spawnCliForceRetry(options: {
     throw new Error("could not determine the devintern entry point to invoke");
   }
   const args = [script, options.taskKey, "--force"];
-  const job = jobMemorySpawn(process.execPath, args, process.env);
+  // The retry is detached to outlive the dashboard request (and a worker
+  // restart), so keep it out of a claimed job slice: the worker stops its slice
+  // at startup and in ExecStopPost, which would kill exactly this run.
+  const job = jobMemorySpawn(process.execPath, args, process.env, undefined, { slice: false });
   const child = Bun.spawn([job.command, ...job.args], {
     cwd: options.workingDir,
     env: job.env,

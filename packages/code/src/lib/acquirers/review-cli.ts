@@ -429,6 +429,10 @@ function spawnResolveOnce(
       resultOutput += chunk.toString();
     });
     child.on("close", (code) => {
+      // Read the scope markers and remove the per-spawn temp files first: an
+      // aborted or timed-out job must not leak its spec (which holds the child
+      // argv) or skip the launcher's unwrapped-fallback detection.
+      const memory = job.onClose(code);
       if (aborted) {
         finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
         return;
@@ -457,7 +461,6 @@ function spawnResolveOnce(
           }
         }
       }
-      const memory = job.onClose(code);
       const fallback = result ?? {
         outcome: code === 0 ? "skipped" : code === 2 ? "deferred" : "failed",
         message:
@@ -476,6 +479,8 @@ function spawnResolveOnce(
       });
     });
     child.on("error", (error) => {
+      // A spawn that never produced a close event still owns its temp files.
+      job.onClose(null);
       finish({
         code: 1,
         result: { outcome: "failed", message: `failed to spawn resolver: ${error.message}` },

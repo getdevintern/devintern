@@ -22,12 +22,17 @@
  *
  * Arguments are passed to systemd-run verbatim. systemd 258 expands `${VAR}`
  * in scope command lines by default, 254–257 do not unless asked, and older
- * releases never do; `--expand-environment=no` is probed and passed wherever
- * it exists, so no release rewrites a `$` in a prompt or task argument.
+ * releases never do; `--expand-environment=no` is passed wherever it exists,
+ * so no release rewrites a `$` in a prompt or task argument. The flag is
+ * probed, with a retry and the binary's version as a tie-breaker, because a
+ * transient probe failure must never be mistaken for an old release.
  *
  * Detection: the shim runs the command in the foreground, then reads its own
  * scope's `memory.events`. A non-zero `oom_kill` count writes a marker file the
- * parent reads after the child exits. Job children also read their own
+ * parent reads after the child exits; only that marker reports `exceeded`. A
+ * bare 137/`null` exit (an operator `kill -9`, a manager SIGKILL, a drain) is
+ * reported as `possibleKill` instead, because it does not prove the cap was
+ * hit. Job children also read their own
  * scope's counter at agent boundaries (`jobMemoryOomSnapshot` /
  * `jobMemoryExceededSince`), so the run can record the specific reason even
  * when the agent, not the job CLI, was the process that got killed.
@@ -36,20 +41,24 @@
  * user manager use scopes; everywhere else (macOS launchd, containers without
  * systemd, non-Linux) the worker keeps its previous unlimited behavior. The
  * support probe runs asynchronously at worker startup (and lazily on the first
- * job elsewhere) so a wedged user manager cannot block the worker, and both
- * success and failure are re-probed, so a manager that disappears falls back
- * to unlimited jobs. A scope that fails to start at spawn time is retried
- * unwrapped for that attempt and clears the cached support, so the next job
- * re-probes instead of failing for the rest of the cache window. Job scopes
+ * job elsewhere) so a wedged user manager cannot block the worker. A stale
+ * result is re-probed in the background but keeps capping jobs until a probe
+ * actually fails, so a manager that disappears falls back to unlimited jobs
+ * without an unwrapped gap every cache window. A scope that fails to start at
+ * spawn time is retried unwrapped for that attempt and clears the cached
+ * support, so the next job re-probes instead of failing for the rest of the
+ * cache window. Job scopes
  * are not bound to the service unit: the worker drains running jobs first and
  * stops what is left after the grace period (binding stopped them immediately,
  * before the drain could finish). The lock-holding worker's jobs live in a
  * per-workspace slice instead (`jobScopeSliceArgs`), which the worker stops at
  * startup and the unit stops in `ExecStopPost=`, so a worker that was SIGKILLed
- * or crashed cannot leave jobs running unsupervised.
+ * or crashed cannot leave jobs running unsupervised. `webhook serve` claims a
+ * separate webhook slice and stops it when the process exits, for the same
+ * reason. A detached dashboard retry stays out of any claimed slice (see
+ * `JobMemorySpawnOptions`).
  */
 
-import { spawn, spawnSync } from "child_process";
 import { randomUUID } from "crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir, totalmem } from "os";
@@ -63,7 +72,16 @@ import {
   resolveJobMemoryMax,
 } from "./job-memory-format";
 import type { JobMemoryLimit } from "./job-memory-format";
-import { jobScopeSliceArgs } from "./job-scope-slice";
+import {
+  probeNoExpand,
+  probeNoExpandAsync,
+  probeSystemdScope,
+  probeSystemdScopeAsync,
+  resetNoExpandProbeWarningForTests,
+} from "./job-memory-probe";
+import { OOM_SHIM, SCOPE_LAUNCHER } from "./job-memory-scripts";
+import { jobScopeSliceArgs, jobScopeSliceName } from "./job-scope-slice";
+import type { JobScopeSurface } from "./job-scope-slice";
 import { userBusEnv } from "./service";
 
 export type { JobMemoryLimit } from "./job-memory-format";
@@ -115,7 +133,15 @@ export interface JobMemoryPlan {
 
 /** What the parent learned after the job child exited. */
 export interface JobMemoryClose {
+  /**
+   * True only when the job's scope recorded an OOM kill while it ran. A bare
+   * 137/`null` exit is not proof of hitting the cap (an operator `kill -9`, a
+   * manager SIGKILL, or a drain can produce it), so it sets
+   * {@link possibleKill} instead.
+   */
   exceeded: boolean;
+  /** True when the child died by SIGKILL without the shim's OOM marker. */
+  possibleKill?: boolean;
   label?: string;
 }
 
@@ -134,111 +160,8 @@ export interface JobMemorySpawn {
   onClose(exitCode: number | null): JobMemoryClose;
 }
 
-/**
- * Shim script run inside the scope. It is written to a file rather than passed
- * through `systemd-run`'s argv: systemd expands `$VAR` / `${VAR}` in ExecStart
- * arguments, which would mangle the shell variables below.
- *
- * The command runs in the foreground so it keeps the parent's stdio (including
- * the `DEVINTERN_RESULT_FD` channel) and stdin. After it exits, the shim reads
- * the scope's `memory.events`; the counter survives until the scope is
- * unloaded, which happens after the shim exits, so this read is not racy.
- */
-const OOM_SHIM = `#!/bin/sh
-# Tell the launcher that the scope command actually started. Without this
-# marker a systemd-run failure before exec is retried unwrapped instead of
-# being mistaken for the job's own exit status.
-[ -n "$DEVINTERN_JOB_MEMORY_STARTED" ] && printf '1\\n' > "$DEVINTERN_JOB_MEMORY_STARTED" 2>/dev/null
-# Scope teardown sends SIGTERM as soon as the runaway is killed; catch it so
-# this process can read the scope's OOM counter before the cgroup disappears.
-# (A caught trap, not an ignored signal, so the command keeps the default
-# SIGTERM disposition and the worker's drain still stops it gracefully.)
-trap ':' TERM
-"$@"
-status=$?
-cg=$(cat /proc/self/cgroup 2>/dev/null)
-cg=\${cg#0::}
-if grep -Eq '^oom_kill [1-9][0-9]*$' "/sys/fs/cgroup\${cg}/memory.events" 2>/dev/null; then
-  printf '1\\n' > "$DEVINTERN_JOB_MEMORY_MARKER" 2>/dev/null
-fi
-exit "$status"
-`;
-
-/**
- * Launcher around `systemd-run` that retries the command unwrapped when the
- * scope never starts.
- *
- * `systemd-run --user --scope` can fail before exec (a restarted user manager,
- * a bad `XDG_RUNTIME_DIR`, a bad property). Treating that exit status as the
- * job's own result would fail every job while the 5-minute support cache still
- * said scopes work. The shim writes a started marker as its first action; if
- * it is absent after a non-zero `systemd-run` exit, the scope never ran the
- * command, so this reruns it without a limit for this attempt.
- *
- * A file-based argv keeps prompts byte-for-byte intact (no shell quoting in
- * the fallback path).
- */
-const SCOPE_LAUNCHER = `const { spawn } = require("node:child_process");
-const { existsSync, readFileSync, writeFileSync } = require("node:fs");
-const signals = require("node:os").constants.signals;
-const spec = JSON.parse(readFileSync(process.argv[2], "utf8"));
-
-function stdio() {
-  return ["inherit", "inherit", "inherit", process.env.DEVINTERN_RESULT_FD ? "inherit" : "ignore"];
-}
-
-function exitFor(code, signal) {
-  process.exit(code === null ? 128 + (signals[signal] || 0) : code);
-}
-
-function start(command, args, onDone) {
-  let child;
-  let settled = false;
-  const finish = (code, signal, error) => {
-    if (settled) return;
-    settled = true;
-    onDone(code, signal, error);
-  };
-  try {
-    child = spawn(command, args, { stdio: stdio() });
-  } catch (error) {
-    finish(null, null, error);
-    return;
-  }
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
-    process.on(signal, () => {
-      try {
-        child.kill(signal);
-      } catch {
-        // The child may already have exited.
-      }
-    });
-  }
-  child.on("error", (error) => finish(null, null, error));
-  child.on("close", (code, signal) => finish(code, signal, null));
-}
-
-function runUnwrapped() {
-  writeFileSync(spec.fallback, "1\\n");
-  start(spec.command, spec.args, (code, signal, error) => {
-    if (error) process.exit(127);
-    exitFor(code, signal);
-  });
-}
-
-start(spec.systemd[0], spec.systemd.slice(1), (code, signal, error) => {
-  if (error) {
-    runUnwrapped();
-    return;
-  }
-  // A signal means the worker is draining (or killing) the job; never rerun it.
-  if (signal === null && code !== 0 && !existsSync(spec.started)) {
-    runUnwrapped();
-    return;
-  }
-  exitFor(code, signal);
-});
-`;
+/** Options for {@link jobMemorySpawn}; `slice: false` keeps a detached retry out of the claimed slice. */
+type JobMemorySpawnOptions = { slice?: boolean };
 
 let spawnCounter = 0;
 let oomShimPath: string | undefined;
@@ -299,19 +222,21 @@ function removeOomShimDir(): void {
 /**
  * Whether `systemd-run --user --scope` can apply a memory limit on this host.
  *
- * Probes the user manager with `MemoryMax` alone on a transient scope;
- * `OOMPolicy`, `MemorySwapMax`, and `--expand-environment` are optional extras
- * probed separately. Returns false on non-Linux hosts, in containers without a user
- * manager, and when `systemd-run` is missing. Both success and failure are
- * re-probed after {@link SCOPE_PROBE_RETRY_MS}, so a user manager that starts,
- * restarts, or goes away is picked up again instead of being cached for the
- * whole process.
+ * Probes the user manager with the argv a real job scope uses — `--collect`,
+ * the claimed slice, `MemoryMax`, and the `/bin/sh` OOM-shim wrapper — so a
+ * host that would reject a job's scope is rejected here instead of failing
+ * every job. `OOMPolicy`, `MemorySwapMax`, and `--expand-environment` are
+ * optional extras probed separately. Returns false on non-Linux hosts, in
+ * containers without a user manager, and when `systemd-run` is missing. Both
+ * success and failure are re-probed after {@link SCOPE_PROBE_RETRY_MS}, so a
+ * user manager that starts, restarts, or goes away is picked up again instead
+ * of being cached for the whole process.
  *
  * This synchronous probe is for explicit checks (tests, diagnostics). The job
  * spawn path uses the cached result and primes it asynchronously, so a wedged
  * user manager cannot block the worker's event loop.
  *
- * @param env - Environment the spawn will use (resolves the user bus).
+ * @param env - Environment the spawn will use (resolves the user bus and slice).
  */
 export function systemdScopeAvailable(
   env: Record<string, string | undefined> = process.env,
@@ -341,19 +266,69 @@ interface SystemdScopeSupport {
   probedAt: number;
 }
 
-/** Base probe: the only property a usable job scope needs. */
-const PROBE_BASE = ["-p", "MemoryMax=67108864"] as const;
-/** Optional extras, each probed on its own so a missing one never disables the cap. */
-const PROBE_OOM_POLICY = [...PROBE_BASE, "-p", "OOMPolicy=continue"] as const;
-const PROBE_SWAP = [...PROBE_BASE, "-p", "MemorySwapMax=0"] as const;
-const PROBE_NO_EXPAND = ["--expand-environment=no", ...PROBE_BASE] as const;
+/** Memory limit the probe applies; any usable limit proves the property works. */
+const PROBE_MEMORY_MAX = ["-p", "MemoryMax=67108864"] as const;
+
+/**
+ * The stable part of a job scope's argv, probed as one unit.
+ *
+ * `--collect` (systemd 236+) and the claimed slice are part of every real job
+ * invocation, so a host that rejects them must fail the probe: probing only
+ * `MemoryMax` would succeed, then every job would start a scope the launcher
+ * reruns unwrapped, and each failure would clear the cache into another
+ * successful probe (probe-success → failed scope → fallback, forever).
+ *
+ * The worker probes with the slice it will claim after it takes the workspace
+ * lock (`surface`), because the startup probe runs before the lock. Without
+ * that, a host that accepts a plain scope but rejects the slice would be
+ * cached as supported and the first jobs would fail before the cache clears.
+ * Other processes pass no surface and probe only the slice they already own.
+ *
+ * @param env - Environment resolving the workspace whose slice this process claimed.
+ * @param surface - Slice this process will claim after its startup probe.
+ * @returns `systemd-run` options every job scope receives.
+ */
+function probeBaseArgs(
+  env: Record<string, string | undefined>,
+  surface?: JobScopeSurface,
+): string[] {
+  const workspaceDir = resolveWorkspaceDir(env);
+  return [
+    "--collect",
+    // Only when this process owns (or will own) the workspace's job slice;
+    // standalone runs never claim one and must not fail the probe on a slice
+    // they will not use.
+    ...(surface
+      ? [`--slice=${jobScopeSliceName(workspaceDir, surface)}`]
+      : jobScopeSliceArgs(workspaceDir)),
+    ...PROBE_MEMORY_MAX,
+  ];
+}
+
+/** The base probe plus each optional extra, probed on its own. */
+function probeArgvs(
+  env: Record<string, string | undefined>,
+  surface?: JobScopeSurface,
+): {
+  base: string[];
+  oomPolicy: string[];
+  swap: string[];
+  noExpand: string[];
+} {
+  const base = probeBaseArgs(env, surface);
+  return {
+    base,
+    oomPolicy: [...base, "-p", "OOMPolicy=continue"],
+    swap: [...base, "-p", "MemorySwapMax=0"],
+    noExpand: ["--expand-environment=no", ...base],
+  };
+}
 
 function unsupported(probedAt: number): SystemdScopeSupport {
   return { available: false, memorySwap: false, oomPolicy: false, noExpand: false, probedAt };
 }
 
 const SCOPE_PROBE_RETRY_MS = 5 * 60_000;
-const SCOPE_PROBE_TIMEOUT_MS = 5_000;
 let systemdScopeSupport: SystemdScopeSupport | undefined;
 let probeInFlight: Promise<SystemdScopeSupport> | undefined;
 
@@ -362,14 +337,21 @@ let lastGoodJobMemorySetting: { path: string; setting: JobMemorySetting } | unde
 /** Deduplicates the warning for a config that keeps failing to parse. */
 let configErrorWarned: string | undefined;
 
-/** The cached probe result, or undefined once it is stale. */
+/**
+ * The cached probe result, including one older than the refresh window.
+ *
+ * A stale result is still the last known truth: the spawn path keeps using it
+ * while a background re-probe runs, so a long-running worker never spawns an
+ * unwrapped job just because the refresh has not finished. Only a probe that
+ * actually fails replaces the cache with "unavailable".
+ */
 function currentSystemdScopeSupport(): SystemdScopeSupport | undefined {
-  if (systemdScopeSupport === undefined) return undefined;
-  if (Date.now() - systemdScopeSupport.probedAt >= SCOPE_PROBE_RETRY_MS) {
-    systemdScopeSupport = undefined;
-    return undefined;
-  }
   return systemdScopeSupport;
+}
+
+/** Whether the cached result is old enough to re-probe in the background. */
+function supportIsStale(support: SystemdScopeSupport): boolean {
+  return Date.now() - support.probedAt >= SCOPE_PROBE_RETRY_MS;
 }
 
 /**
@@ -379,24 +361,32 @@ function currentSystemdScopeSupport(): SystemdScopeSupport | undefined {
  * entry points). Concurrent callers share one probe.
  *
  * @param env - Environment the job spawn will use (resolves the user bus).
+ * @param surface - Slice this process will claim after a startup probe.
  * @returns The probed support, cached for {@link SCOPE_PROBE_RETRY_MS}.
  */
 export async function primeJobMemorySupport(
   env: Record<string, string | undefined> = process.env,
+  surface?: JobScopeSurface,
 ): Promise<SystemdScopeSupport> {
   const cached = currentSystemdScopeSupport();
-  if (cached !== undefined) return cached;
+  if (cached !== undefined && !supportIsStale(cached)) return cached;
   if (probeInFlight !== undefined) return probeInFlight;
 
   probeInFlight = (async () => {
     const now = Date.now();
     if (process.platform !== "linux") return unsupported(now);
     const probeEnv = systemdProbeEnv(env);
-    if (!(await probeSystemdScopeAsync(PROBE_BASE, probeEnv))) return unsupported(now);
+    const argvs = probeArgvs(env, surface);
+    const command = probeCommand();
+    // Retry a transient `systemd-run` failure once before caching
+    // "unsupported", the same way `probeNoExpand` absorbs one.
+    if (!(await probeSystemdScopeAsync(argvs.base, probeEnv, command))) {
+      if (!(await probeSystemdScopeAsync(argvs.base, probeEnv, command))) return unsupported(now);
+    }
     const [oomPolicy, memorySwap, noExpand] = await Promise.all([
-      probeSystemdScopeAsync(PROBE_OOM_POLICY, probeEnv),
-      probeSystemdScopeAsync(PROBE_SWAP, probeEnv),
-      probeSystemdScopeAsync(PROBE_NO_EXPAND, probeEnv),
+      probeSystemdScopeAsync(argvs.oomPolicy, probeEnv, command),
+      probeSystemdScopeAsync(argvs.swap, probeEnv, command),
+      probeNoExpandAsync(argvs.noExpand, probeEnv, command),
     ]);
     return { available: true, memorySwap, oomPolicy, noExpand, probedAt: now };
   })().then(
@@ -422,6 +412,7 @@ export function resetJobMemorySupportForTests(): void {
   probeInFlight = undefined;
   lastGoodJobMemorySetting = undefined;
   configErrorWarned = undefined;
+  resetNoExpandProbeWarningForTests();
 }
 
 /**
@@ -435,18 +426,24 @@ function invalidateSystemdScopeSupport(): void {
 /** Synchronous probe used by explicit {@link systemdScopeAvailable} checks. */
 function readSystemdScopeSupport(env: Record<string, string | undefined>): SystemdScopeSupport {
   const cached = currentSystemdScopeSupport();
-  if (cached !== undefined) return cached;
+  if (cached !== undefined && !supportIsStale(cached)) return cached;
   const now = Date.now();
-  if (process.platform !== "linux" || !probeSystemdScope(PROBE_BASE, systemdProbeEnv(env))) {
+  const probeEnv = systemdProbeEnv(env);
+  const argvs = probeArgvs(env);
+  if (process.platform !== "linux") {
     systemdScopeSupport = unsupported(now);
     return systemdScopeSupport;
   }
-  const probeEnv = systemdProbeEnv(env);
+  const command = probeCommand();
+  if (!probeSystemdScope(argvs.base, probeEnv, command)) {
+    systemdScopeSupport = unsupported(now);
+    return systemdScopeSupport;
+  }
   systemdScopeSupport = {
     available: true,
-    oomPolicy: probeSystemdScope(PROBE_OOM_POLICY, probeEnv),
-    memorySwap: probeSystemdScope(PROBE_SWAP, probeEnv),
-    noExpand: probeSystemdScope(PROBE_NO_EXPAND, probeEnv),
+    oomPolicy: probeSystemdScope(argvs.oomPolicy, probeEnv, command),
+    memorySwap: probeSystemdScope(argvs.swap, probeEnv, command),
+    noExpand: probeNoExpand(argvs.noExpand, probeEnv, command),
     probedAt: now,
   };
   return systemdScopeSupport;
@@ -462,67 +459,35 @@ function readSystemdScopeSupport(env: Record<string, string | undefined>): Syste
 function systemdProbeEnv(
   env: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
-  return { ...env, ...userBusEnv({ env: env as NodeJS.ProcessEnv }) };
+  const probeEnv: Record<string, string | undefined> = {
+    ...env,
+    ...userBusEnv({ env: env as NodeJS.ProcessEnv }),
+  };
+  // The probe runs the same shim a job does (see {@link probeCommand}); never
+  // let it write a limited job child's in-progress markers, which would make
+  // an empty probe look like a memory-limit hit.
+  for (const name of [
+    JOB_MEMORY_LABEL_ENV,
+    JOB_MEMORY_MARKER_ENV,
+    JOB_MEMORY_STARTED_ENV,
+    JOB_MEMORY_FALLBACK_ENV,
+  ]) {
+    delete probeEnv[name];
+  }
+  return probeEnv;
 }
 
-function probeSystemdScope(
-  options: readonly string[],
-  env: Record<string, string | undefined>,
-): boolean {
-  const probe = spawnSync(
-    "systemd-run",
-    [
-      "--user",
-      "--scope",
-      "--quiet",
-      ...options,
-      // `process.execPath` exists on every host, unlike `/bin/true` (absent
-      // on NixOS). `-e ""` exits immediately without needing a script file.
-      "--",
-      process.execPath,
-      "-e",
-      "",
-    ],
-    { stdio: "ignore", timeout: SCOPE_PROBE_TIMEOUT_MS, env },
-  );
-  return probe.status === 0;
-}
-
-function probeSystemdScopeAsync(
-  options: readonly string[],
-  env: Record<string, string | undefined>,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let child: ReturnType<typeof spawn> | undefined;
-    const finish = (ok: boolean): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
-      resolve(ok);
-    };
-    const timer = setTimeout(() => {
-      try {
-        child?.kill("SIGKILL");
-      } catch {
-        // The probe may already have exited.
-      }
-      finish(false);
-    }, SCOPE_PROBE_TIMEOUT_MS);
-    try {
-      child = spawn(
-        "systemd-run",
-        ["--user", "--scope", "--quiet", ...options, "--", process.execPath, "-e", ""],
-        { stdio: "ignore", env },
-      );
-    } catch {
-      finish(false);
-      return;
-    }
-    child.on("error", () => finish(false));
-    child.on("close", (code) => finish(code === 0));
-  });
+/**
+ * Command the probe runs inside the scope: the same `/bin/sh` + OOM shim
+ * wrapper a job gets, so a host without `/bin/sh` (or one where the shim
+ * cannot run) fails the probe instead of every job's scope.
+ */
+function probeCommand(): string[] {
+  const shim = ensureOomShim();
+  if (shim === undefined) return [process.execPath, "-e", ""];
+  // The shim is probed without markers (see {@link systemdProbeEnv}); its own
+  // empty command exits immediately.
+  return ["/bin/sh", shim, process.execPath, "-e", ""];
 }
 
 /**
@@ -553,14 +518,18 @@ export function loadJobMemoryPlan(
  * known and logged before the first job.
  *
  * @param env - Worker environment.
+ * @param surface - Slice the worker will claim after taking the workspace
+ *   lock, probed up front so a host that rejects it never caches a successful
+ *   plain-scope probe.
  * @returns The plan with a resolved limit or the reason it is disabled.
  */
 export async function resolveJobMemoryPlanForStartup(
   env: Record<string, string | undefined> = process.env,
+  surface?: JobScopeSurface,
 ): Promise<JobMemoryPlan> {
   const setting = resolveJobMemorySetting(env);
   if ("reason" in setting) return { mechanism: "none", reason: setting.reason };
-  const support = await primeJobMemorySupport(env);
+  const support = await primeJobMemorySupport(env, surface);
   return planFromSupport(setting.limit, support);
 }
 
@@ -583,6 +552,19 @@ interface JobMemorySetting {
   maxConcurrency: number;
 }
 
+/**
+ * Job slots outside the worker's own `max_concurrency` that the default
+ * budget must cover.
+ *
+ * `webhook serve` runs CI-fix, conflict-resolution, and auto-merge jobs through
+ * a single-concurrency queue (`webhook/runtime.ts`), in a separate process
+ * that reads the same `workspace.toml`. Scheduled automations and estimations
+ * take a worker supervisor slot, so `max_concurrency` already counts them.
+ * Reserving this one slot keeps a full worker and a concurrent webhook job at
+ * the documented ~50% budget instead of 50% each.
+ */
+export const JOB_MEMORY_WEBHOOK_JOB_SLOTS = 1;
+
 /** Resolve the limit setting without probing the manager. */
 function resolveJobMemorySetting(
   env: Record<string, string | undefined>,
@@ -595,8 +577,10 @@ function resolveJobMemorySetting(
   let limit: JobMemoryLimit | null;
   try {
     // The default is a fleet budget: divide it by the number of jobs that can
-    // run at once so four concurrent jobs do not each claim the full 50%.
-    const defaultFraction = DEFAULT_JOB_MEMORY_FRACTION / Math.max(1, read.setting.maxConcurrency);
+    // run at once (the worker's slots plus the webhook surface's single job) so
+    // concurrent jobs do not each claim the full 50%.
+    const jobs = Math.max(1, read.setting.maxConcurrency) + JOB_MEMORY_WEBHOOK_JOB_SLOTS;
+    const defaultFraction = DEFAULT_JOB_MEMORY_FRACTION / jobs;
     limit = resolveJobMemoryMax(read.setting.value, usableMemoryBytes(), defaultFraction);
   } catch (error) {
     return {
@@ -609,7 +593,7 @@ function resolveJobMemorySetting(
 
 function planFromSupport(limit: JobMemoryLimit, support: SystemdScopeSupport): JobMemoryPlan {
   if (!support.available) {
-    return { mechanism: "none", reason: "systemd-run --user --scope is unavailable" };
+    return { mechanism: "none", reason: "systemd-run --user --scope cannot start a job scope" };
   }
   return {
     mechanism: "systemd-scope",
@@ -633,9 +617,12 @@ function buildJobMemoryPlan(
 }
 
 /**
- * Plan for the spawn path: never probes synchronously, kicks off an async
- * probe when the cached result is missing or stale, and leaves that one spawn
- * unwrapped rather than blocking the worker for up to the probe timeout.
+ * Plan for the spawn path: never probes synchronously.
+ *
+ * Before the first probe there is nothing to wrap, so that one spawn runs
+ * unwrapped while the probe starts. After that the last known support is used
+ * even when it is stale, with a background re-probe; a probe that fails
+ * replaces the cache with "unavailable" and the following jobs run unwrapped.
  */
 function loadJobMemoryPlanCached(env: Record<string, string | undefined>): JobMemoryPlan {
   const setting = resolveJobMemorySetting(env);
@@ -646,6 +633,12 @@ function loadJobMemoryPlanCached(env: Record<string, string | undefined>): JobMe
       // A failed probe is retried after the retry window; the job still runs.
     });
     return { mechanism: "none", reason: "job memory support is being probed" };
+  }
+  if (supportIsStale(support)) {
+    // Refresh in the background while this job keeps the last known cap.
+    void primeJobMemorySupport(env).catch(() => {
+      // A failed probe is retried after the retry window.
+    });
   }
   return planFromSupport(setting.limit, support);
 }
@@ -767,6 +760,7 @@ export function cgroupMemoryLimit(
  * @param args - Its arguments.
  * @param env - Child environment (defaults to `process.env`).
  * @param plan - Pre-resolved plan (tests); defaults to the non-blocking cached plan.
+ * @param options - Spawn options (detached retries skip the claimed slice).
  * @returns The spawn spec and a close-time OOM check.
  */
 export function jobMemorySpawn(
@@ -774,6 +768,7 @@ export function jobMemorySpawn(
   args: readonly string[],
   env: Record<string, string | undefined> = process.env,
   plan: JobMemoryPlan = loadJobMemoryPlanCached(env),
+  options: JobMemorySpawnOptions = {},
 ): JobMemorySpawn {
   const childArgs = [...args];
   if (!plan.limit || plan.mechanism !== "systemd-scope") {
@@ -835,7 +830,9 @@ export function jobMemorySpawn(
     // flag is only omitted where it does not exist and is not needed).
     ...(noExpand ? ["--expand-environment=no"] : []),
     // Lock-holding worker only; stopped after a hard kill (job-scope-cleanup.ts).
-    ...jobScopeSliceArgs(resolveWorkspaceDir(env)),
+    // A detached retry opts out (options.slice === false) so the worker's
+    // startup/ExecStopPost cleanup cannot stop a run meant to outlive it.
+    ...(options.slice === false ? [] : jobScopeSliceArgs(resolveWorkspaceDir(env))),
     "-p",
     `MemoryMax=${limit.maxBytes}`,
     // Keep the rest of the scope alive when the kernel OOM killer picks a
@@ -894,16 +891,19 @@ export function jobMemorySpawn(
           );
           closed = { exceeded: false };
         } else {
-          // The shim writes the marker when it survives the kill. systemd-oomd
-          // can terminate the whole scope instead, killing the shim before it
-          // reads `memory.events`; in that case the wrapper's own exit status
-          // is the only signal. SIGTERM (143) is deliberately excluded: it is
-          // the normal drain/shutdown signal, and reporting it as an OOM kill
-          // rewrites real resolver results. Callers also check their own
-          // timeout/abort flags first.
-          const killed = exitCode === null || exitCode === 137;
-          const exceeded = existsSync(marker) || killed;
-          closed = exceeded ? { exceeded: true, label: limit.label } : { exceeded: false };
+          // Only the shim marker proves the cap was hit: it is written after
+          // the command exits when the scope's `oom_kill` counter is non-zero.
+          // systemd-oomd can terminate the whole scope instead, killing the
+          // shim before it can read `memory.events`, but that exit status also
+          // matches an operator `kill -9`, a manager SIGKILL, and a drain, so
+          // it is recorded as merely possible instead of rewriting a real
+          // result. Callers also check their own timeout/abort flags first.
+          const marked = existsSync(marker);
+          closed = marked
+            ? { exceeded: true, label: limit.label }
+            : exitCode === null || exitCode === 137
+              ? { exceeded: false, possibleKill: true }
+              : { exceeded: false };
         }
         cleanup();
       }

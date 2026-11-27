@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawn, spawnSync } from "child_process";
 import {
   existsSync,
@@ -28,19 +28,24 @@ import {
   jobMemoryOomSnapshot,
   jobMemoryExceededSince,
   jobMemorySpawn,
+  JOB_MEMORY_WEBHOOK_JOB_SLOTS,
   loadJobMemoryPlan,
   parseJobMemoryMax,
+  primeJobMemorySupport,
   resolveJobMemoryMax,
   resolveJobMemoryPlanForStartup,
   resetJobMemorySupportForTests,
   systemdScopeAvailable,
 } from "../src/lib/worker/job-memory";
 import {
+  recordJobScopeClaim,
   stopLeftoverJobScopes,
   withLeftoverJobScopeCleanup,
 } from "../src/lib/worker/job-scope-cleanup";
 import {
   claimJobScopeSlice,
+  jobScopeClaimMarkerName,
+  jobScopeClaimMarkerPath,
   jobScopeSliceName,
   releaseJobScopeSliceForTests,
 } from "../src/lib/worker/job-scope-slice";
@@ -159,17 +164,39 @@ describe("job memory plan", () => {
     }
   });
 
-  test("the default cap is split across max_concurrency jobs", () => {
+  test("the default cap is split across max_concurrency jobs plus the webhook slot", () => {
     const dir = workspaceWith(
       '[workspace.execution]\nisolation = "best_effort_host"\nmax_concurrency = 4',
     );
     const plan = loadJobMemoryPlan({ DEVINTERN_WORKSPACE_DIR: dir });
     const budget = Math.min(totalmem(), cgroupMemoryLimit() ?? Number.POSITIVE_INFINITY);
-    const expected = Math.floor(budget * (DEFAULT_JOB_MEMORY_FRACTION / 4));
+    const jobs = 4 + JOB_MEMORY_WEBHOOK_JOB_SLOTS;
+    const expected = Math.floor(budget * (DEFAULT_JOB_MEMORY_FRACTION / jobs));
     if (plan.limit) expect(plan.limit.maxBytes).toBe(expected);
     expect(
-      resolveJobMemoryMax(undefined, 16 * GIB, DEFAULT_JOB_MEMORY_FRACTION / 4)?.maxBytes,
-    ).toBe(2 * GIB);
+      resolveJobMemoryMax(undefined, 16 * GIB, DEFAULT_JOB_MEMORY_FRACTION / jobs)?.maxBytes,
+    ).toBe(Math.floor(16 * GIB * (DEFAULT_JOB_MEMORY_FRACTION / jobs)));
+  });
+
+  test("a full worker and a concurrent webhook job stay within the default budget", () => {
+    // The bug: with max_concurrency = 1 each surface used 50%, so one worker
+    // job plus one CI-fix job could reach 100% of the budget plus daemons.
+    const dir = workspaceWith(
+      '[workspace.execution]\nisolation = "best_effort_host"\nmax_concurrency = 1',
+    );
+    const plan = loadJobMemoryPlan({ DEVINTERN_WORKSPACE_DIR: dir });
+    const budget = Math.min(totalmem(), cgroupMemoryLimit() ?? Number.POSITIVE_INFINITY);
+    // Both processes resolve the same plan, so the worst case is one worker
+    // slot plus one webhook slot, each at this cap.
+    const concurrent = 1 + JOB_MEMORY_WEBHOOK_JOB_SLOTS;
+    if (plan.limit) {
+      expect(plan.limit.maxBytes).toBe(
+        Math.floor(budget * (DEFAULT_JOB_MEMORY_FRACTION / concurrent)),
+      );
+      expect(plan.limit.maxBytes * concurrent).toBeLessThanOrEqual(
+        budget * DEFAULT_JOB_MEMORY_FRACTION,
+      );
+    }
   });
 
   test("the environment override wins and resolves a size", () => {
@@ -269,7 +296,7 @@ describe("jobMemorySpawn", () => {
     expect(spec.systemdArgs?.at(-1)).toBe("literal ${HOME} and $HOME");
   });
 
-  test("puts job scopes in the workspace's job slice only for the lock-holding worker", () => {
+  test("puts job scopes in the workspace's job slice only for the claiming surface", () => {
     const plan = {
       mechanism: "systemd-scope" as const,
       limit: { maxBytes: 512 * 1024 ** 2, label: "512 MB" },
@@ -279,21 +306,110 @@ describe("jobMemorySpawn", () => {
     const spawnFor = (dir: string) =>
       jobMemorySpawn("/bin/echo", ["hi"], { DEVINTERN_WORKSPACE_DIR: dir }, plan);
     try {
-      // Standalone dashboard retries and `webhook serve` never claim the
-      // slice, so a starting or stopping worker cannot stop their jobs.
+      // Standalone dashboard retries and one-off CLI runs never claim a slice,
+      // so a starting or stopping worker cannot stop their jobs.
       expect(sliceOf(spawnFor("/srv/ws-a"))).toBeUndefined();
       claimJobScopeSlice("/srv/ws-a");
       const a = spawnFor("/srv/ws-a");
       expect(sliceOf(a)).toBe(`--slice=${jobScopeSliceName("/srv/ws-a")}`);
       expect(sliceOf(spawnFor("/srv/ws-a/"))).toBe(sliceOf(a));
       expect(sliceOf(spawnFor("/srv/ws-b"))).toBeUndefined();
+      // A detached dashboard retry must outlive the process that spawned it,
+      // so it opts out even when this process claimed the workspace slice.
+      expect(
+        sliceOf(
+          jobMemorySpawn("/bin/echo", ["hi"], { DEVINTERN_WORKSPACE_DIR: "/srv/ws-a" }, plan, {
+            slice: false,
+          }),
+        ),
+      ).toBeUndefined();
+      // The webhook server owns a different slice, so neither surface's
+      // startup/stop cleanup can stop the other's in-flight jobs.
+      claimJobScopeSlice("/srv/ws-a", "webhook");
+      expect(sliceOf(spawnFor("/srv/ws-a"))).toBe(
+        `--slice=${jobScopeSliceName("/srv/ws-a", "webhook")}`,
+      );
+      expect(jobScopeSliceName("/srv/ws-a", "webhook")).not.toBe(jobScopeSliceName("/srv/ws-a"));
     } finally {
       releaseJobScopeSliceForTests();
     }
-    // The installed unit stops the same slice after the daemon exits.
-    expect(
-      renderSystemdUnit({ execPath: "/usr/bin/devintern", projectDir: "/srv/ws-a" }),
-    ).toContain(`ExecStopPost=-systemctl --user stop ${jobScopeSliceName("/srv/ws-a")}\n`);
+    // The installed unit stops the slice for its own surface after the daemon
+    // exits, but only when the claim marker names this unit invocation.
+    const workerUnit = renderSystemdUnit({
+      execPath: "/usr/bin/devintern",
+      projectDir: "/srv/ws-a",
+    });
+    expect(workerUnit).toContain(`systemctl --user stop ${jobScopeSliceName("/srv/ws-a")}; fi'`);
+    expect(workerUnit).toContain(`cat "state/${jobScopeClaimMarkerName("/srv/ws-a")}"`);
+    expect(workerUnit).toContain('"$$INVOCATION_ID"');
+    const webhookUnit = renderSystemdUnit({
+      execPath: "/usr/bin/devintern",
+      projectDir: "/srv/ws-a",
+      listen: true,
+    });
+    expect(webhookUnit).toContain(
+      `systemctl --user stop ${jobScopeSliceName("/srv/ws-a", "webhook")}; fi'`,
+    );
+    expect(webhookUnit).toContain(`cat "state/${jobScopeClaimMarkerName("/srv/ws-a", "webhook")}"`);
+  });
+
+  test("ExecStopPost stops the slice only for the invocation that claimed it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "devintern-job-slice-claim-"));
+    const binDir = join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const logPath = join(dir, "systemctl.log");
+    writeFileSync(
+      join(binDir, "systemctl"),
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "${logPath}"
+`,
+      { mode: 0o755 },
+    );
+    const workspaceDir = join(dir, "workspace");
+    mkdirSync(workspaceDir);
+    const unit = renderSystemdUnit({ execPath: "/usr/bin/devintern", projectDir: workspaceDir });
+    const line = unit.split("\n").find((entry) => entry.startsWith("ExecStopPost="));
+    expect(line).toBeString();
+    // systemd turns `$$` into a literal `$` before the shell runs the command.
+    const command = (line ?? "").replace(/^ExecStopPost=-?/, "").replace(/\$\$/g, "$");
+    const slice = jobScopeSliceName(workspaceDir);
+    const baseEnv = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` };
+    const stopCalls = () =>
+      existsSync(logPath)
+        ? readFileSync(logPath, "utf8")
+            .split("\n")
+            .filter((entry) => entry.includes("--user stop"))
+        : [];
+    const run = (invocation: string | undefined) =>
+      spawnSync("/bin/sh", ["-c", command], {
+        encoding: "utf8",
+        cwd: workspaceDir,
+        env: invocation === undefined ? baseEnv : { ...baseEnv, INVOCATION_ID: invocation },
+      });
+    try {
+      // Start failed before the worker claimed the slice (another worker holds
+      // the lock): the stale/absent marker must not stop that worker's jobs.
+      expect(run("unit-invocation-1").status).toBe(0);
+      expect(stopCalls()).toEqual([]);
+
+      // A manual worker claimed the slice: it removes the old invocation's
+      // marker, so the unit's deferred stop still must not run.
+      expect(recordJobScopeClaim(workspaceDir, { INVOCATION_ID: "unit-invocation-1" })).toBe(true);
+      expect(recordJobScopeClaim(workspaceDir, {})).toBe(false);
+      expect(existsSync(jobScopeClaimMarkerPath(workspaceDir))).toBe(false);
+      expect(run("unit-invocation-1").status).toBe(0);
+      expect(stopCalls()).toEqual([]);
+
+      // The unit's own worker claimed it: its ExecStopPost stops the slice.
+      expect(recordJobScopeClaim(workspaceDir, { INVOCATION_ID: "unit-invocation-1" })).toBe(true);
+      expect(run("unit-invocation-2").status).toBe(0);
+      expect(stopCalls()).toEqual([]);
+      expect(run("unit-invocation-1").status).toBe(0);
+      expect(stopCalls()).toEqual([`--user stop ${slice}`]);
+    } finally {
+      releaseJobScopeSliceForTests();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("rewrites the shim and launcher after a temp cleaner deletes them", () => {
@@ -340,20 +456,24 @@ describe("jobMemorySpawn", () => {
     }
   });
 
-  test("stops leftover job scopes in the workspace slice only when it is active", async () => {
+  test("stops leftover job scopes only when the slice still holds a live scope", async () => {
     const dir = mkdtempSync(join(tmpdir(), "devintern-job-memory-leftover-"));
     const binDir = join(dir, "bin");
     mkdirSync(binDir);
     const logPath = join(dir, "systemctl.log");
-    // Fake systemctl: log the call; is-active succeeds only when FAKE_ACTIVE=1.
+    // Fake systemctl: log the call. is-active follows FAKE_ACTIVE; the slice is
+    // only "live" when FAKE_SCOPES=1, matching whether a scope is reported in
+    // FAKE_SLICE (the startup probe leaves an active but empty slice behind).
     writeFileSync(
       join(binDir, "systemctl"),
       `#!/bin/sh
 printf '%s\\n' "$*" >> "${logPath}"
 case "$*" in
-  *is-active*) [ "$FAKE_ACTIVE" = "1" ] ;;
-  *) exit 0 ;;
+  *is-active*) [ "$FAKE_ACTIVE" = "1" ] || exit 1 ;;
+  *list-units*) [ "$FAKE_SCOPES" = "1" ] && printf '%s\\n' "run-test.scope loaded active running probe" ;;
+  *show*) [ "$FAKE_SCOPES" = "1" ] && printf 'Slice=%s\\n' "$FAKE_SLICE" ;;
 esac
+exit 0
 `,
       { mode: 0o755 },
     );
@@ -363,12 +483,25 @@ esac
       PATH: `${binDir}:${process.env.PATH ?? ""}`,
       DEVINTERN_WORKSPACE_DIR: workspaceDir,
       XDG_RUNTIME_DIR: dir,
+      FAKE_SLICE: slice,
     };
+    const calls = () => readFileSync(logPath, "utf8").trim().split("\n");
     try {
       expect(await stopLeftoverJobScopes({ ...base, FAKE_ACTIVE: "0" })).toBe(false);
-      expect(readFileSync(logPath, "utf8")).toBe(`--user is-active --quiet ${slice}\n`);
-      expect(await stopLeftoverJobScopes({ ...base, FAKE_ACTIVE: "1" })).toBe(true);
-      expect(readFileSync(logPath, "utf8").trim().split("\n").at(-1)).toBe(`--user stop ${slice}`);
+      expect(calls()).toEqual([`--user is-active --quiet ${slice}`]);
+
+      // The startup probe created the slice, but it holds no scope: stopping it
+      // on every clean start logged a false leftover warning.
+      expect(await stopLeftoverJobScopes({ ...base, FAKE_ACTIVE: "1", FAKE_SCOPES: "0" })).toBe(
+        false,
+      );
+      expect(calls().at(-1)).toContain("--user list-units");
+      expect(calls().some((call) => call.includes("--user stop"))).toBe(false);
+
+      expect(await stopLeftoverJobScopes({ ...base, FAKE_ACTIVE: "1", FAKE_SCOPES: "1" })).toBe(
+        true,
+      );
+      expect(calls().at(-1)).toBe(`--user stop ${slice}`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -385,6 +518,10 @@ esac
     writeFileSync(
       join(binDir, "systemd-run"),
       `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "systemd 252"
+  exit 0
+fi
 printf '%s\\n' "$*" >> "${logPath}"
 for arg in "$@"; do
   [ "$arg" = "--" ] && break
@@ -447,19 +584,31 @@ exec "$@"
     }
   });
 
-  test("does not report a SIGTERM drain as a memory-limit hit", () => {
+  test("only the shim marker reports a memory-limit hit, not the exit status", () => {
     const plan = {
       mechanism: "systemd-scope" as const,
       limit: { maxBytes: 512 * 1024 ** 2, label: "512 MB" },
     };
-    // A service-manager/drain SIGTERM reaches the child as exit 143. Only the
-    // OOM shim marker or a SIGKILL (137/null) can prove an OOM.
+    // A service-manager/drain SIGTERM reaches the child as exit 143.
     expect(jobMemorySpawn("/bin/echo", ["drain"], {}, plan).onClose(143)).toEqual({
       exceeded: false,
     });
+    // A bare SIGKILL (operator `kill -9`, manager SIGKILL, drain) is not proof
+    // of hitting the cap: it must not rewrite a real failure as a memory hit.
     expect(jobMemorySpawn("/bin/echo", ["killed"], {}, plan).onClose(137)).toEqual({
-      exceeded: true,
-      label: "512 MB",
+      exceeded: false,
+      possibleKill: true,
+    });
+    expect(jobMemorySpawn("/bin/echo", ["lost"], {}, plan).onClose(null)).toEqual({
+      exceeded: false,
+      possibleKill: true,
+    });
+    // The shim's marker (written from the scope's `oom_kill` counter) is proof.
+    const marked = jobMemorySpawn("/bin/echo", ["oom"], {}, plan);
+    writeFileSync(marked.env[JOB_MEMORY_MARKER_ENV] ?? "", "1\n");
+    expect(marked.onClose(1)).toEqual({ exceeded: true, label: "512 MB" });
+    expect(jobMemorySpawn("/bin/echo", ["oom-ok"], {}, plan).onClose(0)).toEqual({
+      exceeded: false,
     });
   });
 
@@ -495,6 +644,26 @@ exit 1
       expect(run.status).toBe(0);
       // No cap was applied, so a zero exit is not reported as a memory hit.
       expect(spec.onClose(0)).toEqual({ exceeded: false });
+
+      // The unwrapped rerun must not inherit the scope markers: the child would
+      // otherwise read the launcher's own cgroup and blame an unrelated OOM on
+      // a cap that was never applied.
+      const unwrapped = jobMemorySpawn(
+        "/bin/sh",
+        ["-c", 'printf "%s" "${DEVINTERN_JOB_MEMORY_LIMIT_LABEL-unset}"'],
+        { PATH: `${binDir}:${process.env.PATH ?? ""}` },
+        {
+          mechanism: "systemd-scope",
+          limit: { maxBytes: 512 * 1024 ** 2, label: "512 MB" },
+        },
+      );
+      const clean = spawnSync(unwrapped.command, unwrapped.args, {
+        encoding: "utf8",
+        env: unwrapped.env,
+        timeout: 30_000,
+      });
+      expect(clean.stdout).toBe("unset");
+      expect(unwrapped.onClose(0)).toEqual({ exceeded: false });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -602,6 +771,228 @@ try {
   });
 });
 
+describe("systemd scope probe", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    resetJobMemorySupportForTests();
+    releaseJobScopeSliceForTests();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A workspace whose configured cap is 1 GB, plus an empty fake-binary directory. */
+  function hostWith(): {
+    dir: string;
+    binDir: string;
+    workspaceDir: string;
+    logPath: string;
+    env: Record<string, string | undefined>;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "devintern-job-memory-probe-"));
+    dirs.push(dir);
+    const binDir = join(dir, "bin");
+    mkdirSync(binDir);
+    const logPath = join(dir, "systemd-run.log");
+    const workspaceDir = join(dir, "workspace");
+    mkdirSync(workspaceDir);
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]\ntracker = "markdown"\njob_memory_max = "1GB"\n[[repos]]\nname = "local"\nremote = "git@github.com:acme/local.git"\n`,
+    );
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      DEVINTERN_WORKSPACE_DIR: workspaceDir,
+      XDG_RUNTIME_DIR: dir,
+    };
+    // The test runner pins the override; this test reads workspace.toml.
+    delete env.DEVINTERN_JOB_MEMORY_MAX;
+    return { dir, binDir, workspaceDir, logPath, env };
+  }
+
+  test("systemd < 236: probe rejects --collect, so no job starts a failing scope", async () => {
+    // Stand-in for systemd < 236: the bare MemoryMax probe succeeds, but the
+    // real job argv (which always adds --collect) is rejected.
+    const { binDir, logPath, env } = hostWith();
+    writeFileSync(
+      join(binDir, "systemd-run"),
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "${logPath}"
+for arg in "$@"; do
+  [ "$arg" = "--" ] && break
+  if [ "$arg" = "--collect" ]; then
+    echo "systemd-run: unrecognized option '--collect'" >&2
+    exit 1
+  fi
+done
+while [ "$1" != "--" ]; do shift; done
+shift
+exec "$@"
+`,
+      { mode: 0o755 },
+    );
+    resetJobMemorySupportForTests();
+    const plan = await resolveJobMemoryPlanForStartup(env);
+    expect(plan.mechanism).toBe("none");
+    expect(plan.reason).toContain("systemd-run");
+
+    // The spawn path trusts the cached result: the job runs unwrapped instead
+    // of starting a scope the launcher would then rerun (the old loop).
+    const spec = jobMemorySpawn("/bin/echo", ["old-systemd"], env);
+    expect(spec.limited).toBe(false);
+    expect(spec.systemdArgs).toBeUndefined();
+    const run = spawnSync(spec.command, spec.args, { encoding: "utf8", env: spec.env });
+    expect(run.stdout.trim()).toBe("old-systemd");
+    expect(run.status).toBe(0);
+
+    // The probe exercised the flag the host lacks rather than only MemoryMax.
+    expect(readFileSync(logPath, "utf8").split("\n")[0]).toContain("--collect");
+  });
+
+  test("probe includes a claimed job slice, so a rejected one disables the cap", async () => {
+    const { binDir, workspaceDir, logPath, env } = hostWith();
+    writeFileSync(
+      join(binDir, "systemd-run"),
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "${logPath}"
+for arg in "$@"; do
+  [ "$arg" = "--" ] && break
+  case "$arg" in
+    --slice=*) echo "systemd-run: cannot create slice" >&2; exit 1 ;;
+  esac
+done
+while [ "$1" != "--" ]; do shift; done
+shift
+exec "$@"
+`,
+      { mode: 0o755 },
+    );
+    claimJobScopeSlice(workspaceDir);
+    resetJobMemorySupportForTests();
+    const plan = await resolveJobMemoryPlanForStartup(env);
+    expect(plan.mechanism).toBe("none");
+    expect(plan.reason).toContain("systemd-run");
+    expect(readFileSync(logPath, "utf8")).toContain(`--slice=${jobScopeSliceName(workspaceDir)}`);
+  });
+
+  test("worker startup probes its job slice before the lock claims it", async () => {
+    const { binDir, workspaceDir, logPath, env } = hostWith();
+    writeFileSync(
+      join(binDir, "systemd-run"),
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "${logPath}"
+for arg in "$@"; do
+  [ "$arg" = "--" ] && break
+  case "$arg" in
+    --slice=*) echo "systemd-run: cannot create slice" >&2; exit 1 ;;
+  esac
+done
+while [ "$1" != "--" ]; do shift; done
+shift
+exec "$@"
+`,
+      { mode: 0o755 },
+    );
+    // The worker probes before `beforeAcquirersStart` claims the slice (the
+    // lock is not held yet), so the probe must name the slice explicitly.
+    // Before: it probed without a slice and cached "supported"; the first jobs
+    // then failed their scope and ran unwrapped.
+    releaseJobScopeSliceForTests();
+    resetJobMemorySupportForTests();
+    const plan = await resolveJobMemoryPlanForStartup(env, "worker");
+    expect(plan.mechanism).toBe("none");
+    expect(readFileSync(logPath, "utf8")).toContain(`--slice=${jobScopeSliceName(workspaceDir)}`);
+  });
+
+  test("a transient base probe failure still enables the cap", async () => {
+    const { dir, binDir, logPath, env } = hostWith();
+    const failuresPath = join(dir, "base-probe-failures");
+    // The base probe is the first scope invocation. Fail it once, then let the
+    // retry (and every optional probe) succeed: a single transient
+    // systemd-run failure must not cache "unsupported" for the whole window.
+    writeFileSync(
+      join(binDir, "systemd-run"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "systemd 258"
+  exit 0
+fi
+printf '%s\\n' "$*" >> "${logPath}"
+n=$(cat "${failuresPath}" 2>/dev/null || echo 0)
+if [ "$n" -lt 1 ]; then
+  echo $((n + 1)) > "${failuresPath}"
+  echo "systemd-run: transient failure" >&2
+  exit 1
+fi
+while [ "$1" != "--" ]; do shift; done
+shift
+exec "$@"
+`,
+      { mode: 0o755 },
+    );
+    resetJobMemorySupportForTests();
+    const plan = await resolveJobMemoryPlanForStartup(env);
+    expect(plan.mechanism).toBe("systemd-scope");
+    expect(plan.limit?.label).toBe("1 GB");
+    expect(readFileSync(failuresPath, "utf8").trim()).toBe("1");
+
+    // Before: the failed probe was cached as unsupported, so this was unwrapped.
+    const spec = jobMemorySpawn("/bin/echo", ["after-transient"], env);
+    expect(spec.limited).toBe(true);
+    expect(spec.systemdArgs).toContain("MemoryMax=1073741824");
+    expect(spec.onClose(0)).toEqual({ exceeded: false });
+  });
+
+  test("a transient expansion-flags probe failure keeps the flag on systemd 254+", async () => {
+    const { dir, binDir, logPath, env } = hostWith();
+    const failuresPath = join(dir, "expand-probe-failures");
+    // Stand-in for systemd 258: the first two scopes with
+    // --expand-environment=no fail transiently; the version probe still says
+    // the flag exists and the job scope after them succeeds.
+    writeFileSync(
+      join(binDir, "systemd-run"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "systemd 258"
+  exit 0
+fi
+printf '%s\\n' "$*" >> "${logPath}"
+case " $* " in
+  *" --expand-environment=no "*)
+    n=$(cat "${failuresPath}" 2>/dev/null || echo 0)
+    if [ "$n" -lt 2 ]; then
+      echo $((n + 1)) > "${failuresPath}"
+      echo "systemd-run: transient failure" >&2
+      exit 1
+    fi
+    ;;
+esac
+while [ "$1" != "--" ]; do shift; done
+shift
+exec "$@"
+`,
+      { mode: 0o755 },
+    );
+    resetJobMemorySupportForTests();
+    const plan = await resolveJobMemoryPlanForStartup(env);
+    expect(plan.mechanism).toBe("systemd-scope");
+    // Before: the failed probe was cached as "unsupported", so this was false
+    // for five minutes and systemd 258 expanded ${VAR} in the job argv.
+    expect(plan.noExpand).toBe(true);
+
+    const value = "literal ${HOME} $HOME $$";
+    const spec = jobMemorySpawn("/bin/echo", [value], env, plan);
+    expect(spec.systemdArgs).toContain("--expand-environment=no");
+    const run = spawnSync(spec.command, spec.args, {
+      encoding: "utf8",
+      env: spec.env,
+      timeout: 30_000,
+    });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(`${value}\n`);
+    expect(spec.onClose(0)).toEqual({ exceeded: false });
+  });
+});
+
 describe("job memory at a real call site", () => {
   const dirs: string[] = [];
   afterEach(() => {
@@ -666,6 +1057,113 @@ writeSync(fd, JSON.stringify({ outcome: "clean", message: \`label=\${label} mark
     const invocations = readFileSync(logPath, "utf8");
     expect(invocations).toContain("--scope");
     expect(invocations).toContain("MemoryMax=1073741824");
+  });
+
+  test("keeps capping jobs after the probe cache window expires", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "devintern-job-memory-stale-"));
+    dirs.push(dir);
+    const binDir = join(dir, "bin");
+    mkdirSync(binDir);
+    // Stand-in for systemd-run: the support probe only needs a zero exit.
+    writeFileSync(join(binDir, "systemd-run"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const env = {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      DEVINTERN_WORKSPACE_DIR: dir,
+      DEVINTERN_JOB_MEMORY_MAX: "1GB",
+    };
+    const realNow = Date.now;
+    let offset = 0;
+    const nowSpy = spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    resetJobMemorySupportForTests();
+    try {
+      const plan = await resolveJobMemoryPlanForStartup(env);
+      expect(plan.mechanism).toBe("systemd-scope");
+      expect(plan.limit?.label).toBe("1 GB");
+
+      // Every job after the 5-minute window used to spawn unwrapped: the stale
+      // entry was dropped before the background re-probe could replace it.
+      offset = 6 * 60_000;
+      const spec = jobMemorySpawn("/bin/echo", ["after-cache-window"], env);
+      expect(spec.limited).toBe(true);
+      expect(spec.limit?.label).toBe("1 GB");
+      expect(spec.systemdArgs).toContain("MemoryMax=1073741824");
+      expect(spec.onClose(0)).toEqual({ exceeded: false });
+    } finally {
+      // Let the background re-probe settle before the module cache is reset.
+      await primeJobMemorySupport(env);
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("removes resolver temp files when the job is aborted or times out", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "devintern-job-memory-resolve-cleanup-"));
+    dirs.push(dir);
+    const binDir = join(dir, "bin");
+    mkdirSync(binDir);
+    writeFileSync(
+      join(binDir, "systemd-run"),
+      `#!/bin/sh
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ "$#" -gt 0 ] && shift
+exec "$@"
+`,
+      { mode: 0o755 },
+    );
+    const workspaceDir = join(dir, "workspace");
+    mkdirSync(workspaceDir);
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]\ntracker = "markdown"\njob_memory_max = "1GB"\n[[repos]]\nname = "local"\nremote = "git@github.com:acme/local.git"\n`,
+    );
+    const fixture = join(dir, "hang.ts");
+    writeFileSync(
+      fixture,
+      `process.on("SIGTERM", () => process.exit(0));\nawait new Promise(() => {});\n`,
+    );
+    const env = {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      DEVINTERN_WORKSPACE_DIR: workspaceDir,
+      DEVINTERN_JOB_MEMORY_MAX: "1GB",
+    };
+    const plan = await resolveJobMemoryPlanForStartup(env);
+    expect(plan.mechanism).toBe("systemd-scope");
+
+    // The scoped spawn leaves `devintern-job-memory-<pid>-*` temp files; a
+    // close path that returns before `job.onClose` used to leak the spec file.
+    // Compare against a baseline because earlier tests in this process leave
+    // their own specs behind (they only inspect the spawn spec).
+    const leftovers = () =>
+      readdirSync(tmpdir()).filter((name) =>
+        name.startsWith(`devintern-job-memory-${process.pid}-`),
+      );
+    const newLeftovers = (before: Set<string>) => leftovers().filter((name) => !before.has(name));
+
+    let baseline = new Set(leftovers());
+    const controller = new AbortController();
+    const aborted = runResolveConflictsViaCli("acme/widgets", 2, {
+      entrypoint: fixture,
+      outputStdio: "ignore",
+      env,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 200);
+    expect(await aborted).toEqual({ outcome: "failed", message: "resolver cancelled" });
+    expect(newLeftovers(baseline)).toEqual([]);
+
+    baseline = new Set(leftovers());
+    const timedOut = await runResolveConflictsViaCli("acme/widgets", 3, {
+      entrypoint: fixture,
+      outputStdio: "ignore",
+      env,
+      timeoutMs: 200,
+    });
+    expect(timedOut).toEqual({
+      outcome: "failed",
+      message: "resolver timed out after 200ms",
+    });
+    expect(newLeftovers(baseline)).toEqual([]);
   });
 });
 

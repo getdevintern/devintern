@@ -4,7 +4,7 @@ sidebarLabel: "Advanced Settings"
 description: "Use when tuning DevIntern Code run limits, the auto-review loop, logging, telemetry, the output directory, prompt overrides, tracker status settings, or checking setup with devintern doctor."
 section: "Automation Reference"
 order: 0.3
-dateModified: 2026-11-27
+dateModified: 2026-11-28
 ---
 
 # Advanced Settings
@@ -32,7 +32,7 @@ Jobs the worker runs as subprocesses (`task`, `address-review`, `resolve-conflic
 
 ```toml
 [defaults]
-job_memory_max = "8GB"   # default: 50% of the memory budget, split across max_concurrency jobs
+job_memory_max = "8GB"   # default: 50% of the memory budget, split across max_concurrency jobs plus the webhook job
 ```
 
 | Value            | Effect                                                        |
@@ -43,13 +43,13 @@ job_memory_max = "8GB"   # default: 50% of the memory budget, split across max_c
 
 The cap covers the job's whole process tree: the job process, its agent, and any tests, builds, or servers the agent starts. Where the host supports it, swap is also disabled inside the job, so reaching the cap ends the job instead of letting it thrash. A job that hits the cap is recorded as `agent exceeded the job memory limit (8 GB)`. A run that exits successfully is kept successful even if a descendant was killed and the agent handled it. If the killed process is the job process itself, there is nothing left to record the reason and the run is recorded as interrupted or orphaned instead. Agents run under a Docker sandbox are outside this cgroup and follow that sandbox's own memory settings instead.
 
-The limit is per job, not a total for the worker. When `max_concurrency` is greater than 1, the default is divided by it so all jobs together stay near 50% of the budget. Set `job_memory_max = "off"` to keep the previous unlimited behavior.
+The limit is per job, not a total for the worker. The default divides 50% of the budget by `max_concurrency` plus one reserved slot for `webhook serve`, whose queue runs one subprocess job at a time, so a full worker and a concurrent webhook job together stay near 50%. Scheduled automations and estimations take a worker supervisor slot, so `max_concurrency` already counts them. Set `job_memory_max = "off"` to keep the previous unlimited behavior.
 
-The setting comes from `workspace.toml`, so manual runs and checkouts without a workspace config get no cap even though the default percentage applies to worker jobs. The worker logs the effective cap (or why it is disabled) at startup, and `devintern worker doctor` lists it. Existing workspaces get the default cap after upgrading: 50% of the memory budget divided by `max_concurrency` (for example 2 GB per job on a 16 GB host with `max_concurrency = 4`). If builds or test suites that used to pass start failing on the limit, raise `job_memory_max` or set it to `"off"` to keep the previous unlimited behavior.
+The setting comes from `workspace.toml`, so manual runs and checkouts without a workspace config get no cap even though the default percentage applies to worker jobs. The worker logs the effective cap (or why it is disabled) at startup, and `devintern worker doctor` lists it. Existing workspaces get the default cap after upgrading: 50% of the memory budget divided by `max_concurrency` plus the reserved webhook slot (for example 1.6 GB per job on a 16 GB host with `max_concurrency = 4`). If builds or test suites that used to pass start failing on the limit, raise `job_memory_max` or set it to `"off"` to keep the previous unlimited behavior.
 
-Review agents that `devintern webhook serve` runs in-process are not subprocess jobs, so they run in the server's own cgroup and are not covered by this cap.
+Review agents that `devintern webhook serve` runs in-process are not subprocess jobs, so they run in the server's own cgroup and are not covered by this cap. CI-fix, conflict-resolution, and auto-merge jobs the server starts are subprocess jobs and are capped like worker jobs; they run in a `devintern-webhook-jobs-*` slice that the server stops when it exits (including on `systemctl stop`, which sends SIGTERM). A server killed with SIGKILL (for example by systemd-oomd) cannot run that cleanup, so add `ExecStopPost=-systemctl --user stop <slice>` to a hand-written unit; `systemctl --user list-units 'devintern-webhook-jobs-*' --all` shows the slice name.
 
-This needs Linux with a running systemd user manager (`systemd-run --user --scope`). On macOS, in containers without systemd, and on hosts without a user manager, jobs run without the limit; DevIntern re-checks the manager while the worker runs, so one that disappears falls back to unlimited jobs instead of failing them. If the manager cannot start a job's scope at spawn time, that job runs unwrapped for the attempt and the next job re-checks the manager instead of failing until the cache expires. Hosts whose systemd cannot disable swap get a RAM-only cap instead of no cap. Any systemd release with a user manager works, including Debian 12 and RHEL 9 (systemd 252). `devintern worker service install` writes `OOMPolicy=stop` on the unit, so a unit-level OOM stops the service cleanly rather than killing an unrelated process; the daemon itself is not capped, so it is the last thing to be killed. Stopping or restarting the worker lets in-flight jobs drain; jobs still running after the grace period are stopped. If the worker is killed or crashes, its leftover jobs are stopped when the service stops and again when the worker next starts.
+This needs Linux with a running systemd user manager (`systemd-run --user --scope`). On macOS, in containers without systemd, and on hosts without a user manager, jobs run without the limit; DevIntern re-checks the manager while the worker runs, so one that disappears falls back to unlimited jobs instead of failing them. The check runs the same flags and shim a job does, so a host that cannot start a job scope is detected up front; if the manager still fails a scope at spawn time, that job runs unwrapped for the attempt and the next job re-checks the manager instead of failing until the cache expires. Hosts whose systemd cannot disable swap get a RAM-only cap instead of no cap. The job scope uses `systemd-run --collect`, which needs systemd 236 or newer; Debian 12 and RHEL 9 (systemd 252) work, while older releases run jobs without the limit. `devintern worker service install` writes `OOMPolicy=stop` on the unit, so a unit-level OOM stops the service cleanly rather than killing an unrelated process; the daemon itself is not capped, so it is the last thing to be killed. Stopping or restarting the worker lets in-flight jobs drain; jobs still running after the grace period are stopped. If the worker is killed or crashes, its leftover jobs are stopped when the service stops and again when the worker next starts.
 
 In a container, percentages and the default resolve against the smaller of physical RAM and the container's cgroup memory limit, so a job cannot exceed the container's cap.
 

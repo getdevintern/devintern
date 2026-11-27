@@ -133,6 +133,12 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
     : undefined;
   const { warnIgnoredProjectAutomations } = await import("../automation/config");
   warnIgnoredProjectAutomations();
+  // Prime the job-memory probe before the first `--force` retry can spawn: the
+  // spawn path never blocks, so without this the first retry runs uncapped.
+  // `spawnCliForceRetry` resolves the same `process.env`.
+  const { describeJobMemoryPlan, resolveJobMemoryPlanForStartup } =
+    await import("../worker/job-memory");
+  console.log(`🧠 ${describeJobMemoryPlan(await resolveJobMemoryPlanForStartup(process.env))}`);
   let server: ReturnType<typeof startDashboardServer>;
   try {
     server = startDashboardServer({

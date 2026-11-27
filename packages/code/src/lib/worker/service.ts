@@ -33,7 +33,7 @@ import {
 } from "fs";
 import { homedir as osHomedir, userInfo } from "os";
 import { dirname, join, resolve } from "path";
-import { jobScopeSliceName } from "./job-scope-slice";
+import { jobScopeClaimMarkerName, jobScopeSliceName } from "./job-scope-slice";
 import { WORKER_CONFIG_EXIT_CODE } from "./startup";
 
 export type RunCommandResult = {
@@ -314,7 +314,11 @@ export function commandDetail(result: RunCommandResult): string {
  * remaining jobs itself after the drain grace period. They live in a
  * per-workspace slice instead, which `ExecStopPost=` stops once the daemon has
  * exited (after the drain, or after a crash or SIGKILL), so no job outlives
- * its worker. The `-` prefix ignores a slice that was never started.
+ * its worker. The slice is per surface (worker vs. webhook server), so one
+ * surface's stop never kills the other's jobs. `ExecStopPost=` only stops it
+ * when the slice claim marker names this unit invocation, so a start that
+ * fails before claiming the slice cannot kill another worker's jobs. The `-`
+ * prefix ignores a slice that was never started.
  *
  * @param options - Binary path, working directory, and whether to run the direct webhook service
  */
@@ -341,6 +345,18 @@ export function renderSystemdUnit(options: {
       ? `Environment=${quote(`DEVINTERN_WORKSPACE_DIR=${options.workspaceDirEnv}`)}\n`
       : "") +
     "Environment=DEVINTERN_SERVICE=1\n";
+  const surface = options.listen ? "webhook" : "worker";
+  const jobSlice = jobScopeSliceName(options.projectDir, surface);
+  // `ExecStopPost=` also runs when the unit fails before the worker claims the
+  // slice (another worker holds the lock, a config error), so stop only when
+  // the marker still names this unit invocation. systemd rewrites `$$` to `$`
+  // and exports INVOCATION_ID to every unit process, including this one.
+  const claimMarker = join("state", jobScopeClaimMarkerName(options.projectDir, surface));
+  const stopJobSlice =
+    `-/bin/sh -c '` +
+    `if [ -n "$$INVOCATION_ID" ] && ` +
+    `[ "$$(cat "${claimMarker}" 2>/dev/null)" = "$$INVOCATION_ID" ]; then ` +
+    `systemctl --user stop ${jobSlice}; fi'`;
   return `# ${SERVICE_MANAGED_MARKER}
 [Unit]
 Description=devintern ${options.listen ? "webhook server" : "worker"} (${options.projectDir})
@@ -356,7 +372,7 @@ RestartSec=30
 RestartPreventExitStatus=${WORKER_CONFIG_EXIT_CODE}
 KillMode=mixed
 TimeoutStopSec=120
-ExecStopPost=-systemctl --user stop ${jobScopeSliceName(options.projectDir)}
+ExecStopPost=${stopJobSlice}
 MemoryAccounting=yes
 OOMPolicy=stop
 

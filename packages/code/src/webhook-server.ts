@@ -15,6 +15,10 @@ import { captureError, flushErrorTracking } from "@devintern/utils";
 import { GitHubReviewsClient } from "./lib/code-host/github/reviews";
 import { LEGACY_DB_PATH, WebhookQueue, resolveQueueDbPath } from "./lib/state/webhook-queue";
 import { startWorkerFailover } from "./lib/worker/failover";
+import { describeJobMemoryPlan, resolveJobMemoryPlanForStartup } from "./lib/worker/job-memory";
+import { recordJobScopeClaim, stopWebhookJobScopesSync } from "./lib/worker/job-scope-cleanup";
+import { claimJobScopeSlice } from "./lib/worker/job-scope-slice";
+import { resolveWorkspaceDir } from "./lib/workspace/paths";
 import { resolveAutoReviewIterationsIfEnabled } from "./lib/review/auto-review-config";
 import {
   handlePingEvent,
@@ -331,6 +335,8 @@ async function handleIssueComment(
   });
 }
 
+let webhookSliceExitHandlerInstalled = false;
+
 /**
  * Start the code-host webhook HTTP server and recover pending queue events.
  *
@@ -375,6 +381,28 @@ export async function startWebhookServer(
     console.error("   Generate a secret with: openssl rand -hex 32");
     process.exit(1);
   }
+
+  // CI-fix jobs this server spawns run in transient systemd scopes. Claim a
+  // webhook-specific slice for them and stop it when the process exits: a
+  // stopped server (hand-written unit, Ctrl+C, or `systemctl stop`) must not
+  // leave an agent running unsupervised. The worker owns a different slice,
+  // so starting or stopping either surface never kills the other's jobs.
+  claimJobScopeSlice(resolveWorkspaceDir(), "webhook");
+  // Authorize the rendered unit's ExecStopPost for this invocation only.
+  recordJobScopeClaim(resolveWorkspaceDir(), process.env, "webhook");
+  if (!webhookSliceExitHandlerInstalled) {
+    webhookSliceExitHandlerInstalled = true;
+    process.once("exit", () => {
+      stopWebhookJobScopesSync();
+    });
+  }
+
+  // Prime the job-memory probe before the queue can spawn the first job
+  // (recovery, CI-fix, auto-merge, resolve-conflicts). The spawn path never
+  // blocks on the probe, so without this the first job after a fresh start
+  // would run uncapped. Probe the webhook slice this process just claimed.
+  const jobMemoryPlan = await resolveJobMemoryPlanForStartup(process.env, "webhook");
+  console.log(`🧠 ${describeJobMemoryPlan(jobMemoryPlan)}`);
 
   // Initialize persistent webhook queue
   const dbPath = resolveQueueDbPath();

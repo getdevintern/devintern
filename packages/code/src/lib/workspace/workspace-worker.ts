@@ -924,8 +924,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   assertWorkerHasRepos(config, configPath);
 
   const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
-  // Probe job-memory support off the event loop; log the cap before any job.
-  const jobMemoryPlan = await resolveJobMemoryPlanForStartup(process.env);
+  // Probe off the event loop, including the slice claimed after the lock; log the cap before any job.
+  const jobMemoryPlan = await resolveJobMemoryPlanForStartup(process.env, "worker");
   console.log(`🧠 ${describeJobMemoryPlan(jobMemoryPlan)}`);
   const initialFleetAutomations = resolveFleetAutomations(config);
   if (initialFleetAutomations.problems.length > 0) {

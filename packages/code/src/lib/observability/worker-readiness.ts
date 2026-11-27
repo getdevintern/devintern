@@ -937,10 +937,16 @@ export async function collectWorkerDoctorChecks(
   // 6a. Job memory limit: show the effective cap (or why there is none), so a
   // configured `job_memory_max` that silently resolves to no cap is visible.
   try {
-    const plan = await resolveJobMemoryPlanForStartup({
-      ...workspaceEnv,
-      DEVINTERN_WORKSPACE_DIR: workspaceDir,
-    });
+    const plan = await resolveJobMemoryPlanForStartup(
+      {
+        ...workspaceEnv,
+        DEVINTERN_WORKSPACE_DIR: workspaceDir,
+      },
+      // Probe the slice the worker claims at startup, not a plain scope: a
+      // host that accepts one but rejects the slice must report "disabled"
+      // here too, the way worker startup does.
+      "worker",
+    );
     checks.push({
       id: "job-memory",
       label: "Job memory limit",

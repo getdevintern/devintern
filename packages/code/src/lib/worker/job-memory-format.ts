@@ -103,8 +103,9 @@ export function parseJobMemoryMax(
  * @param value - Raw setting; `undefined` means the default fraction.
  * @param totalBytes - Memory budget used to resolve the default and percentages.
  * @param defaultFraction - Fraction used when the key is absent (the worker
- *   divides {@link DEFAULT_JOB_MEMORY_FRACTION} by `max_concurrency` so the
- *   whole fleet, not one job, stays near the default budget).
+ *   divides {@link DEFAULT_JOB_MEMORY_FRACTION} by its job slots plus the
+ *   webhook surface's slot, so the whole fleet, not one job, stays near the
+ *   default budget).
  * @returns The resolved limit, or null when explicitly turned off.
  */
 export function resolveJobMemoryMax(
