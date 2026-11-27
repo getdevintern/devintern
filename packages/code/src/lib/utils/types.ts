@@ -119,7 +119,7 @@ export interface UtilsSurface {
     cwd?: string;
     expectedBranch?: string;
     expectedRemoteSha?: string;
-    leaseRemoteSha?: string;
+    lease?: { branch: string; sha: string };
   }): Promise<{
     success: boolean;
     message: string;

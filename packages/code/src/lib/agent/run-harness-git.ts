@@ -10,6 +10,7 @@ import { parseGitHubPrUrl, recordAgentPrFromUrl } from "../state/worker-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import type { Task } from "../../types/task-tracker";
 import { Utils } from "../utils";
+import { findRemoteRefSha } from "../utils/git-commit-push";
 import { runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { logHookErrorToFile } from "./plan";
 import type { VerifyConfig } from "./verify";
@@ -54,11 +55,18 @@ export interface FinalizeContext {
    */
   headBeforeRun?: string;
   /**
+   * Branch checked out before the implementation agent started. Publish
+   * refuses to push when `HEAD` has since moved to another branch, which is
+   * the state a stray branch left behind by a misbehaving test produces.
+   * Captured locally so the guard works even when the remote probe fails.
+   */
+  startedBranch?: string;
+  /**
    * `origin/<branch>` captured before the implementation agent started, when
    * the run resumed a branch DevIntern had already published. Publish may
-   * rewrite that commit with a lease if the agent rebased or amended it.
+   * rewrite that branch with a lease if the agent rebased or amended it.
    */
-  remoteShaBeforeRun?: string;
+  publishedBeforeRun?: { branch: string; sha: string };
   prTargetBranchExplicit: boolean;
   requestedPrTargetBranch?: string;
   verify?: VerifyConfig;
@@ -92,39 +100,45 @@ export async function readHeadCommit(): Promise<string | undefined> {
 }
 
 /**
- * Read the commit `origin/<current branch>` points at, when this branch is
- * already published and the run's starting HEAD contains it. A resumed run
- * starts from this commit; publish may rewrite it with a lease if the agent
- * rebases or amends it.
+ * Read the branch and commit `origin/<current branch>` points at, when this
+ * branch is already published and the run's starting HEAD contains it. A
+ * resumed run starts from this commit and branch; publish may rewrite that
+ * branch with a lease if the agent rebases or amends it.
  *
- * A fresh branch has no remote-tracking ref, so the network probe is skipped.
- * When origin has commits HEAD lacks, `undefined` is returned too: publishing
- * must report divergence instead of overwriting work the run did not start
- * from.
+ * Only `feature/` branches can use the lease, so other branches are not even
+ * probed. A fresh branch has no remote-tracking ref, so the network probe is
+ * skipped too. When origin has commits HEAD lacks, `undefined` is returned:
+ * publishing must report divergence instead of overwriting work the run did
+ * not start from.
  *
  * @param options - Optional git working directory
- * @returns The published commit SHA, or `undefined` when it cannot be used
+ * @returns The published branch and commit SHA, or `undefined` when they
+ *   cannot be used
  */
-export async function readPublishedBranchSha(options?: {
+export async function readPublishedBranch(options?: {
   cwd?: string;
-}): Promise<string | undefined> {
+}): Promise<{ branch: string; sha: string } | undefined> {
   const cwd = options?.cwd;
   const branch = await Utils.getCurrentBranch(cwd);
-  if (!branch) return undefined;
+  if (!branch || !branch.startsWith("feature/")) return undefined;
   if (!(await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd }))) return undefined;
 
   const remote = await Utils.executeGitCommand(
     ["ls-remote", "--heads", "origin", `refs/heads/${branch}`],
-    { cwd, env: { GIT_TERMINAL_PROMPT: "0" } },
+    {
+      cwd,
+      timeoutMs: 5000,
+      env: { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never" },
+    },
   );
   if (!remote.success) return undefined;
-  const sha = remote.output.trim().split(/\s+/, 1)[0];
+  const sha = findRemoteRefSha(remote.output, `refs/heads/${branch}`);
   if (!sha) return undefined;
 
   const ancestor = await Utils.executeGitCommand(["merge-base", "--is-ancestor", sha, "HEAD"], {
     cwd,
   });
-  return ancestor.success ? sha : undefined;
+  return ancestor.success ? { branch, sha } : undefined;
 }
 
 /**
@@ -157,6 +171,20 @@ export function createGitHelpers(ctx: FinalizeContext) {
     requestedPrTargetBranch,
     projectSettings,
   } = ctx;
+  const publishTarget = () => ({
+    // A resumed run may have rewritten the commit it started from; the
+    // hook-fix verification dry-run and the publish push must both use the
+    // same lease so that branch is accepted instead of rejected as
+    // non-fast-forward. `expectedBranch` makes a branch switch fail loudly
+    // instead of publishing a stray branch. It comes from the branch this run
+    // started on, not from the remote probe: the probe returns nothing when
+    // `ls-remote` times out or origin moved, and the guard must still hold.
+    expectedBranch:
+      ctx.startedBranch && ctx.startedBranch.startsWith("feature/")
+        ? ctx.startedBranch
+        : ctx.publishedBeforeRun?.branch,
+    lease: ctx.publishedBeforeRun,
+  });
   const validatePrePushHook = async (phase: string) => {
     let attempt = 0;
     while (attempt <= hookRetries) {
@@ -176,7 +204,11 @@ export function createGitHelpers(ctx: FinalizeContext) {
         console.log(
           `\n⚠️  Pre-push hook failed during ${phase} (attempt ${attempt}/${hookRetries + 1})`,
         );
-        const fixed = await runAgentHarnessToFixGitHook("push", harness, executablePath, maxTurns);
+        const target = publishTarget();
+        const fixed = await runAgentHarnessToFixGitHook("push", harness, executablePath, maxTurns, {
+          expectedBranch: target.expectedBranch,
+          lease: target.lease,
+        });
         logHookErrorToFile(
           taskKey ?? "unknown",
           "push-local-validation",
@@ -214,9 +246,7 @@ export function createGitHelpers(ctx: FinalizeContext) {
       attempt++;
       const pushResult = await Utils.pushCurrentBranch({
         verbose: runContext.options.verbose,
-        // A resumed run may have rewritten the commit it started from; publish
-        // rewrites it with a lease only while origin still points at that SHA.
-        leaseRemoteSha: ctx.remoteShaBeforeRun,
+        ...publishTarget(),
       });
       if (pushResult.success) {
         console.log(`✅ ${pushResult.message}`);
@@ -226,7 +256,11 @@ export function createGitHelpers(ctx: FinalizeContext) {
         console.log(
           `\n⚠️  Git pre-push hook failed during push (attempt ${attempt}/${hookRetries + 1})`,
         );
-        const fixed = await runAgentHarnessToFixGitHook("push", harness, executablePath, maxTurns);
+        const target = publishTarget();
+        const fixed = await runAgentHarnessToFixGitHook("push", harness, executablePath, maxTurns, {
+          expectedBranch: target.expectedBranch,
+          lease: target.lease,
+        });
         logHookErrorToFile(taskKey ?? "unknown", "push", attempt, pushResult.hookError, fixed);
         if (fixed) {
           console.log(

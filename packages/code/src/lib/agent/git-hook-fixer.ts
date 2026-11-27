@@ -18,6 +18,7 @@ import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { Utils } from "../utils";
+import { headOnlyRemovesPublishedCommit } from "../utils/git-commit-push";
 import { hasUncommittedWork, stageWorkTreeChanges } from "../utils/git-stage";
 import { resolveOutputDir } from "../config/output-dir";
 
@@ -41,6 +42,31 @@ export type PushHookFixVerification = {
   message: string;
 };
 
+/** A published branch and the commit a resumed run started from. */
+export type PushFixLease = { branch: string; sha: string };
+
+/**
+ * The lease whose publish would only delete published commits, if any.
+ *
+ * A reset back to an earlier commit is not a hook-fixable rewrite. Checked
+ * before staging/amending leftover changes, which would otherwise mask HEAD
+ * being behind the published commit.
+ *
+ * @param targetBranch - Branch being published
+ * @param lease - Branch and commit the run started from, when it resumed one
+ * @param cwd - Optional git working directory
+ * @returns The lease when HEAD only rewinds it, otherwise `undefined`
+ */
+async function findPublishedRewind(
+  targetBranch: string | undefined,
+  lease: PushFixLease | undefined,
+  cwd?: string,
+): Promise<PushFixLease | undefined> {
+  if (!targetBranch || lease?.branch !== targetBranch) return undefined;
+  if (!targetBranch.startsWith("feature/")) return undefined;
+  return (await headOnlyRemovesPublishedCommit(lease.sha, cwd)) ? lease : undefined;
+}
+
 /**
  * Verify a pre-push hook-fix without assuming a failed dry-run means "didn't amend".
  *
@@ -48,11 +74,19 @@ export type PushHookFixVerification = {
  * dry-run re-executes the full pre-push suite and can flake after the agent
  * already published the branch, which previously aborted PR creation.
  *
- * @param options - Working directory and expected branch
+ * @param options - Working directory, expected branch, and (for a resumed run)
+ *   the branch/commit the run started from
  */
 export async function verifyPushHookFix(options?: {
   cwd?: string;
   expectedBranch?: string;
+  /**
+   * Branch and commit this run started from, when it resumed a published
+   * branch. Publish rewrites a branch the agent rebased/amended with an
+   * explicit lease, so the verification dry-run must probe with the same
+   * lease; a plain dry-run is rejected as non-fast-forward and aborts publish.
+   */
+  lease?: PushFixLease;
 }): Promise<PushHookFixVerification> {
   const cwd = options?.cwd;
   const currentBranch = await Utils.getCurrentBranch(cwd);
@@ -68,6 +102,19 @@ export async function verifyPushHookFix(options?: {
 
   const targetBranch = options?.expectedBranch ?? currentBranch ?? undefined;
   let amended = false;
+
+  // A reset back to an earlier commit is not a hook-fixable rewrite: the
+  // lease publish would delete published commits. Mirrors the guard in the
+  // lease push itself.
+  const rewound = await findPublishedRewind(targetBranch, options?.lease, cwd);
+  if (rewound) {
+    return {
+      success: false,
+      alreadyOnRemote: false,
+      amended: false,
+      message: `HEAD is behind the published commit ${rewound.sha.slice(0, 7)}; publishing under the lease would delete commits origin already has`,
+    };
+  }
 
   const workDir = cwd ?? process.cwd();
   if (hasUncommittedWork(workDir).dirty) {
@@ -106,9 +153,40 @@ export async function verifyPushHookFix(options?: {
     };
   }
 
-  const pushDryRunArgs = targetBranch
-    ? ["push", "origin", `HEAD:refs/heads/${targetBranch}`, "--dry-run"]
-    : ["push", "origin", "HEAD", "--dry-run"];
+  // The lease rewrite in `pushCurrentBranch` rewrites `origin/<branch>` only
+  // when HEAD no longer contains the recorded commit (the agent rebased or
+  // amended the resumed branch). Mirror that decision here: a plain dry-run
+  // would be rejected as non-fast-forward on a rewritten branch, so the fix
+  // would be reported as failed and publish would never reach its lease push.
+  let rewrittenLease: PushFixLease | undefined;
+  if (
+    targetBranch &&
+    options?.lease?.branch === targetBranch &&
+    targetBranch.startsWith("feature/")
+  ) {
+    const ancestor = await Utils.executeGitCommand(
+      ["merge-base", "--is-ancestor", options.lease.sha, "HEAD"],
+      { cwd },
+    );
+    if (!ancestor.success) rewrittenLease = options.lease;
+  }
+
+  let pushDryRunArgs: string[];
+  if (!targetBranch) {
+    pushDryRunArgs = ["push", "origin", "HEAD", "--dry-run"];
+  } else if (rewrittenLease) {
+    // The explicit lease value makes Git reject the probe when origin moved
+    // past the recorded commit, exactly like the real lease push would.
+    pushDryRunArgs = [
+      "push",
+      `--force-with-lease=refs/heads/${targetBranch}:${rewrittenLease.sha}`,
+      "origin",
+      `HEAD:refs/heads/${targetBranch}`,
+      "--dry-run",
+    ];
+  } else {
+    pushDryRunArgs = ["push", "origin", `HEAD:refs/heads/${targetBranch}`, "--dry-run"];
+  }
   const pushDryRun = await Utils.executeGitCommand(pushDryRunArgs, { cwd });
 
   if (pushDryRun.success) {
@@ -134,15 +212,41 @@ export async function verifyPushHookFix(options?: {
  *
  * @param hookType - Which hook failed: pre-commit or pre-push
  * @param gitHookErrorLog - Glob path to previous hook error logs
+ * @param lease - Branch and commit a resumed run started from, when publish
+ *   rewrites that already-published branch under an explicit lease
  * @returns The prompt handed to the agent harness
  */
 export function buildGitHookFixPrompt(
   hookType: "commit" | "push",
   gitHookErrorLog: string,
+  lease?: PushFixLease,
 ): string {
+  // A resumed run's branch is published and was rewritten by the agent, so a
+  // plain push is rejected as non-fast-forward. Probe with the same explicit
+  // lease publish uses instead. The dry run runs the pre-push hooks without
+  // updating origin, and the runner publishes after the fix.
+  const leasedPush =
+    hookType === "push" && lease?.branch.startsWith("feature/")
+      ? `git push --force-with-lease=refs/heads/${lease.branch}:${lease.sha} origin HEAD:refs/heads/${lease.branch} --dry-run`
+      : undefined;
+
   // Concise prompt asking the agent to re-run the git command; avoids context
   // length issues from including full error output.
-  const gitCommand = hookType === "commit" ? "git commit" : "git push origin HEAD";
+  const gitCommand = hookType === "commit" ? "git commit" : (leasedPush ?? "git push origin HEAD");
+
+  const retryStep =
+    hookType === "commit"
+      ? '**Retry the commit** with an explicit message (never omit `-m` — unattended runs have no editor):\n   ```bash\n   git commit -m "fix: resolve pre-commit hook failures"\n   ```'
+      : leasedPush
+        ? `**Amend the existing commit** with your fixes:\n   \`\`\`bash\n   git commit --amend --no-edit\n   \`\`\`\n\n6. **Verify the fix** with the lease (dry run — do not publish):\n   \`\`\`bash\n   ${leasedPush}\n   \`\`\`\n   Do not run \`git push --force\` or a plain \`git push\`: this branch is already published and was rewritten, so the runner publishes it under \`--force-with-lease\` after your fix.`
+        : "**Amend the existing commit** with your fixes:\n   ```bash\n   git commit --amend --no-edit\n   ```\n\n6. **Verify the fix** by running the push command again to ensure it succeeds.";
+
+  const pushNote =
+    hookType === "push"
+      ? leasedPush
+        ? "\n- Do not push: the runner publishes this rewritten branch under `--force-with-lease` after verification"
+        : ""
+      : "";
 
   return `# Git Hook Error - Fix Required
 
@@ -178,18 +282,14 @@ The git ${hookType} operation has failed, likely due to pre-${hookType} hooks ch
    \`.profile\`, \`.gitconfig\`, \`.claude/…\`, …) into the worktree root; git cannot stage
    them, and they must never be committed.
 
-5. ${
-    hookType === "commit"
-      ? '**Retry the commit** with an explicit message (never omit `-m` — unattended runs have no editor):\n   ```bash\n   git commit -m "fix: resolve pre-commit hook failures"\n   ```'
-      : "**Amend the existing commit** with your fixes:\n   ```bash\n   git commit --amend --no-edit\n   ```\n\n6. **Verify the fix** by running the push command again to ensure it succeeds."
-  }
+5. ${retryStep}
 
 **Important**:
 - Only fix the issues mentioned in the error output
 - Do not modify unrelated code
 - Ensure all tests pass if the hook runs tests
 - Follow the project's coding standards and conventions
-${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --no-edit) so the fixes are included in the push" : ""}
+${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --no-edit) so the fixes are included in the push" : ""}${pushNote}
 `;
 }
 
@@ -200,10 +300,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
  * @param harness - Agent harness to use
  * @param executablePath - Path to the agent CLI executable
  * @param maxTurns - Maximum number of turns for agent conversation
- * @param cwd - Optional working directory for the agent
- * @param expectedBranch - Optional branch the worktree HEAD must be on. When
- *   provided and the worktree is on a different branch, the fix is aborted
- *   instead of risking operations against a corrupted git state.
+ * @param options - Optional working directory, expected branch, and lease
  * @returns `true` when hook errors were fixed and verified
  */
 export async function runAgentHarnessToFixGitHook(
@@ -211,9 +308,26 @@ export async function runAgentHarnessToFixGitHook(
   harness: AgentHarness,
   executablePath: string,
   maxTurns: number,
-  cwd?: string,
-  expectedBranch?: string,
+  options?: {
+    /** Working directory for the agent. */
+    cwd?: string;
+    /**
+     * Branch the worktree HEAD must be on. When provided and the worktree is
+     * on a different branch, the fix is aborted instead of risking operations
+     * against a corrupted git state.
+     */
+    expectedBranch?: string;
+    /**
+     * Branch and commit the run started from. When the agent rewrote that
+     * published branch, the verification dry-run uses the same explicit lease
+     * the publish push uses.
+     */
+    lease?: PushFixLease;
+  },
 ): Promise<boolean> {
+  const cwd = options?.cwd;
+  const expectedBranch = options?.expectedBranch;
+  const lease = options?.lease;
   const workingDir = cwd || process.cwd();
 
   // Guard against a missing working directory. posix_spawn reports a
@@ -264,7 +378,7 @@ export async function runAgentHarnessToFixGitHook(
 
       // Get the path to the git-hook-errors.log file
       const gitHookErrorLog = `${resolveOutputDir()}/*/git-hook-errors.log`;
-      const fixPrompt = buildGitHookFixPrompt(hookType, gitHookErrorLog);
+      const fixPrompt = buildGitHookFixPrompt(hookType, gitHookErrorLog, lease);
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
       let stdoutOutput = "";
@@ -412,7 +526,7 @@ export async function runAgentHarnessToFixGitHook(
                 resolve(true);
               }
             } else {
-              const verification = await verifyPushHookFix({ cwd, expectedBranch });
+              const verification = await verifyPushHookFix({ cwd, expectedBranch, lease });
               if (verification.success) {
                 if (verification.amended) {
                   console.log("✅ Successfully amended commit manually!");
