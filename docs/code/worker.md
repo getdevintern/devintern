@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Use when running DevIntern as a long-running worker that picks up tracker tasks, handles PR reviews and CI failures, and runs as a service."
 section: "Automation"
 order: 2
-dateModified: 2026-11-26
+dateModified: 2026-11-27
 ---
 
 # Worker Daemon
@@ -184,7 +184,7 @@ A dashboard retry follows the same rules. A stacked ticket is retried on its blo
 
 Set `AGENT_HARNESS=codex,grok` (priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover covers every worker job except schedules that pin their own `harness` ([details](./automations.md#choosing-the-agent-per-schedule)). When every harness is limited, task pickup pauses and due automations and estimations skip that occurrence. See [Failover across multiple harnesses](./agent-harness.md#failover-across-multiple-harnesses).
 
-Unattended runs are where sandboxing matters most. Set `AGENT_SANDBOX=auto` in the workspace `.env`; see [Sandboxing the Agent](./sandboxing.md).
+Unattended runs are where sandboxing matters most. Set `AGENT_SANDBOX=auto` in the workspace `.env`; see [Sandboxing the Agent](./sandboxing.md). While `AGENT_SANDBOX` is unset, `worker doctor` shows the sandbox row as a warning (it does not change the exit code or `setup`). Set `AGENT_SANDBOX=none` to run unsandboxed on purpose and turn the warning into a pass.
 
 ## Working windows (quiet hours)
 

@@ -16,6 +16,7 @@ import { join } from "path";
 
 import type { ReadinessCheck } from "../src/lib/observability/readiness";
 import { renderReadinessReport } from "../src/lib/observability/readiness";
+import { setupStateFor } from "../src/lib/observability/readiness-json";
 import {
   collectWorkerDoctorChecks,
   createDefaultRepoAccessCheck,
@@ -526,6 +527,72 @@ remote = "git@github.com:acme/backend.git"
     expect(check).toMatchObject({
       status: "ok",
       detail: "Worker Pilot, active until 2026-12-10 (14 days left)",
+    });
+  });
+
+  describe("unsandboxed agent warning", () => {
+    const fakeNono = {
+      provider: {
+        name: "nono",
+        displayName: "nono",
+        priority: 10,
+        detect: async () => ({ available: true }),
+        wrapCommand: async (cmd: unknown) => cmd,
+      },
+      detection: { available: true },
+    } as any;
+    const noProviders = async () => [];
+
+    test("unset + provider available → warn with an AGENT_SANDBOX=auto hint", async () => {
+      const check = await defaultCheckSandbox({}, { detect: async () => [fakeNono] });
+      expect(check.status).toBe("warn");
+      expect(check.hint).toContain("nono is ready here");
+      expect(check.hint).toContain("AGENT_SANDBOX=auto");
+      expect(check.hint).toContain("https://devintern.com/docs/code/sandboxing");
+    });
+
+    test("unset + provider installable on this platform → warn", async () => {
+      const check = await defaultCheckSandbox({}, { detect: noProviders, platform: "linux" });
+      expect(check.status).toBe("warn");
+      expect(check.hint).toContain("Install a provider");
+      expect(check.hint).toContain("AGENT_SANDBOX=auto");
+    });
+
+    test("unset on a platform no provider supports → pass", async () => {
+      const check = await defaultCheckSandbox({}, { detect: noProviders, platform: "win32" });
+      expect(check.status).toBe("ok");
+    });
+
+    test("explicit AGENT_SANDBOX=none opt-out → pass with a note", async () => {
+      const check = await defaultCheckSandbox(
+        { AGENT_SANDBOX: "none" },
+        { detect: async () => [fakeNono], platform: "linux" },
+      );
+      expect(check.status).toBe("ok");
+      expect(check.detail).toContain("on purpose");
+    });
+
+    test("provider configured → pass", async () => {
+      const check = await defaultCheckSandbox(
+        { AGENT_SANDBOX: "nono" },
+        { detect: async () => [fakeNono] },
+      );
+      expect(check.status).toBe("ok");
+    });
+
+    test("the warning keeps setup ready and the exit code clean", async () => {
+      const workspacePath = writeWorkspace(TEAMS_CONFIG, `${JIRA_ENV}\n`);
+      const checks = await collectWorkerDoctorChecks(
+        { workspacePath },
+        passingDeps({
+          checkSandbox: (env) =>
+            defaultCheckSandbox(env, { detect: noProviders, platform: "linux" }),
+        }),
+      );
+      expect(byId(checks, "sandbox")[0]?.status).toBe("warn");
+      expect(renderReadinessReport(checks).hasFailures).toBe(false);
+      expect(setupStateFor(checks).setup).toBe("ready");
+      expectHintsOnProblems(checks);
     });
   });
 

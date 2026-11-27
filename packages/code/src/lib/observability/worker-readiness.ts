@@ -18,12 +18,6 @@ import { execFile } from "child_process";
 import { createServer } from "net";
 import { dirname, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
-import {
-  activeSandboxName,
-  detectSandboxProviders,
-  removedSandboxProviderMessage,
-  sandboxInheritsEnclosingSandbox,
-} from "@devintern/agent-harness";
 import { WorkspaceConfigError, parseWorkspaceConfig } from "../workspace/config";
 import { workerWorkspaceView } from "../workspace/manual-only";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "../workspace/config";
@@ -46,7 +40,7 @@ import {
   hasConfiguredCredentialHelper,
   redactGitCredentials,
 } from "../utils/git-credentials";
-import { collectHarnessPreflight } from "../agent/sandbox";
+import { defaultCheckSandbox } from "./sandbox-readiness";
 import { resolveWorkerStatus } from "./dashboard-api";
 import type { WorkerStatusView } from "./dashboard-api";
 import type { ReadinessCheck } from "./readiness";
@@ -63,6 +57,8 @@ import { PUSH_FIX, gitPushDryRun, readRepoPermissions } from "./repo-push-probe"
 import type { PushProbeOutcome } from "./repo-push-probe";
 
 type Env = Record<string, string | undefined>;
+
+export { defaultCheckSandbox };
 
 /** Per-probe timeout for query dry-runs and repository checks. */
 const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
@@ -386,78 +382,6 @@ async function defaultCheckEntitlement(workspaceDir: string): Promise<WorkerEnti
     setup: true,
     loginCommand: "devintern worker login",
   });
-}
-
-/**
- * Default sandbox check: the same verdict `devintern sandbox` reports as
- * "next run fails", plus the harness CLI preflight through the provider.
- */
-export async function defaultCheckSandbox(env: Env): Promise<ReadinessCheck> {
-  const label = "Agent sandbox";
-  const configured = env.AGENT_SANDBOX || "none";
-  const hint =
-    "Set AGENT_SANDBOX in the workspace .env to none, auto, native, nono, or docker; run `devintern sandbox` for setup steps";
-  const removed = removedSandboxProviderMessage(configured);
-  if (removed) {
-    return { id: "sandbox", label, status: "fail", detail: `${configured}: ${removed}`, hint };
-  }
-  if (configured === "none") {
-    return { id: "sandbox", label, status: "ok", detail: "none (agents run unsandboxed)" };
-  }
-  try {
-    const detections = await detectSandboxProviders();
-    const activeSandbox = activeSandboxName();
-    if (configured !== "auto") {
-      const chosen = detections.find((d) => d.provider.name === configured);
-      if (!chosen) {
-        const valid = ["none", "auto", ...detections.map((d) => d.provider.name)].join(", ");
-        return {
-          id: "sandbox",
-          label,
-          status: "fail",
-          detail: `unknown provider "${configured}" (valid: ${valid})`,
-          hint,
-        };
-      }
-      if (!chosen.detection.available) {
-        return {
-          id: "sandbox",
-          label,
-          status: "fail",
-          detail: `${configured} is not usable on this machine: ${chosen.detection.reason ?? "unavailable"}`,
-          hint: `Finish the ${configured} setup (see \`devintern sandbox\`) or change AGENT_SANDBOX`,
-        };
-      }
-    }
-    const preflight = await collectHarnessPreflight(
-      configured,
-      detections,
-      env.AGENT_HARNESS,
-      activeSandbox,
-    );
-    const primary = preflight?.entries[0];
-    if (primary && !primary.ok) {
-      return {
-        id: "sandbox",
-        label,
-        status: "fail",
-        detail: `${preflight.provider}: ${primary.name} cannot start (${primary.reason ?? "unknown error"})`,
-        hint: primary.suggestion ?? hint,
-      };
-    }
-    const inherited =
-      activeSandbox && sandboxInheritsEnclosingSandbox({ configured, activeSandbox });
-    return {
-      id: "sandbox",
-      label,
-      status: "ok",
-      detail: inherited
-        ? `${configured} (inherits the enclosing ${activeSandbox} sandbox)`
-        : (preflight?.provider ?? configured),
-    };
-  } catch (error) {
-    return { id: "sandbox", label, status: "fail", detail: errorMessage(error), hint };
-  }
 }
 
 /** True when nothing else holds `port` on the dashboard's loopback host. */
