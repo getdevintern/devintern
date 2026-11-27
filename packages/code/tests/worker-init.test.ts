@@ -15,6 +15,7 @@ import { stdinClosedError } from "@devintern/auth";
 
 import { isPromptAbort } from "../src/lib/cli/prompt-abort";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { loadWorkerStartIntent, saveWorkerStartIntent } from "../src/lib/worker/start-intent";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/code-host/github/app-setup";
 import {
   ANALYTICS_CONFIG_DIR_ENV,
@@ -755,6 +756,48 @@ describe("runWorkerInit", () => {
           setup === "signed-in" ? "Relay pairing stored" : "Relay needs sign-in; skipped",
         );
       }
+    });
+
+    test("a license that is already OK is not followed by a Pilot sign-in question", async () => {
+      const questions: string[] = [];
+      let signIns = 0;
+      const result = await runWorkerInit(
+        deps([], {
+          checkAutomationLicense: async () => null,
+          getUser: async () => null,
+          signIn: async () => {
+            signIns += 1;
+            return { id: "u1", email: "me@x.test" };
+          },
+          connectRelay: async () => true,
+          prompt: async (question) => {
+            questions.push(question);
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(signInQuestions(questions)).toEqual([]);
+      expect(signIns).toBe(0);
+      expect(logs.join("\n")).toContain("✅ Automation license OK.");
+    });
+
+    test("the wizard forgets an earlier `worker init --start` request", async () => {
+      saveWorkerStartIntent(workspaceDir, { requestedAt: new Date().toISOString(), relay: true });
+      const result = await runWorkerInit(
+        deps([], {
+          checkAutomationLicense: async () => null,
+          getUser: async () => null,
+          connectRelay: async () => true,
+          prompt: async (question) => {
+            if (question.startsWith("Ready-tasks")) return "status=todo";
+            return question.startsWith(RECOMMENDED_QUESTION) ? "" : "n";
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(loadWorkerStartIntent(workspaceDir)).toBeNull();
     });
 
     test("--no-relay keeps the sign-in but does not pair", async () => {

@@ -730,6 +730,29 @@ describe("runNonInteractiveWorkerInit", () => {
         expect(existsSync(workerStartIntentPath(workspaceDir))).toBe(false);
       });
 
+      test("the re-run commands of a failed --start --no-relay run keep both flags", async () => {
+        const report = await run(
+          { tracker: "jira", taskQuery: "project = APP", start: true, noRelay: true },
+          {
+            processEnv: { ...JIRA_ENV },
+            doctorOverrides: { dryRunQuery: async () => Promise.reject(new Error("bad JQL")) },
+            installService: async () => serviceReport("running"),
+          },
+        );
+        // `add-repo` registers another checkout; it is not a re-run of this command.
+        const rerunSteps = report.nextSteps.filter(
+          (step) =>
+            step.id !== "add-repo" &&
+            step.command?.includes("devintern worker init --non-interactive"),
+        );
+        expect(rerunSteps.map((step) => step.id)).toContain("fix-query");
+        expect(rerunSteps.length).toBeGreaterThan(0);
+        for (const step of rerunSteps) {
+          expect(step.command).toContain(" --start");
+          expect(step.command).toContain(" --no-relay");
+        }
+      });
+
       test("only sign-in left: the intent is recorded for worker login, no service or connect step", async () => {
         let installs = 0;
         const report = await run(
@@ -778,6 +801,43 @@ describe("runNonInteractiveWorkerInit", () => {
         // Signing in with the reported command pairs the relay and starts the
         // service, so neither is a separate next step.
         expect(report.nextSteps.map((step) => step.id)).toEqual(["sign-in"]);
+      });
+
+      test("a later run without --start, or one that is not ready, forgets the recorded start", async () => {
+        const signInLeft = {
+          processEnv: { ...JIRA_ENV },
+          doctorOverrides: { checkEntitlement: notSignedIn },
+        };
+        const first = await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, start: true },
+          signInLeft,
+        );
+        expect(first.start).toEqual({ result: "after_sign_in" });
+        expect(loadWorkerStartIntent(workspaceDir)).not.toBeNull();
+        const withoutStart = await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true },
+          signInLeft,
+        );
+        expect(withoutStart.start).toBeUndefined();
+        expect(existsSync(workerStartIntentPath(workspaceDir))).toBe(false);
+
+        await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, start: true },
+          signInLeft,
+        );
+        expect(loadWorkerStartIntent(workspaceDir)).not.toBeNull();
+        const notReady = await run(
+          { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, start: true },
+          {
+            ...signInLeft,
+            doctorOverrides: {
+              checkEntitlement: notSignedIn,
+              dryRunQuery: async () => Promise.reject(new Error("bad JQL")),
+            },
+          },
+        );
+        expect(notReady.start).toEqual({ result: "not_ready" });
+        expect(existsSync(workerStartIntentPath(workspaceDir))).toBe(false);
       });
 
       test("--no-relay drops the connect step and tells worker login to skip pairing", async () => {

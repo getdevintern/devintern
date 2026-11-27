@@ -9,6 +9,7 @@ import type { ServiceCommandReport } from "../src/lib/worker/service-command";
 import {
   loadWorkerStartIntent,
   saveWorkerStartIntent,
+  WORKER_START_INTENT_TTL_MS,
   workerStartIntentPath,
 } from "../src/lib/worker/start-intent";
 
@@ -105,7 +106,7 @@ describe("runWorkerSignInFollowUp", () => {
   });
 
   test("a `worker init --start` waiting for the sign-in installs the service once", async () => {
-    saveWorkerStartIntent(workspaceDir, { requestedAt: "2026-11-27T00:00:00.000Z", relay: true });
+    saveWorkerStartIntent(workspaceDir, { requestedAt: new Date().toISOString(), relay: true });
     expect(statSync(workerStartIntentPath(workspaceDir)).mode & 0o777).toBe(0o600);
     const installs: string[] = [];
     const deps = {
@@ -125,7 +126,7 @@ describe("runWorkerSignInFollowUp", () => {
   });
 
   test("an existing session (--no-wait) pairs only; the deferred start waits for the sign-in", async () => {
-    saveWorkerStartIntent(workspaceDir, { requestedAt: "2026-11-27T00:00:00.000Z", relay: true });
+    saveWorkerStartIntent(workspaceDir, { requestedAt: new Date().toISOString(), relay: true });
     let installs = 0;
     const result = await runWorkerSignInFollowUp(options({ signedIn: false }), {
       connect: pendingConnect([]),
@@ -140,7 +141,7 @@ describe("runWorkerSignInFollowUp", () => {
   });
 
   test("an intent recorded with --no-relay skips pairing on the completing sign-in", async () => {
-    saveWorkerStartIntent(workspaceDir, { requestedAt: "2026-11-27T00:00:00.000Z", relay: false });
+    saveWorkerStartIntent(workspaceDir, { requestedAt: new Date().toISOString(), relay: false });
     const calls: Array<{ args: string[]; deps: WorkerConnectCommandDeps }> = [];
     const result = await runWorkerSignInFollowUp(options(), {
       connect: pendingConnect(calls),
@@ -151,8 +152,23 @@ describe("runWorkerSignInFollowUp", () => {
     expect(result.service?.result).toBe("running");
   });
 
+  test("an intent older than the pending sign-in is ignored", async () => {
+    const stale = new Date(Date.now() - WORKER_START_INTENT_TTL_MS - 60_000).toISOString();
+    saveWorkerStartIntent(workspaceDir, { requestedAt: stale, relay: true });
+    expect(loadWorkerStartIntent(workspaceDir)).toBeNull();
+    let installs = 0;
+    const result = await runWorkerSignInFollowUp(options({ noRelay: true }), {
+      installService: async () => {
+        installs += 1;
+        return running;
+      },
+    });
+    expect(installs).toBe(0);
+    expect(result.service).toBeUndefined();
+  });
+
   test("a failed install is reported in the service document", async () => {
-    saveWorkerStartIntent(workspaceDir, { requestedAt: "2026-11-27T00:00:00.000Z", relay: true });
+    saveWorkerStartIntent(workspaceDir, { requestedAt: new Date().toISOString(), relay: true });
     const result = await runWorkerSignInFollowUp(options({ noRelay: true }), {
       installService: async () => {
         throw new Error("systemctl missing");

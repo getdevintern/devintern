@@ -51,6 +51,7 @@ import {
 } from "./service-control";
 import type { ServiceActionResult, StartCheck, WorkerServiceStatus } from "./service-control";
 import { renderServiceStatus, renderStartCheck } from "./service-report";
+import { clearWorkerStartIntent } from "./start-intent";
 
 export const WORKER_SERVICE_JSON_SCHEMA = "devintern.worker-service";
 export const WORKER_SERVICE_JSON_VERSION = 1;
@@ -459,6 +460,8 @@ export async function runServiceAction(
     case "uninstall": {
       const outcome = await uninstallWorkerService(deps.service);
       if (!outcome.ok) return { ...base, result: "error", error: outcome.error };
+      // No pending `worker init --start` may reinstall it at the next sign-in.
+      clearWorkerStartIntent(workspaceDir);
       return { ...base, result: outcome.unchanged ? "not_installed" : "uninstalled" };
     }
     case "status": {

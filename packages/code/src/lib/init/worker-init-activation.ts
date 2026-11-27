@@ -111,8 +111,9 @@ export async function licenseStep(run: SetupRun): Promise<boolean> {
       }
     }
     // The one sign-in question: it starts the Pilot and lets the relay pair.
+    // Not asked when the license is already OK (nothing to start).
     let pilotStarted = false;
-    if (!signedIn && !process.env.LICENSE_KEY) {
+    if (failure !== null && !signedIn && !process.env.LICENSE_KEY) {
       if (await askYesNo(run, "Sign in with GitHub now to start the Worker Pilot? [Y/n]: ", true)) {
         const user = await signInOnce(run, workspaceDir);
         if (user && failure !== undefined && failure !== null && run.deps.checkAutomationLicense) {
@@ -598,8 +599,16 @@ interface ServiceRuntime {
  * a next step.
  */
 export async function serviceStep(run: SetupRun): Promise<boolean> {
-  if (run.input === "prompt") run.outcome.service = await offerService(run);
-  else if (run.args.start) await flagsStartService(run);
+  if (run.input === "prompt") {
+    // The wizard decides about the service itself: an older `--start` request is void.
+    clearWorkerStartIntent(run.workspaceDir);
+    run.outcome.service = await offerService(run);
+  } else if (run.args.start) {
+    await flagsStartService(run);
+  } else {
+    // A re-run without `--start` withdraws an earlier "start once signed in".
+    clearWorkerStartIntent(run.workspaceDir);
+  }
   return true;
 }
 
@@ -626,6 +635,7 @@ async function flagsStartService(run: FlagsRun): Promise<void> {
       report.start = { result: "after_sign_in" };
       run.log("ℹ️  --start: the service is installed and started once the sign-in completes.");
     } else {
+      clearWorkerStartIntent(workspaceDir);
       report.start = { result: "not_ready" };
       run.log("ℹ️  --start: not started; the worker would not start with the problems above.");
     }
