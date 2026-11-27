@@ -13,8 +13,15 @@
 #   DEVINTERN_NO_MODIFY_PATH=1  do not edit shell profiles
 #   BUN_INSTALL            Bun home (default: ~/.bun), as with Bun's installer
 #
-# It never runs sudo. When a system package is needed and you are not root,
-# it prints the command to run and exits.
+# It never runs sudo. As root it installs missing system packages (unzip,
+# curl, bash) itself; otherwise it prints the sudo command and exits.
+#
+# Testing (from the repo root):
+#   docker run --rm -v "$PWD/scripts:/s:ro" debian:stable-slim \
+#     sh -c 'apt-get update && apt-get install -y curl ca-certificates && sh /s/install.sh'
+#   docker run --rm -u 1000 -e HOME=/tmp -v "$PWD/scripts:/s:ro" debian:stable-slim \
+#     sh /s/install.sh   # non-root: expect the "sudo sh -c '...'" hint for curl
+#   bunx shellcheck -s sh scripts/install.sh
 
 set -eu
 
@@ -85,8 +92,18 @@ require_package() {
     return 0
   fi
   printf "error: '%s' is required. Install it, then re-run this script:\n\n" "$command_name" >&2
-  printf '  sudo sh -c %s\n\n' "'$install_command'" >&2
+  printf '  %s\n\n' "$(as_admin "$install_command")" >&2
   exit 1
+}
+
+# Format a package-manager command for the current user: as is for root,
+# wrapped in sudo otherwise. Only prints; never runs it.
+as_admin() {
+  if [ "$(id -u)" -eq 0 ]; then
+    printf '%s' "$1"
+  else
+    printf "sudo sh -c '%s'" "$1"
+  fi
 }
 
 # The user's login shell: $SHELL, else the passwd entry (containers often
@@ -126,7 +143,7 @@ persist_path() {
   profile=$(profile_file)
   # The Bun installer writes $BUN_INSTALL/bin; an earlier run of this script
   # writes the marker. Either way, PATH is already set up.
-  if [ -f "$profile" ] && grep -Eq "$PATH_MARKER|BUN_INSTALL|\\.bun/bin" "$profile"; then
+  if [ -f "$profile" ] && grep -Eq "^$PATH_MARKER|^[^#]*(BUN_INSTALL|\\.bun/bin)" "$profile"; then
     return 0
   fi
   mkdir -p "$(dirname "$profile")"
@@ -177,7 +194,12 @@ main() {
   fi
 
   if ! have git; then
-    warn "git is not installed. DevIntern needs it to run tasks. $(package_install_command git)"
+    git_command=$(package_install_command git)
+    if [ -n "$git_command" ]; then
+      warn "git is not installed. DevIntern needs it to run tasks. Install it with: $(as_admin "$git_command")"
+    else
+      warn "git is not installed. DevIntern needs it to run tasks. Install git with your system's package manager."
+    fi
   fi
 
   version=${DEVINTERN_VERSION:-latest}

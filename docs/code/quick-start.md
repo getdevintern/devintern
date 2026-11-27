@@ -31,7 +31,7 @@ Install DevIntern Code with one command:
 curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh
 ```
 
-The script installs [Bun](https://bun.sh) if it is missing, installs `@getdevintern/code` globally, adds `~/.bun/bin` to your shell profile, and prints the installed version. It is safe to re-run and upgrades DevIntern to the latest version. It never runs `sudo`: if a system package such as `unzip` is missing, it prints the command to install it and stops. Set `DEVINTERN_VERSION` to install a specific version, or `DEVINTERN_NO_MODIFY_PATH=1` to leave your shell profile alone.
+The script installs [Bun](https://bun.sh) if it is missing, installs `@getdevintern/code` globally, adds `~/.bun/bin` to your shell profile, and prints the installed version. It is safe to re-run and upgrades DevIntern to the latest version. As root it installs missing system packages such as `unzip`; otherwise it prints the `sudo` command and stops. It never runs `sudo` itself. Set `DEVINTERN_VERSION` to install a specific version, or `DEVINTERN_NO_MODIFY_PATH=1` to leave your shell profile alone.
 
 Then install and sign in to a coding agent:
 

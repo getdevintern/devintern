@@ -35,8 +35,8 @@ Ask once, up front, and record the answers:
 ### 1. Prerequisites on the worker host
 
 1. Check `bun --version`, `git --version`, `command -v devintern`, and the agent CLI (`command -v claude`, `codex`, …).
-2. Missing Bun or DevIntern: `curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh` installs both, then prints `devintern --version`. When it stops on a missing system package such as `unzip`, it prints the `sudo` command; ask the user to run it, then re-run the script. In the same non-interactive shell run `export PATH="$HOME/.bun/bin:$PATH"` afterwards. Manual fallback for Bun: `curl -fsSL https://bun.sh/install | bash` (on Debian/Ubuntu it needs `unzip`; ask the user to install it if `apt-get` needs sudo). The installer only edits shell profiles, so in the same non-interactive shell run `export PATH="$HOME/.bun/bin:$PATH"`.
-3. Missing DevIntern: `bun install -g @getdevintern/code`.
+2. Missing Bun or DevIntern: `curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh` installs both, then prints `devintern --version`. When it stops on a missing system package such as `unzip`, it prints the `sudo` command; ask the user to run it, then re-run the script. The script only edits shell profiles, so in the same non-interactive shell run `export PATH="$HOME/.bun/bin:$PATH"` afterwards.
+3. Manual fallback, if you cannot use the script: install Bun with `curl -fsSL https://bun.sh/install | bash` (on Debian/Ubuntu it needs `unzip`; ask the user to install it if `apt-get` needs sudo), export the same `PATH`, then `bun install -g @getdevintern/code`.
 4. Missing agent CLI: run the `install-agent` next step's `command` from step 3 or 5 (for Claude Code on a host without npm, `curl -fsSL https://claude.ai/install.sh | bash`). Finding the executable does not prove it is signed in. Hand-off: ask the user to run the agent once on the worker host and sign in (for Claude Code, `claude` then `/login`), because you cannot do it for them.
 
 ### 2. Checkout and credentials
