@@ -9,6 +9,7 @@ export {
   sanitizeDomain,
   sanitizeGitlabBaseUrl,
 } from "./config/load-tracker-config.ts";
+export { AZURE_DEVOPS_FAKE_OPT_IN, azureDevOpsFakeBaseUrl } from "./config/azure-devops-fake.ts";
 export type { ConfiguredTracker, TrackerId, TrackerMeta } from "./config/tracker-meta.ts";
 export {
   TRACKER_IDS,

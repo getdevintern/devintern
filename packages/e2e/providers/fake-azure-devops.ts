@@ -15,7 +15,12 @@
  * `pat` is set, never logs or echoes them, and never makes outbound requests.
  */
 
-import { basicPatAuthorization, rejectWrongPat } from "./fake-auth";
+import {
+  SearchRejections,
+  azureDevOpsQueryError,
+  basicPatAuthorization,
+  rejectWrongPat,
+} from "./fake-auth";
 import { markdownToHtml } from "./fake-azure-devops-html";
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
 import {
@@ -312,6 +317,9 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
   /** Every WIQL request received, in arrival order (CLI, worker, and fixture). */
   readonly wiqlRequests: FakeAzureDevOpsWiqlRequest[] = [];
 
+  /** Number of `GET /_apis/projects` requests (the credential probe). */
+  projectListRequests = 0;
+
   /** Every relations / predecessor-batch read, in arrival order. */
   readonly blockerRequests: FakeAzureDevOpsBlockerRequest[] = [];
 
@@ -320,6 +328,7 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
   /** Work items an `errorPolicy=omit` batch read returns as `null`. */
   private readonly unreadableWorkItems = new Set<number>();
 
+  private readonly wiqlRejections = new SearchRejections();
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly workItems = new Map<number, FakeAzureDevOpsWorkItem>();
   private nextWorkItemId = 100;
@@ -593,6 +602,11 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     this.server.stop(true);
   }
 
+  /** Answer later WIQL whose text contains `needle` with Azure DevOps' 400 query error. */
+  rejectWiqlContaining(needle: string, message: string): void {
+    this.wiqlRejections.add(needle, message);
+  }
+
   /** Stop the server when a test cannot reach the normal cleanup path. */
   stop(): void {
     this.server.stop(true);
@@ -614,9 +628,8 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       return this.queryWorkItems(wiqlMatch[1], request);
     }
 
-    if (method === "GET" && /^\/_apis\/wit\/workitems$/i.test(scopedPath)) {
-      return this.getWorkItems(url);
-    }
+    const listed = method === "GET" ? this.getList(scopedPath, url) : undefined;
+    if (listed) return listed;
 
     const statesProject = workItemTypeStatesProject(method, scopedPath);
     if (statesProject !== undefined) {
@@ -659,6 +672,16 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     return this.unmatched(method, path);
   }
 
+  /** Organization-level list endpoints: projects (the credential probe) and work-item batches. */
+  private getList(scopedPath: string, url: URL): Response | undefined {
+    if (/^\/_apis\/projects$/i.test(scopedPath)) {
+      this.projectListRequests++;
+      return json({ count: 1, value: [{ id: "fake-project-id", name: this.project }] });
+    }
+    if (/^\/_apis\/wit\/workitems$/i.test(scopedPath)) return this.getWorkItems(url);
+    return undefined;
+  }
+
   private unmatched(method: string, path: string): Response {
     const diagnostic = `Unmatched fake Azure DevOps request: ${method} ${path}`;
     this.unexpectedRequests.push(diagnostic);
@@ -685,6 +708,11 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       const diagnostic = "Fake Azure DevOps WIQL request is missing a string `query`";
       this.unexpectedRequests.push(diagnostic);
       return json({ message: diagnostic }, 400);
+    }
+    const rejection = this.wiqlRejections.find(query);
+    if (rejection) {
+      this.wiqlRequests.push({ query, ids: [], at: Date.now() });
+      return azureDevOpsQueryError(rejection);
     }
     const { matches, error } = matchWorkItems(query, [...this.workItems.values()]);
     this.wiqlRequests.push({

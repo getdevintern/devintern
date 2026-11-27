@@ -313,12 +313,14 @@ test.skipIf(!builtCli)(
 );
 
 test.skipIf(!builtCli)(
-  "worker doctor reports a missing Azure DevOps PAT without any request and never prints the PAT",
+  "worker doctor dry-runs an Azure DevOps [defaults].task_query and fails on rejected WIQL, a wrong PAT, or a missing PAT",
   async () => {
     const pat = randomToken("e2eazurepat");
+    const wrongPat = randomToken("e2eazurewrong");
     // Azure DevOps sends the PAT as Basic auth with an empty user name.
-    const basicPat = Buffer.from(`:${pat}`).toString("base64");
-    const wiql = `SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS '${randomToken("E2EADO")}'`;
+    const basic = (value: string) => Buffer.from(`:${value}`).toString("base64");
+    const marker = randomToken("E2EADO");
+    const wiql = `SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS '${marker}'`;
     const tracker = new FakeAzureDevOpsTracker({ pat });
     const label = "azure-devops ([defaults])";
     await withDoctorWorker(
@@ -328,25 +330,73 @@ test.skipIf(!builtCli)(
         const {
           DEVINTERN_E2E_FAKE_AZURE_DEVOPS,
           TASK_TRACKER: _tracker,
-          ...credentials
+          AZURE_DEVOPS_PAT: _pat,
+          ...settings
         } = tracker.environment();
         // The fake-endpoint opt-in is read before the workspace .env loads.
         worker.env.DEVINTERN_E2E_FAKE_AZURE_DEVOPS = DEVINTERN_E2E_FAKE_AZURE_DEVOPS!;
         const envPath = join(worker.workspaceDir, ".env");
-        const doctor = (args: string[] = []) => doctorWithout(worker, [pat, basicPat], args);
+        const writeEnv = (values: Record<string, string>) =>
+          writeFileSync(envPath, dotenv({ ...settings, ...values }), { mode: 0o600 });
+        const secrets = [pat, wrongPat, basic(pat), basic(wrongPat)];
+        const doctor = (args: string[] = []) => doctorWithout(worker, secrets, args);
+        const queries = () => tracker.wiqlRequests.map((request) => request.query);
+
+        await tracker.createTicket({ title: "Ready one", body: "First.", labels: [marker] });
+        await tracker.createTicket({ title: "Ready two", body: "Second.", labels: [marker] });
+        await tracker.createTicket({ title: "Decoy", body: "Outside the query." });
+
+        // The credential probe and the dry run both reach the fake.
+        writeEnv({ AZURE_DEVOPS_PAT: pat });
+        const ready = await doctor();
+        expect(ready.exitCode, ready.stdout).toBe(0);
+        expectLines(ready, [
+          `✅ Tracker credentials — ${label}`,
+          `✅ Task query — ${label}: 2 tasks match`,
+          "✅ Everything looks good — start the worker with `devintern worker`.",
+        ]);
+        expect(tracker.projectListRequests).toBe(1);
+        expect(queries()).toEqual([wiql]);
 
         // --offline: the credential row is checked locally, the dry run is skipped.
-        writeFileSync(envPath, dotenv(credentials), { mode: 0o600 });
         const offline = await doctor(["--offline"]);
         expect(offline.exitCode, offline.stdout).toBe(0);
         expectLines(offline, [
           `✅ Tracker credentials — ${label}`,
           `⚠️  Task query — ${label}: skipped (--offline)`,
         ]);
+        expect(tracker.projectListRequests).toBe(1);
+        expect(queries()).toEqual([wiql]);
+
+        // Azure DevOps rejects the WIQL: HTTP 400 with a TF51005 query error.
+        const invalid = `TF51005: The query references a field that does not exist. ${marker}`;
+        tracker.rejectWiqlContaining(marker, invalid);
+        const rejected = await doctor();
+        expect(rejected.exitCode, rejected.stdout).toBe(1);
+        expectLines(rejected, [
+          `✅ Tracker credentials — ${label}`,
+          `❌ Task query — ${label}: Azure DevOps API error (400): `,
+          invalid,
+          DEFAULTS_HINT,
+          NOT_READY,
+        ]);
+        expect(tracker.projectListRequests).toBe(2);
+        expect(queries()).toEqual([wiql, wiql]);
+
+        // A PAT the fake does not know: the probe gets a bare 401, no WIQL runs.
+        writeEnv({ AZURE_DEVOPS_PAT: wrongPat });
+        const wrong = await doctor();
+        expect(wrong.exitCode, wrong.stdout).toBe(1);
+        expectLines(wrong, [
+          `❌ Tracker credentials — ${label}: Azure DevOps API error (401)`,
+          `❌ Task query — ${label}: not run`,
+          NOT_READY,
+        ]);
+        expect(tracker.unauthorizedRequests).toBe(1);
+        expect(queries()).toEqual([wiql, wiql]);
 
         // AZURE_DEVOPS_PAT absent: named in the row, and no request at all.
-        const { AZURE_DEVOPS_PAT: _dropped, ...withoutPat } = credentials;
-        writeFileSync(envPath, dotenv(withoutPat), { mode: 0o600 });
+        writeEnv({});
         const missing = await doctor();
         expect(missing.exitCode, missing.stdout).toBe(1);
         expectLines(missing, [
@@ -355,8 +405,9 @@ test.skipIf(!builtCli)(
           `❌ Task query — ${label}: not run (missing tracker credentials)`,
           NOT_READY,
         ]);
-        expect(tracker.unauthorizedRequests).toBe(0);
-        expect(tracker.wiqlRequests).toEqual([]);
+        expect(tracker.unauthorizedRequests).toBe(1);
+        expect(tracker.projectListRequests).toBe(2);
+        expect(queries()).toEqual([wiql, wiql]);
         expect(tracker.unexpectedRequests).toEqual([]);
       },
     );

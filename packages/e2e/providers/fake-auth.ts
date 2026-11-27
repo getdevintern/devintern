@@ -52,6 +52,23 @@ export function linearValidationError(message: string): Response {
   );
 }
 
+/** Azure DevOps' answer to a WIQL query it rejects (HTTP 400, `VssServiceException` shape). */
+export function azureDevOpsQueryError(message: string): Response {
+  return jsonResponse(
+    {
+      $id: "1",
+      innerException: null,
+      message,
+      typeName:
+        "Microsoft.TeamFoundation.WorkItemTracking.Server.Common.WorkItemTrackingQueryResultTypeException",
+      typeKey: "WorkItemTrackingQueryResultTypeException",
+      errorCode: 0,
+      eventId: 3200,
+    },
+    400,
+  );
+}
+
 /** The `Authorization` value Azure DevOps expects for a PAT (empty user name). */
 export function basicPatAuthorization(pat: string): string {
   return `Basic ${Buffer.from(`:${pat}`).toString("base64")}`;
