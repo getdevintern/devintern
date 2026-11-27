@@ -231,6 +231,24 @@ describe("--require-checks", () => {
     );
   });
 
+  test("requireApproval round-trips through the worker's CLI args", () => {
+    const policy = {
+      safePaths: [],
+      denyPaths: [],
+      review: true,
+      method: "squash" as const,
+      requireApproval: true,
+    };
+    const args = autoMergeCliArgs(policy, "a".repeat(40));
+    expect(args).toContain("--require-approval");
+    expect(
+      parseAutoMergeArgs(["https://github.com/o/r/pull/1", ...args], gate)?.policy,
+    ).toMatchObject({ requireApproval: true });
+    expect(autoMergeCliArgs({ ...policy, requireApproval: false }, "a".repeat(40))).not.toContain(
+      "--require-approval",
+    );
+  });
+
   test("the CI wait already posted round-trips through the worker's CLI args", () => {
     const policy = { safePaths: [], denyPaths: [], review: true, method: "squash" as const };
     const message = "Ready gate: CI check failed: unit tests, --lint.";
@@ -247,6 +265,16 @@ describe("--require-checks", () => {
         JSON.stringify({ outcome: "waiting", message: "m", reviewed: false, ciWait: true }),
       ),
     ).toEqual({ outcome: "waiting", message: "m", reviewed: false, ciWait: true });
+  });
+
+  test("the subprocess result carries a reviewer wait", () => {
+    const record = {
+      outcome: "waiting" as const,
+      message: "m",
+      reviewed: false,
+      approvalWait: true,
+    };
+    expect(parseAutoMergeResultLine(JSON.stringify(record))).toEqual(record);
   });
 
   test("the subprocess result carries the CI problem; an unknown one is dropped", () => {

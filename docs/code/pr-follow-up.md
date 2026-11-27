@@ -215,7 +215,7 @@ remote = "git@github.com:acme/backend.git"
 auto_merge_team_prs = true
 ```
 
-Eligible PRs are the same as for [syncing teammates' PRs](#syncing-teammates-open-prs): open, not drafts, from a branch in the same repository, and by an owner, member, collaborator, or maintainer. They pass the same gates, policy, status comment, and label as the agent's own PRs, so only PRs your policy calls safe merge; require approving reviews in branch protection if teammates' PRs must still get a human review. Only the first 100 open PRs per repo are considered. `auto_merge_team_prs` is GitHub-only and applies on reload.
+Eligible PRs are the same as for [syncing teammates' PRs](#syncing-teammates-open-prs): open, not drafts, from a branch in the same repository, and by an owner, member, collaborator, or maintainer. Only PRs into the repository's default branch are merged; PRs into release or feature branches are skipped. They pass the same gates, policy, status comment, and label as the agent's own PRs, so only PRs your policy calls safe merge. To make teammates' PRs still get a human review, require approving reviews in the default branch's protection rules: the worker then waits until GitHub reports the required approvals, even if its credential is an admin that could bypass them. With no review rule on the branch, an approval is not required. Only the first 100 open PRs per repo are considered. While `auto_merge_review` is on, the agent reviews teammates' code, so each opted-in repo must set an explicit sandbox, as for [syncing teammates' PRs](#syncing-teammates-open-prs): `AGENT_SANDBOX=native`, `nono`, or `docker`. Unset, `none`, and `auto` are refused at startup and on reload. `auto_merge_team_prs` is GitHub-only and applies on reload.
 
 The GitHub credential needs the auto-merge permissions listed under [GitHub authentication](./configuration.md#github-authentication), including read access to `Commit statuses` (and `Checks` for a GitHub App). To test the gates on one PR without merging:
 
@@ -223,7 +223,7 @@ The GitHub credential needs the auto-merge permissions listed under [GitHub auth
 devintern auto-merge <pr-url> --safe-path '**/*.md' --dry-run
 ```
 
-Other flags: `--deny-path` and `--review-path` (repeatable), `--no-review`, `--require-checks`, `--method`, `--policy <strict|standard|relaxed|custom>`, `--rules=<text>`, `--rules-file <path>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
+Other flags: `--deny-path` and `--review-path` (repeatable), `--no-review`, `--require-checks`, `--require-approval`, `--method`, `--policy <strict|standard|relaxed|custom>`, `--rules=<text>`, `--rules-file <path>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
 
 ## CI failures on the agent's PRs
 

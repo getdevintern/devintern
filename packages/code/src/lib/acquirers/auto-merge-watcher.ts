@@ -62,6 +62,8 @@ import type { WorkerState } from "../state/worker-state";
 /** PR fields the precheck reads. */
 export interface AutoMergePolledPr extends PolledPr {
   draft?: boolean;
+  /** ISO timestamp GitHub bumps on any PR activity, including a submitted review. Untrusted. */
+  updated_at?: unknown;
 }
 
 export interface AutoMergeWatcherOptions {
@@ -92,6 +94,11 @@ export interface AutoMergeWatcherOptions {
       runId?: number;
       /** The CI wait this head's PR already shows; the same wait is not re-posted. */
       ciWaitPosted?: string;
+      /**
+       * A teammate's PR: it merges only once the base branch's required
+       * reviews are met, even if the credential could bypass them.
+       */
+      team?: boolean;
     },
   ): Promise<AutoMergeResult>;
   runStore?: Pick<RunStore, "createRun" | "finishRun" | "discardRun"> &
@@ -203,6 +210,13 @@ interface PrTracking {
    */
   staticCiWaitPolicy?: string;
   /**
+   * Consecutive reviewer waits on this head (changes requested, approval
+   * missing): backs off like a static CI wait, ended early when
+   * {@link approvalWaitKey} changes (a review bumps the PR's `updated_at`).
+   */
+  approvalWaits?: number;
+  approvalWaitKey?: string;
+  /**
    * `unstable`/`blocked` state this head was evaluated in without a CI
    * reason for the hold; skipped until the state changes or the finding
    * is {@link NON_CI_HOLD_RECHECK_MS} old (a late check can turn it into
@@ -273,9 +287,15 @@ function retryBackoff(
   previous: PrTracking | undefined,
   force: boolean,
   now: number,
-): "none" | "hold" | "static-ci-wait" {
+): "none" | "hold" | "static-ci-wait" | "approval-wait" {
   if (force || !previous || previous.nextAttemptAt <= now) return "none";
+  if (previous.approvalWaits) return "approval-wait";
   return previous.staticCiWaitState === undefined ? "hold" : "static-ci-wait";
+}
+
+/** PR activity and policy a reviewer wait was found under (see {@link PrTracking.approvalWaits}). */
+function approvalWaitKey(pr: AutoMergePolledPr, policyFingerprint: string | undefined): string {
+  return JSON.stringify([pr.updated_at ?? null, policyFingerprint ?? null]);
 }
 
 /** Whether a PR in a static CI wait's backoff still has that wait's head, state, and policy. */
@@ -295,14 +315,17 @@ function staticCiWaitUnchanged(
 /**
  * Re-check delay after a `waiting` outcome; tracks static CI waits
  * (`no-checks`, `no-passing`, `failing`) on the head, whose delay doubles up to
- * {@link STATIC_CI_WAIT_MAX_BACKOFF_MS}.
+ * {@link STATIC_CI_WAIT_MAX_BACKOFF_MS}, and reviewer waits, which back off the same way.
  */
 function waitingBackoffMs(
   state: PrTracking,
   result: AutoMergeResult,
   mergeableState: string,
   policyFingerprint: string | undefined,
+  waitKey: string,
 ): number {
+  state.approvalWaits = result.approvalWait ? (state.approvalWaits ?? 0) + 1 : undefined;
+  state.approvalWaitKey = result.approvalWait ? waitKey : undefined;
   const staticCiWait =
     result.ciWaitProblem === "no-checks" ||
     result.ciWaitProblem === "no-passing" ||
@@ -310,11 +333,9 @@ function waitingBackoffMs(
   state.staticCiWaits = staticCiWait ? (state.staticCiWaits ?? 0) + 1 : 0;
   state.staticCiWaitState = staticCiWait ? mergeableState : undefined;
   state.staticCiWaitPolicy = staticCiWait ? policyFingerprint : undefined;
-  if (!staticCiWait) return WAITING_BACKOFF_MS;
-  return Math.min(
-    WAITING_BACKOFF_MS * 2 ** (state.staticCiWaits - 1),
-    STATIC_CI_WAIT_MAX_BACKOFF_MS,
-  );
+  const repeats = state.approvalWaits ?? (staticCiWait ? state.staticCiWaits : 0);
+  if (!repeats) return WAITING_BACKOFF_MS;
+  return Math.min(WAITING_BACKOFF_MS * 2 ** (repeats - 1), STATIC_CI_WAIT_MAX_BACKOFF_MS);
 }
 
 /**
@@ -342,6 +363,23 @@ function recordNonCiHold(
  * Not a draft, not a fork, and (for a teammate's PR) still team-authored on
  * the fresh payload: the open-PR list entry can be stale.
  */
+/**
+ * Why a teammate's PR must not be auto-merged because of its base, or `null`.
+ *
+ * Teammates often target release branches or each other's feature branches;
+ * only a PR into the repository's default branch is merged. Fails closed when
+ * the payload lacks the base or default branch.
+ */
+function teamBaseReason(pr: AutoMergePolledPr): string | null {
+  const baseRef = pr.base?.ref;
+  const defaultBranch = pr.base?.repo?.default_branch;
+  if (typeof baseRef === "string" && baseRef !== "" && baseRef === defaultBranch) return null;
+  return (
+    `teammates' PRs are auto-merged only into the default branch; its base is ` +
+    `${baseRef || "unknown"}${defaultBranch ? `, not ${defaultBranch}` : ""}`
+  );
+}
+
 function eligiblePr(repo: string, pr: AutoMergePolledPr, team: boolean): boolean {
   if (pr.draft) return false;
   if (team && !isTeamAuthor(pr.author_association)) return false;
@@ -673,16 +711,19 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     }
     this.tracking.set(key, state);
     const policyFingerprint = this.options.policyFingerprint?.(repo);
-    // A static CI wait backs off long: only a new head, state, or policy ends it early.
+    // Static CI and reviewer waits back off long: only a new head, a new
+    // state (CI) or PR activity (reviewers), or a policy change ends it early.
+    const waitKey = approvalWaitKey(pr, policyFingerprint);
     if (
-      backoff === "static-ci-wait" &&
-      staticCiWaitUnchanged(state, previous, pr, policyFingerprint)
+      (backoff === "static-ci-wait" &&
+        staticCiWaitUnchanged(state, previous, pr, policyFingerprint)) ||
+      (backoff === "approval-wait" && state === previous && state.approvalWaitKey === waitKey)
     ) {
       return;
     }
 
     if (!eligiblePr(repo, pr, team)) return;
-    if (this.skipStacked(repo, prNumber, pr)) return;
+    if (this.skipStacked(repo, prNumber, pr, team)) return;
     const mergeableState = pr.mergeable_state ?? "";
     if (!evaluableState(state, mergeableState, force, now)) return;
     const quietMs = (this.options.quietSeconds ?? DEFAULT_AUTO_MERGE_QUIET_SECONDS) * 1000;
@@ -696,6 +737,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       decisionKeys,
       mergeableState,
       policyFingerprint,
+      waitKey,
     );
   }
 
@@ -719,9 +761,14 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     return [headKey, prKey];
   }
 
-  /** Whether a stacked PR must be skipped; logs the reason once per head and base. */
-  private skipStacked(repo: string, prNumber: number, pr: AutoMergePolledPr): boolean {
-    const reason = this.stackedBaseReason(repo, pr);
+  /** Whether a stacked (or, for a team PR, non-default-base) PR must be skipped; logs the reason once per head and base. */
+  private skipStacked(
+    repo: string,
+    prNumber: number,
+    pr: AutoMergePolledPr,
+    team: boolean,
+  ): boolean {
+    const reason = team ? teamBaseReason(pr) : this.stackedBaseReason(repo, pr);
     if (!reason) return false;
     const skipKey = `${repo.toLowerCase()}#${prNumber}@${pr.head?.sha ?? ""}:${pr.base?.ref ?? ""}`;
     if (!this.stackSkipsLogged.has(skipKey)) {
@@ -758,6 +805,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     decisionKeys: [head: string, pr: string],
     mergeableState: string,
     policyFingerprint: string | undefined,
+    waitKey: string,
   ): Promise<void> {
     const { repo, prNumber, team } = target;
     const runId = this.beginRun(repo, prNumber);
@@ -773,6 +821,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         onStart: () => this.recordStep(runId, AUTO_MERGE_CHECK_STEP),
         ...(runId !== null ? { runId } : {}),
         ...(previousCiWait !== undefined ? { ciWaitPosted: previousCiWait } : {}),
+        ...(team ? { team: true } : {}),
       });
     } catch (error) {
       result = { outcome: "failed", message: (error as Error).message, reviewed: false };
@@ -800,7 +849,10 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       if (result.reviewed) this.options.queue.markProcessed(AUTO_MERGE_SOURCE, prKey);
     };
 
-    if (result.outcome !== "waiting") state.staticCiWaitState = undefined;
+    if (result.outcome !== "waiting") {
+      state.staticCiWaitState = undefined;
+      state.approvalWaits = undefined;
+    }
     switch (result.outcome) {
       case "merged":
         if (team) {
@@ -821,7 +873,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         break;
       case "waiting":
         state.nextAttemptAt =
-          finishedAt + waitingBackoffMs(state, result, mergeableState, policyFingerprint);
+          finishedAt + waitingBackoffMs(state, result, mergeableState, policyFingerprint, waitKey);
         break;
       case "deferred":
         // Not an attempt: wait for the quota's reset (never less than the

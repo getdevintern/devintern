@@ -45,8 +45,23 @@ function optedInSlugs(
 }
 
 /**
- * Opted-in repos whose effective `AGENT_SANDBOX` would run the agent
- * unsandboxed.
+ * Whether a repo hands teammates' code to the coding agent: `sync_team_prs`
+ * (conflict resolution on their branches), or `auto_merge_team_prs` while
+ * auto-merge and its agent review are on (the review checks out the PR
+ * branch and runs the agent there).
+ */
+function handsTeamCodeToAgent(
+  config: WorkspaceConfig,
+  repo: WorkspaceConfig["repos"][number],
+): boolean {
+  if (repo.syncTeamPrs === true) return true;
+  const { autoMerge } = config.workspace;
+  return repo.autoMergeTeamPrs === true && autoMerge.enabled && autoMerge.review;
+}
+
+/**
+ * Repos that hand teammates' code to the agent (`handsTeamCodeToAgent`)
+ * whose effective `AGENT_SANDBOX` would run the agent unsandboxed.
  *
  * Only an explicit, registered provider (`native`, `nono`, `docker`, …)
  * counts. Unset and `none` are refused, and so is `auto`: it degrades to
@@ -63,7 +78,7 @@ export function teamPrSyncSandboxProblems(
 ): string[] {
   const problems: string[] = [];
   for (const repo of config.repos) {
-    if (repo.syncTeamPrs !== true) continue;
+    if (!handsTeamCodeToAgent(config, repo)) continue;
     const value = buildRepoEnv(repo, workspaceDir).AGENT_SANDBOX?.trim() ?? "";
     if (value && value !== "none" && value !== "auto" && getSandboxProvider(value)) continue;
     problems.push(`${repo.name} (AGENT_SANDBOX=${value || "<unset>"})`);
@@ -72,8 +87,9 @@ export function teamPrSyncSandboxProblems(
 }
 
 /**
- * Refuse a configuration that enables `sync_team_prs` without an explicit
- * agent sandbox. Used at worker startup and as part of live-reload validation.
+ * Refuse a configuration that enables `sync_team_prs`, or
+ * `auto_merge_team_prs` with the agent review on, without an explicit agent
+ * sandbox. Used at worker startup and as part of live-reload validation.
  *
  * @throws Listing every offending repo and its effective `AGENT_SANDBOX`.
  */
@@ -81,10 +97,12 @@ export function assertTeamPrSyncSandbox(config: WorkspaceConfig, workspaceDir?: 
   const problems = teamPrSyncSandboxProblems(config, workspaceDir);
   if (problems.length === 0) return;
   throw new Error(
-    "sync_team_prs requires an explicit agent sandbox provider (AGENT_SANDBOX=native, nono, " +
-      "or docker; `auto` and `none` are refused) because base-syncing teammates' PRs hands " +
-      "their code to the coding agent. Set AGENT_SANDBOX in the workspace .env, the repo's " +
-      "env_file, or [repos.env] (see `devintern sandbox`), or remove sync_team_prs from: " +
+    "sync_team_prs and auto_merge_team_prs (with auto_merge_review on) require an explicit " +
+      "agent sandbox provider (AGENT_SANDBOX=native, nono, or docker; `auto` and `none` are " +
+      "refused) because base-syncing or reviewing teammates' PRs hands their code to the " +
+      "coding agent. Set AGENT_SANDBOX in the workspace .env, the repo's env_file, or " +
+      "[repos.env] (see `devintern sandbox`), or remove sync_team_prs / auto_merge_team_prs " +
+      "from: " +
       problems.join(", "),
   );
 }

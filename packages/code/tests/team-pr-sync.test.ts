@@ -106,7 +106,7 @@ describe("sync_team_prs sandbox gate", () => {
       ),
     );
     expect(() => assertTeamPrSyncSandbox(config, workspaceDir)).toThrow(
-      /sync_team_prs requires an explicit agent sandbox.*backend \(AGENT_SANDBOX=<unset>\), frontend \(AGENT_SANDBOX=<unset>\)/s,
+      /require an explicit agent sandbox.*backend \(AGENT_SANDBOX=<unset>\), frontend \(AGENT_SANDBOX=<unset>\)/s,
     );
   });
 
@@ -115,7 +115,7 @@ describe("sync_team_prs sandbox gate", () => {
     const context = { multiTeam: false, sourceCount: 1, workspaceDir };
     expect(() =>
       validateReloadedWorkspaceConfig(parseWorkspaceConfig(optedIn()), current, context),
-    ).toThrow(/sync_team_prs requires an explicit agent sandbox.*backend/s);
+    ).toThrow(/require an explicit agent sandbox.*backend/s);
     expect(current.repos[0]?.syncTeamPrs).toBeUndefined();
 
     // A repo-env override to none is rejected even when the workspace .env is sandboxed.
@@ -143,9 +143,62 @@ describe("sync_team_prs sandbox gate", () => {
           repoManager: {} as RepoManagerLike,
           intervalSeconds: 60,
         }),
-      ).rejects.toThrow(/sync_team_prs requires an explicit agent sandbox.*backend/s);
+      ).rejects.toThrow(/require an explicit agent sandbox.*backend/s);
     } finally {
       state.close();
     }
+  });
+
+  describe("auto_merge_team_prs", () => {
+    /** backend opted into auto_merge_team_prs, with the given [workspace] lines. */
+    const teamAutoMerge = (workspace: string, inlineEnv = "") =>
+      `[workspace]\n${workspace}\n` +
+      BASE.replace(
+        'remote = "git@github.com:acme/backend.git"',
+        'remote = "git@github.com:acme/backend.git"\nauto_merge_team_prs = true' +
+          (inlineEnv ? `\n[repos.env]\n${inlineEnv}` : ""),
+      );
+
+    test("requires a sandbox while auto-merge and its agent review are on", () => {
+      const config = parseWorkspaceConfig(teamAutoMerge("auto_merge = true"));
+      expect(config.workspace.autoMerge.review).toBe(true);
+      expect(teamPrSyncSandboxProblems(config, workspaceDir)).toEqual([
+        "backend (AGENT_SANDBOX=<unset>)",
+      ]);
+      expect(() => assertTeamPrSyncSandbox(config, workspaceDir)).toThrow(
+        /auto_merge_team_prs.*require an explicit agent sandbox.*backend/s,
+      );
+      process.env.AGENT_SANDBOX = "native";
+      expect(teamPrSyncSandboxProblems(config, workspaceDir)).toEqual([]);
+    });
+
+    test("no agent runs on team code without auto-merge or its review", () => {
+      for (const workspace of [
+        "auto_merge = false",
+        "auto_merge = true\nauto_merge_review = false",
+      ]) {
+        const config = parseWorkspaceConfig(teamAutoMerge(workspace));
+        expect(teamPrSyncSandboxProblems(config, workspaceDir)).toEqual([]);
+      }
+    });
+
+    test("a reload enabling it without a sandbox is rejected", () => {
+      const current = parseWorkspaceConfig(BASE);
+      const context = { multiTeam: false, sourceCount: 1, workspaceDir };
+      expect(() =>
+        validateReloadedWorkspaceConfig(
+          parseWorkspaceConfig(teamAutoMerge("auto_merge = true", 'AGENT_SANDBOX = "none"')),
+          current,
+          context,
+        ),
+      ).toThrow(/backend \(AGENT_SANDBOX=none\)/);
+      expect(() =>
+        validateReloadedWorkspaceConfig(
+          parseWorkspaceConfig(teamAutoMerge("auto_merge = true", 'AGENT_SANDBOX = "nono"')),
+          current,
+          context,
+        ),
+      ).not.toThrow();
+    });
   });
 });

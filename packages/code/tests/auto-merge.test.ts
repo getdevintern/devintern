@@ -61,10 +61,13 @@ function fakeGitHub(
     labelError?: Error;
     /** Head commit checks; defaults to one passing check. */
     checks?: CiCheck[] | (() => Promise<CiCheck[]>);
+    /** `reviewDecision` per read (last repeats); defaults to null. */
+    reviewDecisions?: Array<string | null | Error>;
   } = {},
 ): FakeGitHub {
   const prs = overrides.prs ?? [pr()];
   let fetches = 0;
+  let decisionReads = 0;
   const github: FakeGitHub = {
     merges: [],
     comments: [],
@@ -72,6 +75,12 @@ function fakeGitHub(
     getPullRequest: async () => prs[Math.min(fetches++, prs.length - 1)] as PullRequestInfo,
     listFiles: async () => files,
     listReviews: async () => overrides.reviews ?? [],
+    getReviewDecision: async () => {
+      const decisions = overrides.reviewDecisions ?? [null];
+      const decision = decisions[Math.min(decisionReads++, decisions.length - 1)] ?? null;
+      if (decision instanceof Error) throw decision;
+      return decision;
+    },
     getDiff: async () => "diff --git a/src/x.ts b/src/x.ts\n+change",
     listCiChecks: async () => {
       const checks = overrides.checks ?? [{ name: "ci", state: "success" }];
@@ -528,8 +537,55 @@ describe("autoMergePr", () => {
       reviews: [{ state: "CHANGES_REQUESTED", user: { login: "alice" } }],
     });
     const result = await autoMergePr(URL, options(github));
-    expect(result).toMatchObject({ outcome: "waiting" });
+    expect(result).toMatchObject({ outcome: "waiting", approvalWait: true });
     expect(result.message).toContain("alice");
+  });
+
+  test("requireApproval waits while branch protection still requires a review", async () => {
+    // GitHub reports the PR `clean` (an admin credential could bypass the
+    // rule), yet the review decision says approval is missing.
+    for (const decision of ["REVIEW_REQUIRED", "CHANGES_REQUESTED"]) {
+      const github = fakeGitHub([file("README.md")], { reviewDecisions: [decision] });
+      const opts = options(github, { policy: { ...basePolicy, requireApproval: true } });
+      const result = await autoMergePr(URL, opts);
+      expect(result).toMatchObject({ outcome: "waiting", reviewed: false, approvalWait: true });
+      expect(github.merges).toHaveLength(0);
+      expect(opts.agentCalls).toHaveLength(0);
+    }
+  });
+
+  test("requireApproval merges once approved or when no review is required", async () => {
+    for (const decision of ["APPROVED", null]) {
+      const github = fakeGitHub([file("README.md")], { reviewDecisions: [decision] });
+      const opts = options(github, { policy: { ...basePolicy, requireApproval: true } });
+      expect((await autoMergePr(URL, opts)).outcome).toBe("merged");
+    }
+  });
+
+  test("requireApproval re-checks before merging: an approval dismissed during review holds it", async () => {
+    const github = fakeGitHub([file("src/x.ts")], {
+      reviewDecisions: ["APPROVED", "REVIEW_REQUIRED"],
+    });
+    const opts = options(github, { policy: { ...basePolicy, requireApproval: true } });
+    const result = await autoMergePr(URL, opts);
+    expect(result.outcome).toBe("waiting");
+    expect(result.message).toContain("approving review");
+    expect(result.approvalWait).toBe(true);
+    expect(github.merges).toHaveLength(0);
+  });
+
+  test("requireApproval fails closed when the review decision cannot be read", async () => {
+    const github = fakeGitHub([file("README.md")], {
+      reviewDecisions: [new Error("GitHub refused the review decision")],
+    });
+    const opts = options(github, { policy: { ...basePolicy, requireApproval: true } });
+    await expect(autoMergePr(URL, opts)).rejects.toThrow("review decision");
+    expect(github.merges).toHaveLength(0);
+  });
+
+  test("without requireApproval the review decision is not consulted", async () => {
+    const github = fakeGitHub([file("README.md")], { reviewDecisions: ["REVIEW_REQUIRED"] });
+    expect((await autoMergePr(URL, options(github))).outcome).toBe("merged");
   });
 
   test("a head that moves during review is not merged", async () => {
@@ -538,6 +594,7 @@ describe("autoMergePr", () => {
     });
     const result = await autoMergePr(URL, options(github));
     expect(result.outcome).toBe("waiting");
+    expect(result.approvalWait).toBeUndefined();
     expect(github.merges).toHaveLength(0);
   });
 
