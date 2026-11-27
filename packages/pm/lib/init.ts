@@ -65,7 +65,7 @@ export async function initializeProject(): Promise<void> {
   console.log(`2. Run devpm --interactive to create your first task`);
 }
 
-interface MigratedPmConfig {
+export interface MigratedPmConfig {
   jiraBaseUrl: string;
   jiraEmail: string;
   jiraApiToken: string;
@@ -111,25 +111,21 @@ async function readDevinternCodeConfig(cwd: string): Promise<MigratedPmConfig> {
  * @param config - Migrated values to substitute.
  * @returns Template with migrated values written in.
  */
-function applyMigratedConfig(envContent: string, config: MigratedPmConfig): string {
+export function applyMigratedConfig(envContent: string, config: MigratedPmConfig): string {
+  // Anchor to whole lines: the template also mentions these keys in comments
+  // (e.g. `#   https://... → JIRA_BASE_URL=...`), and an unanchored match would
+  // rewrite the comment instead of the setting. A replacer function keeps `$`
+  // sequences in a token from being read as replacement patterns.
+  const setLine = (content: string, pattern: RegExp, key: string, value: string) =>
+    value ? content.replace(pattern, () => `${key}=${value}`) : content;
   let result = envContent;
-  if (config.jiraBaseUrl) {
-    result = result.replace(/JIRA_BASE_URL=.*/, `JIRA_BASE_URL=${config.jiraBaseUrl}`);
-  }
-  if (config.jiraEmail) {
-    result = result.replace(/JIRA_EMAIL=.*/, `JIRA_EMAIL=${config.jiraEmail}`);
-  }
-  if (config.jiraApiToken) {
-    result = result.replace(/JIRA_API_TOKEN=.*/, `JIRA_API_TOKEN=${config.jiraApiToken}`);
-  }
-  if (config.agentHarness) {
-    result = result.replace(/AGENT_HARNESS=.*/, `AGENT_HARNESS=${config.agentHarness}`);
-  }
-  if (config.agentCliPath) {
-    // The example ships AGENT_CLI_PATH commented out (detection is the default).
-    // When migrating an explicit path, write it as an active line.
-    result = result.replace(/#?\s*AGENT_CLI_PATH=.*/, `AGENT_CLI_PATH=${config.agentCliPath}`);
-  }
+  result = setLine(result, /^JIRA_BASE_URL=.*$/m, "JIRA_BASE_URL", config.jiraBaseUrl);
+  result = setLine(result, /^JIRA_EMAIL=.*$/m, "JIRA_EMAIL", config.jiraEmail);
+  result = setLine(result, /^JIRA_API_TOKEN=.*$/m, "JIRA_API_TOKEN", config.jiraApiToken);
+  result = setLine(result, /^AGENT_HARNESS=.*$/m, "AGENT_HARNESS", config.agentHarness);
+  // The example ships AGENT_CLI_PATH commented out (detection is the default).
+  // When migrating an explicit path, write it as an active line.
+  result = setLine(result, /^#?\s*AGENT_CLI_PATH=.*$/m, "AGENT_CLI_PATH", config.agentCliPath);
   return result;
 }
 
