@@ -29,6 +29,8 @@ import type { WorkerEntitlementLike } from "../observability/worker-readiness";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
 import { loadWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
+import { DEFAULT_MEMORY_BUDGET } from "../worker/memory-budget";
+import type { MemoryBudgetPercentages } from "../worker/memory-budget";
 import { gitHubSlugFromRemote } from "../workspace/env";
 import {
   checkServiceManager,
@@ -515,7 +517,18 @@ interface ServiceRuntime {
   platform: "linux" | "darwin";
   workspaceDir: string;
   paths: { execPath: string; runtimePath: string; environmentPath: string };
+  /** Host-memory percentages for the generated systemd unit. */
+  memory: MemoryBudgetPercentages;
   deps: WorkerServiceDeps;
+}
+
+/** The workspace's memory budget, or the defaults when its config cannot be read. */
+function serviceMemoryBudget(workspaceDir: string): MemoryBudgetPercentages {
+  try {
+    return loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).workspace.execution.memory;
+  } catch {
+    return DEFAULT_MEMORY_BUDGET;
+  }
 }
 
 /**
@@ -551,6 +564,7 @@ async function offerService(ctx: PromptRun): Promise<ServiceStepResult> {
       runtimePath: deps.runtimePath ?? process.execPath,
       environmentPath: deps.environmentPath ?? process.env.PATH ?? "",
     },
+    memory: serviceMemoryBudget(workspaceDir),
     deps: { platform, homedir: deps.homedir, uid: deps.uid, run: deps.run },
   };
   // The host step already asked the service manager; do not ask (or say it) twice.
@@ -615,10 +629,10 @@ async function confirmServiceInstall(
 
 /** Write the platform service definition and print the manual install steps. */
 function printManualServiceDefinition(ctx: PromptRun, runtime: ServiceRuntime): void {
-  const { platform, workspaceDir, paths } = runtime;
+  const { platform, workspaceDir, paths, memory } = runtime;
   const [name, content] =
     platform === "linux"
-      ? [SYSTEMD_UNIT_NAME, renderSystemdUnit({ ...paths, projectDir: workspaceDir })]
+      ? [SYSTEMD_UNIT_NAME, renderSystemdUnit({ ...paths, projectDir: workspaceDir, memory })]
       : [LAUNCHD_PLIST_NAME, renderLaunchdPlist({ ...paths, workingDir: workspaceDir })];
   const definitionPath = join(workspaceDir, name);
   (ctx.deps.writeFile ?? ((path, text) => writeFileSync(path, text, "utf8")))(
@@ -634,7 +648,7 @@ function printManualServiceDefinition(ctx: PromptRun, runtime: ServiceRuntime): 
 
 /** Run the install/restart action and report its outcome. */
 async function installService(ctx: PromptRun, runtime: ServiceRuntime): Promise<ServiceStepResult> {
-  const { platform, workspaceDir, paths } = runtime;
+  const { platform, workspaceDir, paths, memory } = runtime;
   const since = Date.now();
   const verify = ctx.deps.verifyServiceStart;
   const { install: result, start } = ctx.deps.installService
@@ -646,6 +660,7 @@ async function installService(ctx: PromptRun, runtime: ServiceRuntime): Promise<
         {
           workspaceDir,
           ...paths,
+          memory,
           waitForStart: verify ? (from) => verify({ workspaceDir, since: from }) : undefined,
         },
         runtime.deps,

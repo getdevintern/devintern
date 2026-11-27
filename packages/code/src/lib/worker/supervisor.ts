@@ -55,7 +55,9 @@ export type QueuedJobWaitReason =
   /** The repository's checkout budget (per-repo limit or shared base) is in use. */
   | "repo"
   /** Every global slot is in use. */
-  | "global";
+  | "global"
+  /** Host memory pressure: starting another job now could push the machine into swap. */
+  | "memory";
 
 /** A queued job as reported by {@link TaskSupervisor.queuedJobs}. */
 export interface QueuedJobSnapshot {
@@ -171,9 +173,21 @@ export const JOB_PRIORITY: Record<JobKind, number> = {
  */
 export const PRIORITY_AGING_MS = 15 * 60 * 1000;
 
+/** Default wait before re-checking host pressure for jobs it held back. */
+export const DEFAULT_BACKPRESSURE_RETRY_MS = 15_000;
+
 export interface SupervisorOptions {
   /** Clock for priority aging; injectable for tests. */
   now?: () => number;
+  /**
+   * Host-pressure probe consulted before a queued job starts. Returning a
+   * reason defers admission (the job stays queued and is reported with
+   * `waitingOn: "memory"`); running jobs are never interrupted. A throwing
+   * probe fails open so a broken reader cannot idle the worker.
+   */
+  backpressure?: () => string | null;
+  /** How long to wait before probing again while jobs are held back. */
+  backpressureRetryMs?: number;
 }
 
 interface RunningJob {
@@ -212,6 +226,7 @@ export function createTaskSupervisor(
 ): TaskSupervisor {
   validateLimits(initialLimits);
   const now = options.now ?? Date.now;
+  const backpressureRetryMs = options.backpressureRetryMs ?? DEFAULT_BACKPRESSURE_RETRY_MS;
 
   let limits = { ...initialLimits };
   // Two independent closed states: `draining` is the shutdown drain (terminal
@@ -241,6 +256,16 @@ export function createTaskSupervisor(
   const repoWorktreeCount = (repo: string): number =>
     (taskCounts.get(repo) ?? 0) + (prCounts.get(repo) ?? 0);
 
+  /** Current host-pressure reason, or null. A throwing probe fails open. */
+  const pressureReason = (): string | null => {
+    if (!options.backpressure) return null;
+    try {
+      return options.backpressure();
+    } catch {
+      return null;
+    }
+  };
+
   /** Why `request` cannot start right now, or null when it can. */
   const blockedOn = (request: ScheduleRequest<unknown>): QueuedJobWaitReason | null => {
     if (request.exclusiveKey !== undefined && heldExclusiveKeys.has(request.exclusiveKey)) {
@@ -262,6 +287,9 @@ export function createTaskSupervisor(
       if (occupiedBaseRepos.has(request.repo!)) return "repo";
     }
     if (running.size >= limits.maxConcurrency) return "global";
+    // Last: a slot is free, but the host has no memory headroom for another
+    // agent process tree. The job stays queued and a timer re-checks.
+    if (pressureReason() !== null) return "memory";
     return null;
   };
 
@@ -312,6 +340,12 @@ export function createTaskSupervisor(
   };
 
   let pumping = false;
+  let pressureTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearPressureTimer = (): void => {
+    if (pressureTimer === undefined) return;
+    clearTimeout(pressureTimer);
+    pressureTimer = undefined;
+  };
   const pump = (): void => {
     if (pumping || admissionsBlocked()) return;
     pumping = true;
@@ -363,6 +397,18 @@ export function createTaskSupervisor(
       }
     } finally {
       pumping = false;
+      // A job held back only by host pressure has no completion event to
+      // re-pump: poll while the queue is non-empty so it starts once memory
+      // recovers. One unref'd timer at a time.
+      if (queued.length === 0) {
+        clearPressureTimer();
+      } else if (options.backpressure && pressureTimer === undefined && pressureReason() !== null) {
+        pressureTimer = setTimeout(() => {
+          pressureTimer = undefined;
+          pump();
+        }, backpressureRetryMs);
+        pressureTimer.unref?.();
+      }
     }
   };
 
@@ -379,6 +425,7 @@ export function createTaskSupervisor(
   const beginDraining = (): void => {
     if (draining) return;
     draining = true;
+    clearPressureTimer();
     rejectQueued();
   };
 
@@ -449,6 +496,7 @@ export function createTaskSupervisor(
     holdAdmissions(): void {
       if (holding) return;
       holding = true;
+      clearPressureTimer();
       rejectQueued();
     },
 

@@ -148,6 +148,7 @@ describe("GET /api/workspace", () => {
       isolation: "best_effort_host",
       maxConcurrency: 3,
       maxConcurrencyPerRepo: 2,
+      memory: { highPercent: 50, maxPercent: 65, swapMaxPercent: 15 },
     });
     expect(body.config.workspace.ciFailureFix).toBe(true);
     expect(body.config.workspace.conflictResolution).toBe("auto");

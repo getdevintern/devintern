@@ -166,6 +166,19 @@ max_concurrency_per_repo = 1     # task and PR jobs per repository
 
 Raising either limit above 1 requires `isolation = "best_effort_host"`. This is **not an isolation boundary**: parallel jobs share the host's ports, processes, Docker daemon, caches, and agent quota, which can cause `EADDRINUSE`, port conflicts, and lock errors. Every parallel PR worktree also installs its own dependencies, which uses more disk and install time. Use it only for repositories whose tasks tolerate that.
 
+### Memory budget
+
+The generated systemd unit caps the worker's whole cgroup at a share of host RAM, so one heavy job or several concurrent ones cannot exhaust the machine. The defaults are 50% for `MemoryHigh` (throttling), 65% for `MemoryMax` (hard cap), and 15% for swap (0 disables swap):
+
+```toml
+[workspace.execution]
+memory_high_percent = 50
+memory_max_percent = 65
+memory_swap_max_percent = 15
+```
+
+The values are percentages of host RAM, resolved when the systemd unit is written, and they apply to the worker plus everything its runs start (agents, test runners, browsers). Changing them takes effect after `devintern worker service install` rewrites and restarts the service. See [Running as a service](./worker.md#memory-limits) for the behavior at the cap. macOS launchd agents have no equivalent limit.
+
 The worker keeps idle PR worktrees for reuse, at most `max_concurrency_per_repo` (minimum 2) per repository, and removes any that have been unused for 24 hours. Worktrees of running jobs are never removed. Each repository gets its own worktree per branch, so repositories that use the same branch name never share one. Two open PRs from the same head branch in one repository do share a worktree. If both need work at the same moment, the second job is deferred without a PR comment and runs on a later pass.
 
 ## Environment

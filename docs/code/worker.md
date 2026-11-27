@@ -287,6 +287,29 @@ WantedBy=multi-user.target
 
 `KillMode=mixed` lets the worker stop its own running tasks, so a stop or restart doesn't end them as failures. A service installed by an earlier version doesn't have it: run `devintern worker service install` again to update it.
 
+### Memory limits
+
+On Linux the generated unit gives the worker a memory budget, so a heavy run cannot push the whole machine into swap and make systemd-oomd kill your browser or editor. The budget covers the worker and everything its runs start: agent processes, test runners, builds, and browsers. `MemoryHigh` throttles at 50% of host RAM, `MemoryMax` is a hard cap at 65%, and `MemorySwapMax` caps swap at 15%. The limits are bytes resolved from host RAM when the unit is written, so the defaults suit a laptop as well as a 64 GB workstation.
+
+The unit also stops a crash loop: after four starts in 30 minutes the service ends in `failed` instead of restarting every 30 seconds and recreating the same load.
+
+Change the percentages in `workspace.toml`, then reinstall the service so the unit is rewritten and restarted:
+
+```toml
+[workspace.execution]
+memory_high_percent = 50
+memory_max_percent = 65
+memory_swap_max_percent = 15   # 0 gives the worker no swap
+```
+
+```bash
+devintern worker service install
+```
+
+A service installed by an earlier version has neither the budget nor the crash-loop guard; the same command updates it. See [The worker uses too much memory](./worker-troubleshooting.md#the-worker-uses-too-much-memory) for what happens when the cap is reached.
+
+While running, the worker also pauses new jobs when the host runs low on memory (below 5% of RAM, high kernel memory pressure, or 85% of the worker's own budget). Jobs stay queued with "Waiting for the host to have enough free memory" and start when memory recovers; running jobs are never interrupted. `DEVINTERN_MEMORY_ADMISSION=0` disables the pause. macOS launchd agents have no equivalent cgroup budget.
+
 On Windows, run `devintern worker` in a terminal. For `PATH` pinning, git push credentials, and the commit identity on an unattended host, see [Keeping unattended runs healthy](./automated-task-processing.md#keeping-unattended-runs-healthy).
 
 ## Keeping the worker up to date

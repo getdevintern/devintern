@@ -414,6 +414,8 @@ export function prJobWaitMessage(waitingOn: QueuedJobWaitReason): string {
       return "Waiting for a free slot on this repository (max_concurrency_per_repo)";
     case "global":
       return "Waiting for a free worker slot (max_concurrency)";
+    case "memory":
+      return "Waiting for the host to have enough free memory";
   }
 }
 

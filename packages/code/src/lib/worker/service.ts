@@ -33,6 +33,9 @@ import {
 } from "fs";
 import { homedir as osHomedir, userInfo } from "os";
 import { dirname, join, resolve } from "path";
+import { hostTotalMemoryBytes } from "./host-memory";
+import { DEFAULT_MEMORY_BUDGET, memoryBudgetBytes, validateMemoryBudget } from "./memory-budget";
+import type { MemoryBudgetPercentages } from "./memory-budget";
 import { WORKER_CONFIG_EXIT_CODE } from "./startup";
 
 export type RunCommandResult = {
@@ -302,7 +305,20 @@ export function commandDetail(result: RunCommandResult): string {
  * still SIGKILLed. `TimeoutStopSec=` leaves room for that bounded graceful
  * shutdown (`DEFAULT_SHUTDOWN_DEADLINE_MS`).
  *
- * @param options - Binary path, working directory, and whether to run the direct webhook service
+ * `MemoryHigh=` / `MemoryMax=` / `MemorySwapMax=` cap the whole service
+ * cgroup, including every run child, test runner, and browser an agent
+ * starts. That keeps a heavy run (a full test suite times several concurrent
+ * jobs) from exhausting the machine and making systemd-oomd kill the user's
+ * desktop. The limits are a share of host RAM, resolved when the unit is
+ * written: the same defaults fit a laptop and a 64 GB workstation. They are
+ * configurable through `[workspace.execution]`; see `memory-budget.ts`.
+ *
+ * `StartLimitIntervalSec=` / `StartLimitBurst=` bound a crash loop: a worker
+ * that is repeatedly killed for memory stops being restarted after four tries
+ * in 30 minutes instead of recreating the same load every 30 seconds. Fix the
+ * cause, then `devintern worker service restart`.
+ *
+ * @param options - Binary path, working directory, memory budget, and whether to run the direct webhook service
  */
 export function renderSystemdUnit(options: {
   execPath: string;
@@ -312,6 +328,10 @@ export function renderSystemdUnit(options: {
   /** Non-default workspace home, exported as `DEVINTERN_WORKSPACE_DIR`. */
   workspaceDirEnv?: string;
   listen?: boolean;
+  /** Host-memory percentages; defaults to {@link DEFAULT_MEMORY_BUDGET}. */
+  memory?: MemoryBudgetPercentages;
+  /** Host RAM in bytes (tests); defaults to `/proc/meminfo`. */
+  totalMemoryBytes?: number;
 }): string {
   const command = options.listen ? "webhook serve" : "worker";
   const quote = (value: string) =>
@@ -326,17 +346,31 @@ export function renderSystemdUnit(options: {
     (options.workspaceDirEnv
       ? `Environment=${quote(`DEVINTERN_WORKSPACE_DIR=${options.workspaceDirEnv}`)}\n`
       : "");
+  // An invalid custom budget would make systemd reject the unit; fall back to
+  // the defaults rather than writing a service that cannot start.
+  const memory =
+    options.memory && validateMemoryBudget(options.memory) === null
+      ? options.memory
+      : DEFAULT_MEMORY_BUDGET;
+  const totalMemoryBytes = options.totalMemoryBytes ?? hostTotalMemoryBytes();
+  const limits =
+    totalMemoryBytes !== undefined ? memoryBudgetBytes(memory, totalMemoryBytes) : undefined;
+  const memoryLines = limits
+    ? `MemoryHigh=${limits.memoryHighBytes}\nMemoryMax=${limits.memoryMaxBytes}\nMemorySwapMax=${limits.memorySwapMaxBytes}\n`
+    : "";
   return `# ${SERVICE_MANAGED_MARKER}
 [Unit]
 Description=devintern ${options.listen ? "webhook server" : "worker"} (${options.projectDir})
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=1800
+StartLimitBurst=4
 
 [Service]
 Type=simple
 WorkingDirectory=${quote(options.projectDir)}
 ${environment}ExecStart=${executable} ${command}
-Restart=on-failure
+${memoryLines}Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=${WORKER_CONFIG_EXIT_CODE}
 KillMode=mixed
@@ -606,6 +640,7 @@ async function installSystemd(
     execPath: string;
     runtimePath: string;
     environmentPath: string;
+    memory?: MemoryBudgetPercentages;
   },
   d: ReturnType<typeof resolveDeps>,
 ): Promise<ServiceInstallResult> {
@@ -630,6 +665,7 @@ async function installSystemd(
         runtimePath: options.runtimePath,
         environmentPath: options.environmentPath,
         workspaceDirEnv: nonDefaultWorkspace(d, options.workspaceDir),
+        ...(options.memory ? { memory: options.memory } : {}),
       }),
     );
     const reload = await d.run("systemctl", ["--user", "daemon-reload"]);
@@ -777,6 +813,7 @@ export function workerServiceDefinitionCurrent(
     execPath: string;
     runtimePath?: string;
     environmentPath?: string;
+    memory?: MemoryBudgetPercentages;
   },
   deps: WorkerServiceDeps = {},
 ): boolean {
@@ -794,6 +831,7 @@ export function workerServiceDefinitionCurrent(
       runtimePath,
       environmentPath,
       workspaceDirEnv,
+      ...(options.memory ? { memory: options.memory } : {}),
     });
   } else if (d.platform === "darwin") {
     path = launchdAgentPath(d.homedir);
@@ -826,6 +864,8 @@ export async function installWorkerService(
     execPath: string;
     runtimePath?: string;
     environmentPath?: string;
+    /** Host-memory percentages written into the systemd unit (Linux only). */
+    memory?: MemoryBudgetPercentages;
   },
   deps: WorkerServiceDeps = {},
 ): Promise<ServiceInstallResult> {
