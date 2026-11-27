@@ -51,6 +51,11 @@ interface AnswerOptions {
    * Sentry questions (default: the recommended settings, no question).
    */
   expandedSettings?: boolean;
+  /**
+   * False when the run skips the license check (`licensing: false`): the check
+   * passes, so the wizard does not ask for a Pilot sign-in.
+   */
+  licensing?: boolean;
 }
 
 /** Every wizard prompt for the Markdown path, answered with defaults or "no". */
@@ -72,9 +77,9 @@ function markdownAnswers(fixture: WorkerInitFixture, options: AnswerOptions = {}
         ] as Answer[])
       : []),
     // One sign-in step: declining it also leaves relay pairing out, with no
-    // second sign-in question. It is asked even when the license check is
-    // skipped, because signing in is what connects instant events.
-    [SIGN_IN_PROMPT, "n\r"],
+    // second sign-in question. It is asked only when the license check needs a
+    // sign-in; a skipped check passes, so there is nothing to start.
+    ...(options.licensing === false ? [] : ([[SIGN_IN_PROMPT, "n\r"]] as Answer[])),
   ];
 }
 
@@ -207,7 +212,7 @@ ptyTest(
   "worker init wizard: markdown happy path (license check skipped) reports ready with every readiness check passing",
   async () => {
     await withWizardFixture(async (fixture, proxy) => {
-      const answers = markdownAnswers(fixture, { expandedSettings: true });
+      const answers = markdownAnswers(fixture, { expandedSettings: true, licensing: false });
       const run = await runWizard(fixture, proxy, answers, {
         licensing: false,
         args: ["--customize"],
@@ -248,7 +253,10 @@ ptyTest(
     const proxy = await startRecordingProxy();
     try {
       await fixture.seedRepository();
-      const answers: Answer[] = [[CONTINUE_PROMPT, "\r"], ...markdownAnswers(fixture)];
+      const answers: Answer[] = [
+        [CONTINUE_PROMPT, "\r"],
+        ...markdownAnswers(fixture, { licensing: false }),
+      ];
       const run = await runWizard(fixture, proxy, answers, { licensing: false });
       expect(run.answered).toHaveLength(answers.length);
       for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
@@ -326,11 +334,10 @@ ptyTest(
 
       // Drop the tracker, tasks-directory and PR-token prompts (already configured).
       // The query prompt shows the saved query as its default: keep it.
+      const allAnswers = markdownAnswers(fixture, { licensing: false });
       const answers: Answer[] = [
         [/Ready-tasks query[^\n]*: $/, "\r"],
-        ...markdownAnswers(fixture).slice(
-          markdownAnswers(fixture).findIndex(([prompt]) => prompt === QUERY_PROMPT) + 1,
-        ),
+        ...allAnswers.slice(allAnswers.findIndex(([prompt]) => prompt === QUERY_PROMPT) + 1),
       ];
       const run = await runWizard(fixture, proxy, answers, { licensing: false });
       expect(run.exitCode, run.output).toBe(0);
@@ -375,7 +382,7 @@ for (const [name, key, reason] of [
     `worker init wizard: ${name} at the mid-flow query prompt exits cleanly, keeps the chosen tracker, and a re-run completes`,
     async () => {
       await withWizardFixture(async (fixture, proxy) => {
-        const answers = markdownAnswers(fixture);
+        const answers = markdownAnswers(fixture, { licensing: false });
         const queryIndex = answers.findIndex(([prompt]) => prompt === QUERY_PROMPT);
         const aborted = await runWizard(
           fixture,
@@ -421,7 +428,7 @@ ptyTest(
         join(tasks, "T-1.md"),
         "---\nstatus: todo\n---\n# Relative task\n\nDo a thing.\n",
       );
-      const answers = markdownAnswers(fixture, { tasksDir: "./tasks" });
+      const answers = markdownAnswers(fixture, { tasksDir: "./tasks", licensing: false });
       const run = await runWizard(fixture, proxy, answers, { licensing: false });
       expect(run.exitCode, run.output).toBe(0);
       expect(readFileSync(fixture.envPath, "utf8")).toContain(`MARKDOWN_TASKS_DIR=${tasks}\n`);
@@ -444,7 +451,7 @@ ptyTest(
   async () => {
     await withWizardFixture(async (fixture, proxy) => {
       const token = `ghp_${randomUUID().replaceAll("-", "")}`;
-      const answers = markdownAnswers(fixture, { token });
+      const answers = markdownAnswers(fixture, { token, licensing: false });
       const run = await runWizard(fixture, proxy, answers, { licensing: false });
       expect(run.exitCode, run.output).toBe(0);
       expect(run.rawOutput).toContain("input hidden");
