@@ -11,6 +11,8 @@ import {
 import { workspaceCredentialsForChange } from "../workspace/manual-credentials";
 import { ensureWorkspaceCodeState, resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
 import { resolveRulesFilePath } from "./merge-safety-rules";
+import { parseMentionArg } from "./mention-trigger";
+import type { MentionTrigger } from "./mention-trigger";
 
 /** Use a registered repo's workspace layers for manual PR commands. */
 async function loadReviewEnvironment(changeUrl: string): Promise<void> {
@@ -34,10 +36,20 @@ export async function runAddressReviewCommand(args: string[]): Promise<void> {
   let verbose = false;
   let ciFeedbackPath: string | undefined;
   let expectedHeadSha: string | undefined;
+  let mention: MentionTrigger | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--no-push") {
       noPush = true;
+    } else if (args[i] === "--mention") {
+      // Worker-internal: the @mention comment or review that triggered this run.
+      mention = parseMentionArg(args[i + 1] ?? "");
+      if (!mention) {
+        console.error("Error: --mention requires <issue_comment|review_comment|review>:<id>");
+        process.exitCode = 1;
+        return;
+      }
+      i++;
     } else if (args[i] === "--no-reply") {
       noReply = true;
     } else if (args[i] === "-v" || args[i] === "--verbose") {
@@ -103,6 +115,7 @@ export async function runAddressReviewCommand(args: string[]): Promise<void> {
       verbose,
       ciFeedbackPath,
       expectedHeadSha,
+      mention,
     });
   } catch (error) {
     if (exitIfWorkerUsageLimit(error)) {

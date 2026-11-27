@@ -31,6 +31,7 @@ import type { RunOrigin } from "../state/run-recorder";
 import { failureFromError, tagOutcomeClass } from "../state/run-outcome";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
+import type { MentionTrigger } from "./mention-trigger";
 import { GIT_CLEAN_ARGS, Utils } from "../utils";
 import { hasUncommittedWork } from "../utils/git-stage";
 import { WorktreeBusyError } from "../worker/usage-limit-protocol";
@@ -46,6 +47,8 @@ export interface AddressReviewOptions {
   ciFeedbackPath?: string;
   /** Internal worker guard: refuse stale feedback after the MR head moves. */
   expectedHeadSha?: string;
+  /** Internal worker mode: the @mention that triggered this run (GitHub only). */
+  mention?: MentionTrigger;
 }
 
 function readCiFeedbackFile(filePath: string): CiFailureFeedback {
@@ -748,7 +751,10 @@ export async function addressReview(
   console.log(`   Repository: ${repoSlug}`);
   console.log(`   ${changeKind} #${prNumber}`);
 
-  const adapter = await createReviewAdapter(identity, verbose);
+  if (options.mention && identity.provider !== "github") {
+    console.warn("⚠️  --mention applies to GitHub PRs only; ignoring it.");
+  }
+  const adapter = await createReviewAdapter(identity, verbose, { mention: options.mention });
   const { change: pr, gitAuthor } = adapter;
   console.log(`   Title: ${pr.title}`);
   console.log(`   Branch: ${pr.head.ref}`);

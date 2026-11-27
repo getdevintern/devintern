@@ -12,6 +12,7 @@ import { join } from "path";
 import { resetHintToMs } from "@devintern/agent-harness";
 
 import { pinnedHarnessChildEnv } from "../agent/selection";
+import { childOutputMode, forwardChildOutput } from "../observability/child-output";
 import { harnessLogRunEnv } from "../observability/harness-logs";
 import { AUTO_MERGE_OUTCOMES } from "../review/auto-merge";
 import type { AutoMergeOutcome, AutoMergePolicy, AutoMergeResult } from "../review/auto-merge";
@@ -154,12 +155,13 @@ function spawnOnce(
     }
     let output = "";
     let settled = false;
+    const stdout = childOutputMode();
     const child = spawn(
       process.execPath,
       [opts.entrypoint ?? (process.argv[1] as string), "auto-merge", prUrl, ...args],
       {
         detached: true,
-        stdio: ["inherit", "inherit", "inherit", "pipe"],
+        stdio: ["inherit", stdout, stdout, "pipe"],
         cwd: opts.cwd,
         env: {
           ...opts.env,
@@ -168,6 +170,7 @@ function spawnOnce(
         },
       },
     );
+    forwardChildOutput(child, `auto-merge ${prUrl}`);
     const abort = () => killTree(child.pid);
     opts.signal?.addEventListener("abort", abort, { once: true });
     const timeoutMs = opts.timeoutMs ?? DEFAULT_AUTO_MERGE_TIMEOUT_MS;

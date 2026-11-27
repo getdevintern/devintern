@@ -6,7 +6,10 @@
  * regardless of how many PRs are open:
  * - `GET /repos/{r}/issues/comments?since=` (PR conversation comments)
  * - `GET /repos/{r}/pulls/comments?since=`  (inline review comments)
- * filtered for the bot's @mention.
+ * filtered for the bot's @mention. Review bodies have no repo-wide feed, so a
+ * third (optional) feed lists the reviews of open PRs updated since its
+ * cursor. Each mention is handed to the pipeline with its kind and id, so the
+ * run addresses the mention itself, also on PRs a human opened.
  *
  * Guardrails, in order:
  * 1. Bot identity required — without a resolvable bot username there is
@@ -37,9 +40,12 @@ import { classifyWebhookError } from "../webhook/webhook-errors";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import type { TaskExecutionResult } from "./task-polling";
+import { isBotAuthored } from "../review/mention-trigger";
+import type { MentionKind } from "../review/mention-trigger";
 import type { Acquirer } from "../../worker";
 
 export interface SweptComment {
+  /** Comment id, or review id for review-feed items. */
   id: number;
   body: string | null;
   user: { login: string; type: string };
@@ -64,6 +70,12 @@ export interface MentionSweepGitHub {
   fetchIssueCommentsSince(sinceIso: string): Promise<SweptComment[]>;
   /** Repo-wide inline review comments since `sinceIso`. */
   fetchReviewCommentsSince(sinceIso: string): Promise<SweptComment[]>;
+  /**
+   * Reviews submitted since `sinceIso` on open PRs, as feed items
+   * (`created_at` = `submitted_at`, `pull_request_url` set). Optional: without
+   * it, review bodies are not swept.
+   */
+  fetchReviewsSince?(sinceIso: string): Promise<SweptComment[]>;
   /** Bot login (e.g. `devintern[bot]`), or null when not resolvable. */
   getBotUsername(): Promise<string | null>;
   /** PR lookup; must reject/throw for plain (non-PR) issues. */
@@ -89,7 +101,11 @@ export interface MentionSweepAcquirerOptions {
    * Returns the run outcome so an `"interrupted"`/`"deferred"` run can release
    * the comment's dedupe claim and be retried instead of being lost.
    */
-  handleMention: (comment: SweptComment, prNumber: number) => Promise<TaskExecutionResult>;
+  handleMention: (
+    comment: SweptComment,
+    prNumber: number,
+    kind: MentionKind,
+  ) => Promise<TaskExecutionResult>;
   /**
    * Failed (throwing) handler attempts tolerated per comment before the
    * mention is marked handled anyway. Defaults to
@@ -244,12 +260,23 @@ export class MentionSweepAcquirer implements Acquirer {
         `github:mention:issuecomments:${this.options.repo}`,
         (since) => this.options.github.fetchIssueCommentsSince(since),
         botNames,
+        "issue_comment",
       );
       await this.sweepFeed(
         `github:mention:prcomments:${this.options.repo}`,
         (since) => this.options.github.fetchReviewCommentsSince(since),
         botNames,
+        "review_comment",
       );
+      const fetchReviewsSince = this.options.github.fetchReviewsSince?.bind(this.options.github);
+      if (fetchReviewsSince) {
+        await this.sweepFeed(
+          `github:mention:reviews:${this.options.repo}`,
+          fetchReviewsSince,
+          botNames,
+          "review",
+        );
+      }
     } catch (error) {
       console.warn(
         `⚠️  [${this.name}] ${this.options.repo} sweep failed: ${(error as Error).message}`,
@@ -287,6 +314,7 @@ export class MentionSweepAcquirer implements Acquirer {
     cursorSource: string,
     fetchSince: (sinceIso: string) => Promise<SweptComment[]>,
     botNames: string[],
+    kind: MentionKind,
   ): Promise<void> {
     const { workerState, queue, github, handleMention, verbose } = this.options;
     const maxAttempts = feedbackMaxAttempts(this.options.feedbackMaxAttempts);
@@ -315,7 +343,8 @@ export class MentionSweepAcquirer implements Acquirer {
       if (comment.created_at > maxCreatedAt) {
         maxCreatedAt = comment.created_at;
       }
-      if (comment.user.type === "Bot") {
+      // Bot-loop safety: never act on the bot's or the worker's own output.
+      if (isBotAuthored(comment, botNames)) {
         continue;
       }
       const matchedBot = botNames.find((name) => mentionsBot(comment.body, name));
@@ -323,7 +352,7 @@ export class MentionSweepAcquirer implements Acquirer {
         continue;
       }
 
-      const externalId = `comment:${comment.id}`;
+      const externalId = mentionDedupeId(kind, comment.id);
       if (queue.hasProcessed(SOURCE, externalId)) {
         continue;
       }
@@ -366,7 +395,7 @@ export class MentionSweepAcquirer implements Acquirer {
         console.log(
           `\n📌 [${this.name}] @${matchedBot} mentioned on PR #${prNumber} by @${comment.user.login}`,
         );
-        const outcome = await handleMention(comment, prNumber);
+        const outcome = await handleMention(comment, prNumber, kind);
         if (outcome === "interrupted" || outcome === "deferred") {
           // The run did not settle (shutdown drain) or never started (every
           // harness usage-limited). Neither is an attempt: release the claim
@@ -430,6 +459,19 @@ export class MentionSweepAcquirer implements Acquirer {
   }
 }
 
+/** `processed_events` source shared by the mention sweep and the relay. */
+export const MENTION_DEDUPE_SOURCE = SOURCE;
+
+/**
+ * `processed_events` id of one mention: `comment:<id>` for conversation and
+ * inline review comments (unchanged from earlier releases), `review:<id>` for
+ * review bodies. The relay marks the same ids, so a mention it handled is not
+ * run again by the fallback sweep.
+ */
+export function mentionDedupeId(kind: MentionKind, id: number): string {
+  return kind === "review" ? `review:${id}` : `comment:${id}`;
+}
+
 /** The earlier of two ISO timestamps, treating `null` as unset. */
 function earlierIso(held: string | null, candidate: string): string {
   return held !== null && held < candidate ? held : candidate;
@@ -451,4 +493,53 @@ export function extractPrNumber(comment: SweptComment): number | null {
     return null;
   }
   return parseInt(match[1], 10);
+}
+
+/** Most recently updated open PRs one reviews-feed tick inspects. */
+export const REVIEW_FEED_PR_LIMIT = 30;
+
+/** GitHub reads the reviews feed needs (see {@link collectReviewsSince}). */
+export interface ReviewFeedGitHub {
+  /** Open PRs, most recently updated first. */
+  listOpenPrsByUpdated(): Promise<Array<{ number: number; updated_at: string; url: string }>>;
+  /** Submitted reviews of one PR. */
+  listReviews(prNumber: number): Promise<
+    Array<{
+      id: number;
+      body: string | null;
+      user: { login: string; type?: string } | null;
+      submitted_at?: string | null;
+      html_url?: string;
+    }>
+  >;
+}
+
+/**
+ * Reviews submitted at or after `sinceIso` on open PRs updated since then, as
+ * mention-sweep feed items (oldest first). GitHub has no repo-wide reviews
+ * feed, so this lists the most recently updated open PRs (a review bumps a
+ * PR's `updated_at`) and reads the reviews of those updated since the cursor.
+ */
+export async function collectReviewsSince(
+  github: ReviewFeedGitHub,
+  sinceIso: string,
+): Promise<SweptComment[]> {
+  const prs = (await github.listOpenPrsByUpdated())
+    .filter((pr) => pr.updated_at >= sinceIso)
+    .slice(0, REVIEW_FEED_PR_LIMIT);
+  const items: SweptComment[] = [];
+  for (const pr of prs) {
+    for (const review of await github.listReviews(pr.number)) {
+      if (!review.submitted_at || review.submitted_at < sinceIso || !review.user) continue;
+      items.push({
+        id: review.id,
+        body: review.body,
+        user: { login: review.user.login, type: review.user.type ?? "User" },
+        created_at: review.submitted_at,
+        html_url: review.html_url ?? "",
+        pull_request_url: pr.url,
+      });
+    }
+  }
+  return items.sort((a, b) => a.created_at.localeCompare(b.created_at));
 }

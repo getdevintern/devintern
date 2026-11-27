@@ -7,6 +7,7 @@ import { autoMergeCliArgs } from "../src/lib/acquirers/auto-merge-cli";
 import type { AutoMergePolicy } from "../src/lib/review/auto-merge";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
+import type { MentionTrigger } from "../src/lib/review/mention-trigger";
 import {
   coalescePrFeedbackRuns,
   createFleetAddressPr,
@@ -115,6 +116,7 @@ describe("fleet event handlers", () => {
     prNumber: number;
     cwd: string;
     env: Record<string, string | undefined>;
+    mention?: MentionTrigger;
   }>;
   let pushAccess: boolean | Error;
   const ciFixes: Array<{ slug: string; prNumber: number; feedbackPath: string; cwd: string }> = [];
@@ -140,9 +142,15 @@ describe("fleet event handlers", () => {
     runReview: async (
       slug: string,
       prNumber: number,
-      opts: { cwd: string; env: Record<string, string | undefined> },
+      opts: { cwd: string; env: Record<string, string | undefined>; mention?: MentionTrigger },
     ) => {
-      reviews.push({ slug, prNumber, cwd: opts.cwd, env: opts.env });
+      reviews.push({
+        slug,
+        prNumber,
+        cwd: opts.cwd,
+        env: opts.env,
+        ...(opts.mention ? { mention: opts.mention } : {}),
+      });
       return true;
     },
     runCiFix: async (
@@ -401,6 +409,84 @@ describe("fleet event handlers", () => {
     expect(await handle("acme/backend", { user: { login: "maintainer" } }, 5)).toBe(true);
     expect(reviews).toHaveLength(1);
     expect(reviews[0].prNumber).toBe(5);
+  });
+
+  test("mention handler hands the triggering comment to the review run", async () => {
+    const handle = createFleetMentionHandler(deps());
+
+    expect(
+      await handle(
+        "acme/backend",
+        { id: 501, body: "@devintern-ai add a line", user: { login: "maintainer" } },
+        47,
+      ),
+    ).toBe(true);
+    expect(
+      await handle(
+        "acme/backend",
+        { id: 77, body: "@devintern-ai fix", user: { login: "maintainer" } },
+        47,
+        "review",
+      ),
+    ).toBe(true);
+    expect(reviews.map((review) => review.mention)).toEqual([
+      { kind: "issue_comment", id: 501 },
+      { kind: "review", id: 77 },
+    ]);
+  });
+
+  test("mention handler never acts on the bot's own comments", async () => {
+    const handle = createFleetMentionHandler(deps());
+    let checked = false;
+    const gated = createFleetMentionHandler({
+      ...deps(),
+      userHasPushAccess: async () => {
+        checked = true;
+        return true;
+      },
+    });
+
+    expect(
+      await handle("acme/backend", { id: 1, user: { login: "devintern-ai[bot]", type: "Bot" } }, 5),
+    ).toBe("skipped");
+    expect(
+      await gated(
+        "acme/backend",
+        {
+          id: 2,
+          body: "<!-- devintern:auto-merge-status --> @devintern-ai",
+          user: { login: "me" },
+        },
+        5,
+      ),
+    ).toBe("skipped");
+    expect(checked).toBe(false);
+    expect(reviews).toHaveLength(0);
+  });
+
+  test("each mention arriving during an active run gets its own follow-up run", async () => {
+    let releaseFirst!: () => void;
+    const firstRun = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const runs: Array<MentionTrigger | undefined> = [];
+    const addressPr = coalescePrFeedbackRuns(async (_slug, _pr, mention) => {
+      runs.push(mention);
+      if (runs.length === 1) await firstRun;
+      return true;
+    });
+
+    const first = addressPr("acme/backend", 42);
+    const a = addressPr("acme/backend", 42, { kind: "issue_comment", id: 1 });
+    const aAgain = addressPr("acme/backend", 42, { kind: "issue_comment", id: 1 });
+    const b = addressPr("acme/backend", 42, { kind: "review", id: 2 });
+    const plain = addressPr("acme/backend", 42);
+    releaseFirst();
+    await Promise.all([first, a, aAgain, b, plain]);
+
+    // The duplicate mention is collapsed; the plain rerun is satisfied by the
+    // mention runs, which collect regular feedback too.
+    expect(runs).toEqual([undefined, { kind: "issue_comment", id: 1 }, { kind: "review", id: 2 }]);
   });
 
   test("mention handler propagates permission API errors instead of denying", async () => {

@@ -117,7 +117,7 @@ Pairing state and this worker's relay identity are stored in owner-only `~/.devi
 ## How events are handled
 
 - Reviews on the agent's own PRs are addressed automatically, as in polling mode.
-- PR comments that mention `@devintern-ai` are acted on only for users with push access.
+- PR comments and reviews that mention `@devintern-ai` are acted on, on any PR, only for users with push access. See [Mention the bot on any PR](./pr-follow-up.md#mention-the-bot-on-any-pr).
 - Tracker events re-run your configured ready-tasks query before acting, so "ready" still means what your query says.
 - GitLab events are hints: the worker re-fetches MR, discussion, and CI state before acting.
 
