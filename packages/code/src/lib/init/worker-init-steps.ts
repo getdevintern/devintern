@@ -32,19 +32,21 @@ import { toReportCheck } from "../observability/readiness-json";
 import { collectWorkerDoctorChecks } from "../observability/worker-readiness";
 import type { WorkerDoctorDeps } from "../observability/worker-readiness";
 import {
+  DEVINTERN_LABEL,
   TRACKER_CAPABILITIES,
+  defaultQueryZeroMatchHint,
+  defaultTaskQuery,
+  isDefaultTaskQuery,
+  supportsLabelCreation,
   supportsPolling,
   trackersSupportingPolling,
 } from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
 import { Utils } from "../utils";
 import { writeSecretFile } from "../utils/secret-file";
-import { detectCheckoutBranches, remoteTrackingBranchExists } from "../workspace/checkout-branches";
 import { loadWorkspaceConfig } from "../workspace/config";
 import {
-  clearRepoDefaultBranch,
   ensureWorkspaceAndAddRepo,
-  writeRepoDefaultBranch,
   writeWorkerOperatingPolicy,
   writeWorkspaceDefaults,
 } from "../workspace/init";
@@ -63,8 +65,10 @@ import {
   relayStep,
   serviceStep,
 } from "./worker-init-activation";
+import { recordRepoDefaultBranch } from "./worker-init-branch";
 import { errorMessage } from "./worker-init-fs";
 import { hostStep, withoutRepeatedHostFailures } from "./worker-init-host";
+import { defaultDevinternLabelOps } from "./worker-init-label";
 import {
   applyPlan,
   planChangesNothing,
@@ -167,6 +171,7 @@ export function initRerunCommand(
     parts.push(`--task-query ${shellQuote(taskQuery)}`);
   }
   if (args.repoFromCwd) parts.push("--repo-from-cwd");
+  if (args.createLabel) parts.push("--create-label");
   const envFile = overrides.envFile ?? ctx.envFilePath;
   if (envFile) parts.push(`--env-file ${envFile.startsWith("<") ? envFile : shellQuote(envFile)}`);
   if (args.signIn) {
@@ -297,86 +302,6 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
 }
 
 /**
- * Record `[[repos]].default_branch`: the base task worktrees are cut from and
- * worker task pull requests target. A branch is only offered or kept when it
- * exists on origin, because worktrees come from `origin/<branch>`. When the
- * checkout is on the remote's default branch it is saved silently; otherwise
- * the wizard asks, offering the saved value (or the remote default) on Enter so
- * a re-run keeps the earlier verified answer.
- */
-async function recordRepoDefaultBranch(
-  run: PromptRun,
-  workspaceDir: string,
-  repoName: string,
-): Promise<void> {
-  const { branch, defaultBranch } = await detectCheckoutBranches(run.cwd);
-  if (!branch && !defaultBranch) return;
-  const saved = loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).repos.find(
-    (repo) => repo.name === repoName,
-  )?.defaultBranch;
-  const currentOnOrigin = branch ? await remoteTrackingBranchExists(run.cwd, branch) : false;
-  const savedOnOrigin = saved ? await remoteTrackingBranchExists(run.cwd, saved) : false;
-  if (saved && !savedOnOrigin) {
-    run.log(`⚠️  Saved default_branch "${saved}" is not on origin; choosing another branch.`);
-  }
-
-  if (!defaultBranch) {
-    if (!savedOnOrigin) {
-      if (saved) clearRepoDefaultBranch(workspaceDir, repoName);
-      run.log(
-        "ℹ️  This clone has no origin/HEAD, so default_branch stays unset; " +
-          "the worker follows the remote's default branch.",
-      );
-    }
-    return;
-  }
-
-  if (branch && branch !== defaultBranch) {
-    if (currentOnOrigin) {
-      const chosen = await promptRepoDefaultBranch(run, {
-        current: branch,
-        remote: defaultBranch,
-        ...(savedOnOrigin ? { saved } : {}),
-      });
-      if (chosen !== saved) {
-        writeRepoDefaultBranch(workspaceDir, repoName, chosen);
-        run.log(`💾 Wrote default_branch = "${chosen}" to workspace.toml`);
-      }
-      return;
-    }
-    run.log(
-      `⚠️  The checkout is on "${branch}", but that branch is not on origin; ` +
-        `using "${savedOnOrigin ? saved : defaultBranch}" instead.`,
-    );
-  }
-
-  const chosen = savedOnOrigin ? saved : defaultBranch;
-  if (!chosen || chosen === saved) return;
-  writeRepoDefaultBranch(workspaceDir, repoName, chosen);
-  run.log(`💾 Wrote default_branch = "${chosen}" to workspace.toml`);
-}
-
-/** Ask which branch task worktrees and PRs use; Enter keeps the saved or remote default. */
-async function promptRepoDefaultBranch(
-  run: PromptRun,
-  ctx: { current: string; remote: string; saved?: string },
-): Promise<string> {
-  const fallback = ctx.saved ?? ctx.remote;
-  const choices = [ctx.current, ctx.remote];
-  for (;;) {
-    const answer = (
-      await run.prompt(`Base tasks and PRs on ${choices.join(" or ")}? [${fallback}]: `)
-    ).trim();
-    if (!answer) return fallback;
-    if (choices.includes(answer)) return answer;
-    if (answer.toLowerCase() === "current") return ctx.current;
-    if (answer.toLowerCase() === "default") return ctx.remote;
-    if (answer === ctx.saved) return answer;
-    run.log(`   Enter ${choices.join(" or ")}, or press Enter for ${fallback}.`);
-  }
-}
-
-/**
  * Ready-tasks query. The wizard prompts (a re-run offers the saved query as
  * the Enter default), validates it with a live dry run, and writes it; flags
  * mode takes `--task-query` and completes the plan with the credentials.
@@ -399,36 +324,50 @@ async function queryStep(run: SetupRun): Promise<boolean> {
 /** Prompt for the ready-tasks query until one is entered (and, with a dry run, works). */
 async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined): Promise<string> {
   run.log("\n3️⃣  Which tasks should the worker pick up?");
-  run.log("   The query uses the same language as 'devintern --query' for your tracker.");
+  // A re-run keeps the saved query as the Enter default; a new workspace
+  // offers the tracker's devintern-label query.
+  const fallback = currentQuery || defaultTaskQuery(run.trackerType);
   if (currentQuery) {
+    run.log("   The query uses the same language as 'devintern --query' for your tracker.");
     run.log("   Press Enter to keep the current query.");
-  } else if (run.queryExample) {
-    run.log(`   Example: ${run.queryExample}`);
+  } else if (fallback) {
+    run.log(
+      `   Press Enter to pick up open tickets labeled ${DEVINTERN_LABEL}, or type your own query`,
+    );
+    run.log("   (the same language as 'devintern --query' for your tracker).");
+  } else {
+    run.log("   The query uses the same language as 'devintern --query' for your tracker.");
+    if (run.queryExample) run.log(`   Example: ${run.queryExample}`);
   }
 
   let query = "";
   for (;;) {
     query =
       (
-        await run.prompt(
-          currentQuery ? `Ready-tasks query [${currentQuery}]: ` : "Ready-tasks query: ",
-        )
+        await run.prompt(fallback ? `Ready-tasks query [${fallback}]: ` : "Ready-tasks query: ")
       ).trim() ||
-      currentQuery ||
+      fallback ||
       "";
     if (!query) {
       run.log("❌ A query is required — it defines what 'ready for the agent' means.");
       continue;
     }
     if (!run.deps.dryRunQuery) {
+      await offerDevinternLabel(run, query);
       break;
     }
     try {
       const count = await run.deps.dryRunQuery(query);
       run.log(`✅ Query works: ${count} task(s) match right now.`);
       if (count === 0) {
-        run.log("   (0 matches is fine if nothing is ready yet — the worker will poll.)");
+        const labelHint = defaultQueryZeroMatchHint(run.trackerType, query);
+        run.log(
+          labelHint
+            ? `   ${labelHint}.`
+            : "   (0 matches is fine if nothing is ready yet — the worker will poll.)",
+        );
       }
+      await offerDevinternLabel(run, query);
       break;
     } catch (error) {
       const failure = describeQueryFailure((error as Error).message, process.env.GITHUB_REPO);
@@ -449,6 +388,38 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
     }
   }
   return query;
+}
+
+/**
+ * With the default query, a tracker that can create labels and lacks the
+ * devintern label: ask before creating it (never silently). A failed lookup
+ * or creation only warns; the query still works once a ticket is labeled.
+ */
+async function offerDevinternLabel(run: PromptRun, query: string): Promise<void> {
+  const { trackerType, trackerName } = run;
+  if (!isDefaultTaskQuery(trackerType, query) || !supportsLabelCreation(trackerType)) return;
+  const ops = run.deps.devinternLabelOps?.(trackerType, process.env);
+  if (!ops) return;
+  try {
+    if (await ops.exists()) return;
+  } catch (error) {
+    run.log(`⚠️  Could not check for the ${DEVINTERN_LABEL} label: ${errorMessage(error)}`);
+    return;
+  }
+  run.log(`   ${trackerName} has no ${DEVINTERN_LABEL} label yet.`);
+  if (
+    !(await askYesNo(run, `Create the ${DEVINTERN_LABEL} label in ${trackerName}? [Y/n]: `, true))
+  ) {
+    run.log(`   Not created. Create it in ${trackerName} before labeling tickets.`);
+    return;
+  }
+  try {
+    await ops.create();
+    run.log(`🏷️  Created the ${DEVINTERN_LABEL} label in ${trackerName}.`);
+  } catch (error) {
+    run.log(`⚠️  Could not create the ${DEVINTERN_LABEL} label: ${errorMessage(error)}`);
+    run.log(`   Create it in ${trackerName} (the token may lack permission to manage labels).`);
+  }
 }
 
 /**
@@ -693,6 +664,8 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
   );
 
   const checks: InitCheck[] = [auth];
+  const label = authFailed ? undefined : await labelCheck(run, timeoutMs);
+  if (label) checks.push(label);
   for (const check of readiness) {
     const mapped = toReportCheck(check);
     if (check.id === "query" && authFailed) {
@@ -709,6 +682,61 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
     checks.push(mapped);
   }
   return checks;
+}
+
+/**
+ * Flags mode: the `devintern` label the default query selects. Checked when
+ * the default query is in use or `--create-label` was given, and created
+ * only with `--create-label`. A missing or uncreatable label warns: the
+ * query still works, it just matches nothing until a ticket is labeled.
+ *
+ * @returns The report row, or undefined when there is nothing to check
+ */
+async function labelCheck(run: FlagsRun, timeoutMs: number): Promise<InitCheck | undefined> {
+  const plan = run.plan!;
+  const { createLabel } = run.args;
+  if (!createLabel && !plan.taskQueryDefaulted) return undefined;
+  const base = { name: "label", label: `${DEVINTERN_LABEL} label` } as const;
+  const name = trackerDisplayName(plan.tracker);
+  if (!supportsLabelCreation(plan.tracker)) {
+    // Jira and Azure DevOps create a label (tag) the first time it is used.
+    return createLabel
+      ? {
+          ...base,
+          status: "skipped",
+          message: `${name}: setup cannot create labels here; adding ${DEVINTERN_LABEL} to a ticket creates it`,
+        }
+      : undefined;
+  }
+  const ops = (run.deps.devinternLabelOps ?? defaultDevinternLabelOps)(
+    plan.tracker,
+    plan.credentialEnv,
+  );
+  if (!ops) return undefined;
+  try {
+    if (await withTimeout(ops.exists(), timeoutMs, `${name} label lookup`)) {
+      return { ...base, status: "pass", message: `${name} has the ${DEVINTERN_LABEL} label` };
+    }
+    if (!createLabel) {
+      return {
+        ...base,
+        status: "warn",
+        message: `${name} has no ${DEVINTERN_LABEL} label yet, so the default query matches nothing`,
+        hint: `Re-run with --create-label to create it, or create the ${DEVINTERN_LABEL} label in ${name}`,
+      };
+    }
+    await withTimeout(ops.create(), timeoutMs, `${name} label creation`);
+    run.report.labelCreated = true;
+    run.log(`🏷️  Created the ${DEVINTERN_LABEL} label in ${name}`);
+    return { ...base, status: "pass", message: `Created the ${DEVINTERN_LABEL} label in ${name}` };
+  } catch (error) {
+    return {
+      ...base,
+      status: "warn",
+      message: `${name}: could not ${createLabel ? "create" : "look up"} the ${DEVINTERN_LABEL} label: ${condenseMessage(errorMessage(error))}`,
+      hint: `Create the ${DEVINTERN_LABEL} label in ${name} (the token may lack permission to manage labels)`,
+    };
+  }
 }
 
 function applyEnvFile(envPath: string): Record<string, string> {

@@ -310,9 +310,15 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(report.error).toStartWith("missing: --tracker, --task-query.");
     expect(existsSync(workspaceDir)).toBe(false);
 
+    // Jira has a default query (open tickets labeled devintern): only credentials are missing.
     const jira = await run({ tracker: "jira" }, { processEnv: { JIRA_BASE_URL: "https://x" } });
-    expect(jira.error).toStartWith("missing: --task-query, JIRA_EMAIL, JIRA_API_TOKEN.");
+    expect(jira.error).toStartWith("missing: JIRA_EMAIL, JIRA_API_TOKEN.");
     expect(existsSync(workspaceDir)).toBe(false);
+
+    // Asana's query language has no label filter, so --task-query stays required.
+    const asana = await run({ tracker: "asana" }, { processEnv: {} });
+    expect(asana.code).toBe("missing_input");
+    expect(asana.missing).toEqual(["--task-query", "ASANA_API_TOKEN"]);
   });
 
   test("a missing MARKDOWN_TASKS_DIR is named as the task folder with an absolute-path example", async () => {

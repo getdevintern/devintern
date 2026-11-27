@@ -39,6 +39,7 @@ import { WORKER_PILOT_OFFER, signInCommand, workerLoginCommandFor } from "../acc
 import { resolveDashboardPort } from "./dashboard-port";
 import { entitlementCheck } from "./worker-entitlement";
 import type { WorkerEntitlementLike } from "./worker-entitlement";
+import { defaultQueryZeroMatchHint } from "../trackers/capabilities";
 import { createTrackerClient, trackerRequiredEnv } from "../trackers/manager";
 import { redactUrlCredentials } from "./dashboard-workspace";
 import {
@@ -722,7 +723,9 @@ async function collectConfigScopedChecks(
         detail: `${source.name}: ${plural(count, "task")} match${count === 1 ? "es" : ""}`,
         ...(count === 0
           ? {
-              hint: "The query works but matches nothing right now; the worker keeps polling. Check it selects the tasks you expect",
+              hint:
+                defaultQueryZeroMatchHint(source.tracker, source.query) ??
+                "The query works but matches nothing right now; the worker keeps polling. Check it selects the tasks you expect",
             }
           : {}),
       });

@@ -403,6 +403,42 @@ export class GitHubClient {
   }
 
   /**
+   * Whether the repository has a label with this name (GitHub matches label
+   * names case-insensitively).
+   *
+   * @param name - Label name.
+   * @returns True when the label exists.
+   * @throws When the GitHub API request fails for another reason than 404.
+   */
+  async hasLabel(name: string): Promise<boolean> {
+    const response = await this.send(
+      `/repos/${this.owner}/${this.repo}/labels/${encodeURIComponent(name)}`,
+      "GET",
+    );
+    if (response.status === 404) return false;
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`GitHub API error (${response.status}): ${errorText}`);
+    }
+    return true;
+  }
+
+  /**
+   * Create a repository label.
+   *
+   * @param name - Label name.
+   * @param options - Hex color without `#`, and an optional description.
+   * @throws When the GitHub API request fails.
+   */
+  async createLabel(name: string, options: { color: string; description?: string }): Promise<void> {
+    await this.request(`/repos/${this.owner}/${this.repo}/labels`, "POST", {
+      name,
+      color: options.color,
+      ...(options.description ? { description: options.description } : {}),
+    });
+  }
+
+  /**
    * Add labels to an issue (does not remove existing labels).
    *
    * @param issueNumber - Target issue number.

@@ -11,7 +11,11 @@ import { isAbsolute, resolve } from "path";
 import { upsertEnvVars } from "@devintern/utils";
 
 import { redactUrlCredentials } from "../observability/dashboard-workspace";
-import { trackersSupportingPolling } from "../trackers/capabilities";
+import {
+  DEVINTERN_LABEL,
+  defaultTaskQuery,
+  trackersSupportingPolling,
+} from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
 import { Utils } from "../utils";
 import { detectCheckoutBranches } from "../workspace/checkout-branches";
@@ -120,6 +124,8 @@ export interface Plan {
   /** Flags named on the command line (only these are updated in an existing workspace). */
   setTracker: boolean;
   setTaskQuery: boolean;
+  /** No `--task-query` and none saved: `taskQuery` is the tracker's default. */
+  taskQueryDefaulted: boolean;
   /**
    * `slug` is the GitHub `owner/name`, or null for a non-GitHub remote.
    * `conflicts`/`projectKey` come from the checkout's `.devintern-code/.env`,
@@ -360,7 +366,13 @@ export function planQuery(
   const { flagTracker, configSnapshot, existing, repo, envFilePath } = draft;
   let { envFileValues } = draft;
   const tracker = flagTracker ?? existing?.defaults.tracker;
-  const taskQuery = args.taskQuery?.trim() || existing?.defaults.taskQuery;
+  const flagQuery = args.taskQuery?.trim();
+  const savedQuery = existing?.defaults.taskQuery;
+  // A new workspace (or one an interrupted run left without a query) falls
+  // back to the tracker's default: open tickets labeled devintern.
+  const fallbackQuery =
+    tracker && !flagQuery && !savedQuery ? defaultTaskQuery(tracker) : undefined;
+  const taskQuery = flagQuery || savedQuery || fallbackQuery;
   // Same parser the worker and `worker doctor` use, so all three agree.
   const workspaceEnv = parseEnvFile(workspaceEnvPath(ctx.workspaceDir));
   const credentialEnv: Env = { ...workspaceEnv, ...ctx.processEnv, ...envFileValues };
@@ -375,6 +387,11 @@ export function planQuery(
 
   const missing = missingInputs(tracker, taskQuery, credentialEnv);
   if (missing.length > 0) return missingInputFailure(tracker, missing);
+  if (fallbackQuery) {
+    notes.push(
+      `ℹ️  No --task-query: picking up open tickets labeled ${DEVINTERN_LABEL} (${fallbackQuery})`,
+    );
+  }
 
   const wrongLanguage = wrongQueryLanguage(tracker!, taskQuery!);
   if (wrongLanguage) {
@@ -399,7 +416,8 @@ export function planQuery(
       tracker: tracker!,
       taskQuery: taskQuery!,
       setTracker: Boolean(flagTracker) || configSnapshot === null,
-      setTaskQuery: Boolean(args.taskQuery?.trim()) || configSnapshot === null,
+      setTaskQuery: Boolean(flagQuery || fallbackQuery) || configSnapshot === null,
+      taskQueryDefaulted: Boolean(fallbackQuery),
       repo,
       credentialEnv,
       envUpdates,

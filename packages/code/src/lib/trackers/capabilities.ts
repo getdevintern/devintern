@@ -16,6 +16,17 @@ export interface TrackerCapabilities {
   query: boolean;
   /** Example query shown in error/help text when relevant. */
   queryExample?: string;
+  /**
+   * Ready-tasks query `worker init` uses when none is given: open tickets
+   * carrying the {@link DEVINTERN_LABEL} label (or the tracker's equivalent).
+   * Undefined when the query language has no label filter (Asana) or when the
+   * tracker keeps its own selection (Markdown `status=todo`).
+   */
+  defaultQuery?: string;
+  /** How a user puts the label on a ticket, for "0 tasks match" hints. */
+  labelHowTo?: string;
+  /** `worker init` can create the missing label through the tracker API. */
+  labelCreation?: boolean;
   /** Supports `--estimate` (native estimation field or estimation comments). */
   estimate: boolean;
   /** Supports worker Mode 1 polling (a change detector is implemented). */
@@ -34,6 +45,9 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     requiredEnv: ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"],
     query: true,
     queryExample: `project = PROJ AND status = 'To Do'`,
+    defaultQuery: `labels = devintern AND statusCategory != Done ORDER BY created ASC`,
+    labelHowTo:
+      "add the label devintern to a Jira issue (Labels field); Jira creates the label on first use",
     estimate: true,
     poll: true,
     dependencies: true,
@@ -43,6 +57,9 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     requiredEnv: ["LINEAR_API_KEY"],
     query: true,
     queryExample: `{"state":{"name":{"eq":"Todo"}}}`,
+    defaultQuery: `{"labels":{"name":{"eqIgnoreCase":"devintern"}},"state":{"type":{"nin":["completed","canceled"]}}}`,
+    labelHowTo:
+      "add a label named devintern to an open Linear issue (create it in the team's label settings if it does not exist)",
     estimate: true,
     poll: true,
     dependencies: true,
@@ -52,6 +69,9 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     requiredEnv: ["GITHUB_TOKEN", "GITHUB_REPO"],
     query: true,
     queryExample: "is:open label:bug",
+    defaultQuery: "is:open label:devintern",
+    labelHowTo: "add the devintern label to an open issue in the repository",
+    labelCreation: true,
     estimate: true,
     poll: true,
     dependencies: true,
@@ -61,6 +81,9 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     requiredEnv: ["GITLAB_TOKEN", "GITLAB_PROJECT"],
     query: true,
     queryExample: "is:open label:bug",
+    defaultQuery: "is:open label:devintern",
+    labelHowTo: "add the devintern label to an open issue in the project",
+    labelCreation: true,
     estimate: true,
     poll: true,
     dependencies: true,
@@ -70,6 +93,10 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     requiredEnv: ["AZURE_DEVOPS_ORG", "AZURE_DEVOPS_PAT", "AZURE_DEVOPS_PROJECT"],
     query: true,
     queryExample: "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'",
+    defaultQuery:
+      "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.Tags] CONTAINS 'devintern' AND [System.State] NOT IN ('Closed', 'Done', 'Removed')",
+    labelHowTo:
+      "add the tag devintern to an open work item; Azure DevOps creates the tag on first use",
     estimate: true,
     poll: true,
     dependencies: true,
@@ -88,6 +115,8 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     requiredEnv: ["TRELLO_API_KEY", "TRELLO_API_TOKEN"],
     query: true,
     queryExample: `list:"To Do" is:open`,
+    defaultQuery: "label:devintern is:open",
+    labelHowTo: "add a label named devintern to an open card on the board",
     estimate: false,
     poll: true,
     dependencies: true,
@@ -102,6 +131,40 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     dependencies: true,
   },
 };
+
+/** Label (tag in Azure DevOps) the default ready-tasks query selects. */
+export const DEVINTERN_LABEL = "devintern";
+
+/** The tracker's default ready-tasks query, or undefined when it has none. */
+export function defaultTaskQuery(trackerType: string): string | undefined {
+  return TRACKER_CAPABILITIES[trackerType]?.defaultQuery;
+}
+
+/** Whether `query` is the tracker's default ready-tasks query. */
+export function isDefaultTaskQuery(trackerType: string, query: string | undefined): boolean {
+  const fallback = defaultTaskQuery(trackerType);
+  return Boolean(fallback && query?.trim() === fallback);
+}
+
+/** Whether `worker init` can create the {@link DEVINTERN_LABEL} label for this tracker. */
+export function supportsLabelCreation(trackerType: string): boolean {
+  return TRACKER_CAPABILITIES[trackerType]?.labelCreation ?? false;
+}
+
+/**
+ * What to say when the default query matches no tasks: how to label a
+ * ticket. Undefined for any other query (its author knows what it selects).
+ */
+export function defaultQueryZeroMatchHint(
+  trackerType: string,
+  query: string | undefined,
+): string | undefined {
+  if (!isDefaultTaskQuery(trackerType, query)) return undefined;
+  const howTo = TRACKER_CAPABILITIES[trackerType]?.labelHowTo;
+  return howTo
+    ? `No open ticket is labeled ${DEVINTERN_LABEL} yet: ${howTo}, and the worker picks it up on the next poll`
+    : undefined;
+}
 
 /** All supported `TASK_TRACKER` values. */
 export function supportedTrackers(): string[] {

@@ -140,6 +140,9 @@ export function parseNonInteractiveInitArgs(argv: string[]): ParseResult {
       case "--remove-env-file":
         args.removeEnvFile = true;
         break;
+      case "--create-label":
+        args.createLabel = true;
+        break;
       case "--no-service":
         // Non-interactive init never installs the service; accepted for symmetry.
         break;
