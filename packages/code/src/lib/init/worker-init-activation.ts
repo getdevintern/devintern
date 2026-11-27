@@ -1,9 +1,10 @@
 /**
  * Activation steps of `devintern worker init`, after the workspace is saved:
- * license and sign-in, relay pairing, the GitHub App, and the background
- * service (systemd on Linux, launchd on macOS). The wizard asks and acts;
- * `--non-interactive` starts a `--sign-in` only when it is the missing step
- * and reports the rest as next steps (it never installs the service).
+ * license and sign-in, relay pairing, the GitHub App (one wizard step with at
+ * most one question), and the background service (systemd on Linux, launchd
+ * on macOS). The wizard asks and acts; `--non-interactive` starts a
+ * `--sign-in` only when it is the missing step, installs the service with
+ * `--start`, and reports the rest as next steps.
  */
 
 import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
@@ -15,18 +16,25 @@ import {
   isLoginSkipped,
   login,
   requireAuthenticatedUser,
-  resolveLogin,
+  extractLoginFromArgv,
   startPendingLogin,
 } from "@devintern/auth";
 import type { ResolvedLogin, StartedPendingLogin } from "@devintern/auth";
 
 import { pendingSignInSummary } from "../account/cli";
-import { WORKER_PILOT_OFFER, signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
+import {
+  WORKER_PILOT_OFFER,
+  WORKER_SIGN_IN_STEP,
+  signInCommand,
+  workerLoginCommandFor,
+} from "../account/worker-pilot";
 import { isPromptAbort } from "../cli/prompt-abort";
 import { hasGitHubAppCredentials, loadGitHubAppRecord } from "../code-host/github/app-setup";
 import { PRManager } from "../code-host/index";
 import type { WorkerEntitlementLike } from "../observability/worker-readiness";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
+import type { PendingGitHubPairing } from "../relay/connect";
+import { pairingNextUrl } from "../relay/github-pairing";
 import { loadWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import { gitHubSlugFromRemote } from "../workspace/env";
@@ -40,11 +48,18 @@ import {
   SYSTEMD_UNIT_NAME,
 } from "../worker/service";
 import type { ServiceState, WorkerServiceDeps } from "../worker/service";
-import { installAndStartWorkerService } from "../worker/service-control";
+import { DEFAULT_START_TIMEOUT_MS, installAndStartWorkerService } from "../worker/service-control";
+import type { ServiceCommandReport } from "../worker/service-command";
+import { clearWorkerStartIntent, saveWorkerStartIntent } from "../worker/start-intent";
+import { serviceInstallCommand } from "../observability/readiness-json";
 import { renderStartCheck } from "../worker/service-report";
 import { workspaceCodeStateDir, workspaceConfigPath } from "../workspace/paths";
 import { workspaceGitLabRelayProjects } from "./worker-connect";
 import { errorMessage } from "./worker-init-fs";
+import {
+  FINISH_GITHUB_PAIRING_COMMAND,
+  waitForGitHubAppInstall,
+} from "./worker-init-github-app-wait";
 import type { Env, NonInteractiveInitDeps } from "./worker-init-noninteractive-types";
 import { askYesNo } from "./worker-init-policy";
 import type { LogFn } from "./worker-init-policy";
@@ -61,10 +76,12 @@ import type {
 type RelayConnectDeps = Parameters<typeof connectRelayTarget>[1];
 
 /**
- * License and sign-in, reported but never aborting setup. The wizard checks
- * the license and offers a sign-in; flags mode checks the entitlement (the
- * readiness step reports the verdict) and starts a `--sign-in` when signing
- * in is what is missing.
+ * License and sign-in, reported but never aborting setup. The wizard shows
+ * one step for the Worker Pilot sign-in, relay pairing, and the GitHub App:
+ * this part checks the license and asks the one sign-in question (signed-in
+ * and LICENSE_KEY users are not asked). Flags mode checks the entitlement
+ * (the readiness step reports the verdict) and starts a `--sign-in` when
+ * signing in is what is missing.
  */
 export async function licenseStep(run: SetupRun): Promise<boolean> {
   if (run.input === "flags") {
@@ -72,14 +89,19 @@ export async function licenseStep(run: SetupRun): Promise<boolean> {
     return true;
   }
   const { workspaceDir } = run;
-  if (!run.deps.checkAutomationLicense) return true;
-  run.log("\n5️⃣  Worker Pilot or license (the worker runs unattended)...");
+  run.log(`\n5️⃣  ${WORKER_SIGN_IN_STEP}`);
   try {
-    let failure = await run.deps.checkAutomationLicense(workspaceDir);
+    const signedIn = await currentUser(run, workspaceDir);
+    if (signedIn) {
+      run.user = signedIn;
+      run.log(`   Signed in as ${signedIn.email || signedIn.id}.`);
+    }
+    let failure = run.deps.checkAutomationLicense
+      ? await run.deps.checkAutomationLicense(workspaceDir)
+      : undefined;
     if (failure === null) {
       run.log("✅ Automation license OK.");
-    } else {
-      const signedIn = await currentUser(run, workspaceDir);
+    } else if (failure !== undefined) {
       if (signedIn || process.env.LICENSE_KEY) {
         // Signed in (Pilot used or not granted) or a key that did not
         // validate: the license check's own words explain it best.
@@ -87,28 +109,35 @@ export async function licenseStep(run: SetupRun): Promise<boolean> {
       } else {
         run.log(`   The worker needs the ${WORKER_PILOT_OFFER} (or a paid license).`);
       }
-      const offer = signedIn
-        ? false
-        : await askYesNo(run, "Sign in now to start the Worker Pilot? [Y/n]: ", true);
-      if (offer) {
+    }
+    // The one sign-in question: it starts the Pilot and lets the relay pair.
+    let pilotStarted = false;
+    if (!signedIn && !process.env.LICENSE_KEY) {
+      if (await askYesNo(run, "Sign in with GitHub now to start the Worker Pilot? [Y/n]: ", true)) {
         const user = await signInOnce(run, workspaceDir);
-        if (user) failure = await run.deps.checkAutomationLicense(workspaceDir);
-      } else if (!signedIn) {
+        if (user && failure !== undefined && failure !== null && run.deps.checkAutomationLicense) {
+          failure = await run.deps.checkAutomationLicense(workspaceDir);
+          pilotStarted = failure === null;
+        }
+      } else {
         run.signInDeclined = true;
       }
-      if (failure === null) {
+    }
+    if (failure === undefined) return true;
+    if (failure === null) {
+      if (pilotStarted) {
         run.log(
           `✅ Free Worker Pilot available: your ${WORKER_PILOT_OFFER} starts when the worker first starts.`,
         );
-      } else {
-        run.log("   The worker will not start until this is done:");
-        run.log(
-          `   run \`${workerSignInCommand(workspaceDir)}\` to begin your ${WORKER_PILOT_OFFER},`,
-        );
-        run.log(
-          "   or, with a paid license, set LICENSE_KEY in the workspace .env (https://devintern.com/pricing).",
-        );
       }
+    } else {
+      run.log("   The worker will not start until this is done:");
+      run.log(
+        `   run \`${workerSignInCommand(workspaceDir)}\` to begin your ${WORKER_PILOT_OFFER},`,
+      );
+      run.log(
+        "   or, with a paid license, set LICENSE_KEY in the workspace .env (https://devintern.com/pricing).",
+      );
     }
     run.outcome.licenseFailure = failure;
   } catch (error) {
@@ -122,9 +151,11 @@ export async function licenseStep(run: SetupRun): Promise<boolean> {
 }
 
 /**
- * Relay pairing (optional): polling stays the correctness layer; relay only
- * improves event latency. The wizard offers it; flags mode only notes whether
- * the workspace is paired (an unpaired one gets a `connect` next step).
+ * Relay pairing (polling stays the correctness layer; relay only improves
+ * event latency). The wizard pairs automatically once signed in, unless
+ * `--no-relay`, and waits for the GitHub App installation when a repository
+ * needs it (Enter skips). Flags mode only notes whether the workspace is
+ * paired; `worker login` pairs it after signing in.
  */
 export async function relayStep(run: SetupRun): Promise<boolean> {
   const { outcome, workspaceDir } = run;
@@ -137,30 +168,35 @@ export async function relayStep(run: SetupRun): Promise<boolean> {
     return true;
   }
   outcome.relayConnected = hasGitHubRelayRegistration(loadRelayState(workspaceDir));
-  run.log("\n6️⃣  Instant events (optional; polling always stays on)");
-  if (
-    !(await askYesNo(
-      run,
-      "React in seconds through the DevIntern relay, without opening a port? [Y/n]: ",
-      true,
-    ))
-  ) {
-    run.log("   Relay skipped. Polling will still pick up ready tasks and review feedback.");
+  if (run.deps.noRelay) {
+    run.log(
+      "   Instant events skipped (--no-relay). Polling still picks up ready tasks and reviews.",
+    );
     return true;
   }
-
-  const user = await resolveRelayUser(run, workspaceDir);
+  const user = run.user ?? (run.signInDeclined ? null : await currentUser(run, workspaceDir));
   if (!user) {
     run.log(
-      `   Relay needs sign-in; skipped. Later: \`${workerSignInCommand(workspaceDir)}\`, ` +
-        "then `devintern worker connect`.",
+      `   Relay needs sign-in; skipped. Later: \`${workerSignInCommand(workspaceDir)}\` signs in ` +
+        "and pairs it (or `devintern worker connect` once signed in). Polling still works.",
     );
     return true;
   }
 
+  run.log("   Connecting instant events through the DevIntern relay (no open port needed)...");
   const connectRelay =
     run.deps.connectRelay ??
-    ((options) => defaultConnectRelay(options, run.deps.runRelayConnect ?? connectRelayTarget));
+    ((options) =>
+      defaultConnectRelay(options, run.deps.runRelayConnect ?? connectRelayTarget, {
+        onGitHubPairing: async (pairing, getAccessToken) => {
+          run.githubAppUrl = pairingNextUrl(pairing);
+          run.githubAppWait = await waitForGitHubAppInstall(
+            { pairing, getAccessToken, workspaceDir, log: run.log, guard: run.guard },
+            run.deps.githubAppWait,
+          );
+          return run.githubAppWait === "installed";
+        },
+      }));
   try {
     const connected = await connectRelay({
       projectRoot: run.projectRoot,
@@ -172,12 +208,15 @@ export async function relayStep(run: SetupRun): Promise<boolean> {
     outcome.relayConnect = connected ? "succeeded" : "partial";
     if (connected) {
       run.log(`✅ Relay pairing stored under ${workspaceDir}.`);
+    } else if (run.githubAppWait && run.githubAppWait !== "installed") {
+      run.log("   Relay pairing is not finished yet. Polling still works in the meantime.");
     } else {
       run.log(
         "⚠️  Some relay sources did not connect. Polling still works; retry with worker connect.",
       );
     }
   } catch (error) {
+    if (isPromptAbort(error)) throw error;
     outcome.relayConnect = "failed";
     run.log(`⚠️  Relay setup failed: ${(error as Error).message}`);
     run.log("   Polling still works; relay only improves event latency.");
@@ -186,10 +225,11 @@ export async function relayStep(run: SetupRun): Promise<boolean> {
 }
 
 /**
- * GitHub App (@mentions). Relay-backed workspaces use the central App and keep
+ * GitHub App (@mentions), the last part of the sign-in step. Relay-backed
+ * workspaces use the central App (installed during relay pairing) and keep
  * GitHub API access local through GITHUB_TOKEN; a customer-owned App is the
  * advanced no-relay path for air-gapped/direct installations only. Flags mode
- * leaves it to `worker connect`.
+ * leaves it to relay pairing (`worker login`, `worker connect`).
  */
 export async function githubAppStep(run: SetupRun): Promise<boolean> {
   if (run.input === "flags") return true;
@@ -200,13 +240,15 @@ export async function githubAppStep(run: SetupRun): Promise<boolean> {
     githubRepo = null;
   }
   if (!githubRepo) {
-    run.log("\n7️⃣  GitHub App (@mentions)");
     run.log("   No GitHub remote detected; skipping the GitHub App step.");
     run.outcome.githubApp = "unavailable";
   } else {
-    run.outcome.githubApp = run.outcome.relayConnected
-      ? relayGitHubApp(run, run.workspaceDir, githubRepo)
-      : noRelayGitHubApp(run, githubRepo);
+    // A pending pairing (Enter skipped the App wait) is still the relay path:
+    // the App install address it printed is the next step.
+    run.outcome.githubApp =
+      run.outcome.relayConnected || run.githubAppUrl
+        ? relayGitHubApp(run, run.workspaceDir, githubRepo)
+        : noRelayGitHubApp(run, githubRepo);
   }
   return true;
 }
@@ -255,7 +297,8 @@ async function defaultSignIn(
   projectRoot: string,
   workspaceDir?: string,
 ): Promise<InitUserLike | null> {
-  const resolved = await resolveLogin(process.argv);
+  // The step says "Sign in with GitHub": no method question.
+  const resolved = extractLoginFromArgv(process.argv) ?? { method: "github" as const };
   return login(projectAuthConfig(projectRoot, workspaceDir), resolved, {
     skipCommand: workerSignInCommand(workspaceDir),
   });
@@ -276,8 +319,10 @@ async function signInOnce(ctx: PromptRun, workspaceDir: string): Promise<InitUse
   const signIn = ctx.deps.signIn ?? defaultSignIn;
   try {
     const user = await ctx.guard(signIn(ctx.projectRoot, workspaceDir));
-    if (user) ctx.log(`✅ Signed in as ${user.email || user.id}.`);
-    else ctx.signInDeclined = true;
+    if (user) {
+      ctx.user = user;
+      ctx.log(`✅ Signed in as ${user.email || user.id}.`);
+    } else ctx.signInDeclined = true;
     return user;
   } catch (error) {
     if (isPromptAbort(error)) throw error;
@@ -319,6 +364,13 @@ async function defaultConnectRelay(
     log: LogFn;
   },
   runConnect: typeof connectRelayTarget = connectRelayTarget,
+  hooks: {
+    /** A GitHub pairing waits for the App install; resolve true once it is verified. */
+    onGitHubPairing?: (
+      pairing: PendingGitHubPairing,
+      getAccessToken: () => Promise<string>,
+    ) => Promise<boolean>;
+  } = {},
 ): Promise<boolean> {
   const getAccessToken = async () => {
     const user = await requireAuthenticatedUser(
@@ -336,7 +388,39 @@ async function defaultConnectRelay(
   };
 
   const repos = workspaceGitHubRepos(workspace);
-  for (const repo of repos) await connect("github", { repo });
+  for (const [index, repo] of repos.entries()) {
+    // Start the pairing without the connect command's own wait, so the
+    // wizard's wait (with Enter to skip) takes over.
+    let pairing: PendingGitHubPairing | undefined;
+    const ok =
+      (await runConnect("github", {
+        ...deps,
+        repo,
+        noWait: true,
+        onOutcome: (outcome) => {
+          if (outcome.kind === "pending") pairing = outcome.pairing;
+        },
+      })) === 0;
+    if (pairing) {
+      const pending: PendingGitHubPairing = pairing;
+      const installed =
+        ok && hooks.onGitHubPairing ? await hooks.onGitHubPairing(pending, getAccessToken) : false;
+      results.push(installed);
+      const rest = repos.slice(index + 1);
+      if (!installed && rest.length > 0) {
+        // Only one pairing can wait at a time (`connect github --status`
+        // finishes the recorded one), so do not start, or wait for, the rest.
+        options.log(
+          `   Not pairing ${rest.join(", ")} yet: finish ${repo} first, then run ` +
+            "`devintern worker connect github`.",
+        );
+        results.push(false);
+        break;
+      }
+    } else {
+      results.push(ok);
+    }
+  }
   if (repos.length === 0) {
     options.log("   No GitHub remote detected; skipping GitHub relay registration.");
   }
@@ -353,31 +437,6 @@ async function defaultConnectRelay(
   return results.every(Boolean);
 }
 
-/**
- * Resolve the signed-in user for relay onboarding, offering interactive login
- * when no session exists.
- *
- * @returns The user, or null when the user declines or login fails.
- */
-async function resolveRelayUser(
-  ctx: PromptRun,
-  workspaceDir: string,
-): Promise<InitUserLike | null> {
-  const user = await currentUser(ctx, workspaceDir);
-  if (user) {
-    ctx.log(`   Signed in as ${user.email || user.id}.`);
-    return user;
-  }
-  // The user just said no to signing in; asking again for the relay would
-  // only repeat the question.
-  if (ctx.signInDeclined) return null;
-
-  if (!(await askYesNo(ctx, "Sign in now to connect the relay? [Y/n]: ", true))) {
-    return null;
-  }
-  return signInOnce(ctx, workspaceDir);
-}
-
 /** The signed-in user for the workspace, or null (lookup errors count as signed out). */
 async function currentUser(ctx: PromptRun, workspaceDir: string): Promise<InitUserLike | null> {
   const getUser = ctx.deps.getUser ?? defaultGetUser;
@@ -390,7 +449,7 @@ async function currentUser(ctx: PromptRun, workspaceDir: string): Promise<InitUs
 
 /** No-relay path: only a customer-owned App can deliver @mentions. */
 function noRelayGitHubApp(ctx: PromptRun, githubRepo: string): GitHubAppOutcome {
-  ctx.log(`\n7️⃣  GitHub App on ${githubRepo} (advanced no-relay mode)`);
+  ctx.log(`   GitHub App on ${githubRepo} (advanced no-relay mode)`);
   if (hasGitHubAppCredentials()) {
     ctx.log("✅ Customer-owned GitHub App credentials found in the environment.");
     ctx.log("   The worker will use that App for polling, @mentions, and GitHub API calls.");
@@ -409,10 +468,9 @@ function relayGitHubApp(
   workspaceDir: string,
   githubRepo: string,
 ): GitHubAppOutcome {
-  ctx.log(`\n7️⃣  DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
+  ctx.log(`   DevIntern AI GitHub App on ${githubRepo} (@mentions)`);
   ctx.log("   The central App delivers events through the relay; your GITHUB_TOKEN remains local");
   ctx.log("   and handles GitHub API reads/writes. No App ID or private key is needed here.");
-  ctx.log("   @devintern-ai mentions on any PR then react through the relay in seconds.");
   const existing = loadGitHubAppRecord(workspaceDir, githubRepo);
   if (
     existing?.enabled &&
@@ -426,7 +484,17 @@ function relayGitHubApp(
     return "existing";
   }
   ctx.log("   No verified GitHub App pairing was recorded.");
-  ctx.log("   Run: devintern worker connect github");
+  if (ctx.githubAppUrl) {
+    ctx.log(
+      `   Approve the App at ${ctx.githubAppUrl}, then run \`${FINISH_GITHUB_PAIRING_COMMAND}\`.`,
+    );
+  } else {
+    // The relay paired other repositories, not this checkout's one: one
+    // connect run prints its install address and waits for it.
+    ctx.log(
+      "   Run `devintern worker connect github`: it prints the App install address and waits for it.",
+    );
+  }
   ctx.log("   The relay verifies the installation before it enables event routing.");
   return "skipped";
 }
@@ -463,7 +531,10 @@ async function flagsLicenseStep(run: FlagsRun): Promise<void> {
   const loginCommand = workerLoginCommandFor(workspaceConfigPath(workspaceDir), deps.home);
   try {
     const started = await (deps.startSignIn ?? defaultStartSignIn)(workspaceDir, run.args.signIn);
-    run.report.signIn = pendingSignInSummary(started, loginCommand);
+    const signIn = pendingSignInSummary(started, loginCommand);
+    // The completing `worker login` pairs the relay unless told otherwise.
+    if (run.args.noRelay) signIn.complete = `${signIn.complete} --no-relay`;
+    run.report.signIn = signIn;
   } catch (error) {
     run.signInCheck = {
       name: "sign-in",
@@ -528,11 +599,74 @@ interface ServiceRuntime {
  */
 export async function serviceStep(run: SetupRun): Promise<boolean> {
   if (run.input === "prompt") run.outcome.service = await offerService(run);
+  else if (run.args.start) await flagsStartService(run);
   return true;
 }
 
+/**
+ * Flags mode with `--start`: install and start the service when every check
+ * passed (the checks just ran, so the install does not repeat them). When
+ * signing in is the only step left, record that the next `worker login`
+ * should do it.
+ */
+async function flagsStartService(run: FlagsRun): Promise<void> {
+  const { report, workspaceDir } = run;
+  const blockers = report.checks.filter(
+    (check) => check.status === "fail" || check.status === "action",
+  );
+  if (blockers.length > 0) {
+    const signInOnly = blockers.every(
+      (check) => check.status === "action" && check.name === "entitlement",
+    );
+    if (signInOnly) {
+      saveWorkerStartIntent(workspaceDir, {
+        requestedAt: new Date().toISOString(),
+        relay: !run.args.noRelay,
+      });
+      report.start = { result: "after_sign_in" };
+      run.log("ℹ️  --start: the service is installed and started once the sign-in completes.");
+    } else {
+      report.start = { result: "not_ready" };
+      run.log("ℹ️  --start: not started; the worker would not start with the problems above.");
+    }
+    return;
+  }
+  clearWorkerStartIntent(workspaceDir);
+  run.log("🚀 --start: installing and starting the background service...");
+  let service: ServiceCommandReport | undefined;
+  let error: string | undefined;
+  try {
+    service = await (run.deps.installService ?? defaultStartService)(workspaceDir);
+    report.service = service;
+    if (service.result !== "running" && service.result !== "starting") {
+      error = service.error ?? `the service is ${service.result}`;
+    }
+  } catch (caught) {
+    error = errorMessage(caught);
+  }
+  report.start = { result: error ? "failed" : "installed" };
+  if (error) {
+    report.checks.push({
+      name: "service",
+      label: "Background service",
+      status: "fail",
+      message: `Could not start the worker service: ${error}`,
+      hint: `See \`${serviceInstallCommand(workspaceDir, run.deps.home)}\`, or run \`devintern worker\` in a terminal`,
+    });
+  }
+}
+
+/** `worker service install --json` without its readiness preflight (init just ran the checks). */
+async function defaultStartService(workspaceDir: string): Promise<ServiceCommandReport> {
+  const { runServiceAction } = await import("../worker/service-command");
+  return runServiceAction(
+    { action: "install", json: true, force: false, waitMs: DEFAULT_START_TIMEOUT_MS, lines: 100 },
+    { workspaceDir },
+  );
+}
+
 async function offerService(ctx: PromptRun): Promise<ServiceStepResult> {
-  ctx.log("\n8️⃣  Background service (optional)");
+  ctx.log("\n6️⃣  Background service (optional)");
   const { deps, workspaceDir } = ctx;
   const platform = deps.platform ?? process.platform;
   if (platform !== "linux" && platform !== "darwin") {

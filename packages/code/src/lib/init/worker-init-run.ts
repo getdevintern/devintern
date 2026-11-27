@@ -23,6 +23,7 @@ import type {
 } from "../worker/service";
 import type { StartCheck } from "../worker/service-control";
 import type { DevinternLabelOpsFactory } from "./worker-init-label";
+import type { GitHubAppWaitDeps, GitHubAppWaitResult } from "./worker-init-github-app-wait";
 import type { AppliedWrite, Plan, PlanDraft } from "./worker-init-noninteractive-plan";
 import type {
   Env,
@@ -97,6 +98,10 @@ export interface WorkerInitDeps {
   }) => Promise<boolean>;
   /** Override individual relay target setup while exercising default init orchestration. */
   runRelayConnect?: typeof connectRelayTarget;
+  /** Skip relay pairing after sign-in (CLI `--no-relay`); polling still works. */
+  noRelay?: boolean;
+  /** Override the GitHub App install wait's browser, Enter key, and pairing checks (tests). */
+  githubAppWait?: GitHubAppWaitDeps;
   /** Override GitHub remote detection for the App step (`owner/name` or null). */
   detectGithubRepo?: () => Promise<string | null>;
   /** Validate Sentry credentials and project access; returns the current issue count. */
@@ -219,6 +224,12 @@ export interface PromptRun {
   signInDeclined?: boolean;
   /** Set by the host step when it ran. */
   host?: HostReport;
+  /** The signed-in user, once the sign-in step found or created a session. */
+  user?: InitUserLike;
+  /** Address of the GitHub App pairing relay pairing started in this run. */
+  githubAppUrl?: string;
+  /** How this run's GitHub App wait ended, when relay pairing started one. */
+  githubAppWait?: GitHubAppWaitResult;
   /** Set by the tracker step. */
   trackerType: string;
   trackerName: string;

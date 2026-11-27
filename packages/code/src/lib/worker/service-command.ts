@@ -599,7 +599,7 @@ async function printServiceLogs(
 }
 
 /** Default readiness preflight: the same checks and environment as `worker doctor`. */
-async function defaultCollectReadiness(workspaceDir: string): Promise<ReadinessCheck[]> {
+export async function collectServiceReadiness(workspaceDir: string): Promise<ReadinessCheck[]> {
   const [{ collectWorkerDoctorChecks }, { applyWorkspaceProcessEnv }, { checkLicense }, bootstrap] =
     await Promise.all([
       import("../observability/worker-readiness"),
@@ -668,7 +668,7 @@ export async function runWorkerServiceCommand(
   const report = await runServiceAction(args, {
     ...deps,
     workspaceDir,
-    collectReadiness: deps.collectReadiness ?? defaultCollectReadiness,
+    collectReadiness: deps.collectReadiness ?? collectServiceReadiness,
   });
   if (report.result === "error" && !report.code) report.code = "service_command_failed";
   if (args.json) {

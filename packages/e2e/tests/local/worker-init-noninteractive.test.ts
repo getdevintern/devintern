@@ -467,6 +467,30 @@ cliTest(
 );
 
 cliTest(
+  "worker init --non-interactive --start: with only sign-in left it records the intent and shrinks the next steps",
+  async () => {
+    await withFixture(async (fixture) => {
+      const result = await fixture.init(["--start", "--json"], {
+        env: { DEVINTERN_SKIP_LICENSE_CHECK: "0" },
+      });
+      expect(result.exitCode, result.stdout + result.stderr).toBe(2);
+      expectNoStackTrace(result);
+      const report = parseReport(result.stdout);
+      expect(report.result).toBe("action_required");
+      expect(report.start).toEqual({ result: "after_sign_in" });
+      // The completing `worker login` pairs the relay and starts the service,
+      // so neither is a separate step.
+      expect(report.nextSteps.map((step) => step.id)).toEqual(["sign-in"]);
+      const intentPath = join(fixture.workspaceDir, "state", "code", "start-after-sign-in.json");
+      expect(existsSync(intentPath)).toBe(true);
+      expect(JSON.parse(readFileSync(intentPath, "utf8"))).toMatchObject({ relay: true });
+      expect(fixture.workspaceFiles()).not.toContain("devintern-worker.service");
+    });
+  },
+  120_000,
+);
+
+cliTest(
   "worker init --non-interactive: no sign-in yet is action_required (exit 2) in init and doctor alike, and a skipped check passes",
   async () => {
     await withFixture(async (fixture) => {

@@ -45,7 +45,6 @@ expect {
   -re {already installed[^\n]*\]: } { send -- "y\r"; exp_continue }
   -re {Sentry[^\n]*\]: } { send -- "n\r"; exp_continue }
   -re {Worker Pilot[^\n]*\]: } { send -- "n\r"; exp_continue }
-  -re {React in seconds[^\n]*\]: } { send -- "n\r"; exp_continue }
   -re {\]: } { send -- "\r"; exp_continue }
   timeout { puts "\n<<HARNESS: TIMEOUT>>"; exit 98 }
   eof {}

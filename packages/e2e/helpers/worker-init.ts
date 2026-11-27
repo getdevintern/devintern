@@ -50,6 +50,10 @@ export interface WorkerInitReport {
   }>;
   nextSteps: Array<{ id: string; message: string; command: string }>;
   signIn?: { url: string | null; method: string; expiresAt: string; complete: string };
+  /** `--start`: what happened to the background service. */
+  start?: { result: "installed" | "after_sign_in" | "not_ready" | "failed" };
+  /** `--start`: the embedded `devintern.worker-service` document. */
+  service?: { schema: string; version: number; result: string };
 }
 
 /** The parts of `workspace.toml` the init tests assert on. */
