@@ -549,7 +549,7 @@ export interface RepoEntryExtras {
   conflicts?: Record<string, string>;
   /** Seeds a `[[routing.rules]]` entry unless a rule already claims this project. */
   projectKey?: string;
-  /** Written as the entry's `default_branch` (the branch task worktrees start from). */
+  /** Written as the entry's `default_branch` (the base task worktrees and task PRs use). */
   defaultBranch?: string;
 }
 
@@ -599,7 +599,7 @@ export function appendRepoEntry(
  *
  * @param content - Current workspace.toml text
  * @param name - The entry's `name`
- * @param defaultBranch - Branch tasks start from and pull requests target
+ * @param defaultBranch - Branch task worktrees start from and task pull requests target
  * @returns Updated text; unchanged when no entry has that name
  */
 export function upsertRepoDefaultBranch(
@@ -651,9 +651,48 @@ export function writeRepoDefaultBranch(
 }
 
 /**
+ * Remove one repo's `default_branch` key, so the worker follows the clone's
+ * remote default again. Pure text edit that leaves unrelated lines intact.
+ *
+ * @param content - Current workspace.toml text
+ * @param name - The entry's `name`
+ * @returns Updated text; unchanged when the entry or key is absent
+ */
+export function removeRepoDefaultBranch(content: string, name: string): string {
+  const lines = content.split("\n");
+  const isHeader = (line: string) => /^\s*\[/.test(line);
+  const isRepoHeader = (line: string) => /^\s*\[\[repos\]\]\s*(#.*)?$/.test(line);
+  for (let start = 0; start < lines.length; start++) {
+    if (!isRepoHeader(lines[start] ?? "")) continue;
+    let end = start + 1;
+    while (end < lines.length && !isHeader(lines[end] ?? "")) end++;
+    const bodyStart = start + 1;
+    const body = lines.slice(bodyStart, end);
+    if (!body.some((line) => tomlNameValue(line) === name)) continue;
+    const activeIndex = body.findIndex((line) => /^\s*default_branch\s*=/.test(line));
+    if (activeIndex < 0) return content;
+    lines.splice(bodyStart + activeIndex, 1);
+    return lines.join("\n");
+  }
+  return content;
+}
+
+/** Validate and remove one repo's `default_branch` from `workspace.toml`. */
+export function clearRepoDefaultBranch(workspaceDir: string, name: string): void {
+  const configPath = workspaceConfigPath(workspaceDir);
+  const content = readFileSync(configPath, "utf8");
+  const updated = removeRepoDefaultBranch(content, name);
+  if (updated === content) return;
+  parseWorkspaceConfig(updated, configPath);
+  writeFileSync(configPath, updated);
+}
+
+/**
  * The checkout's current branch and the remote default branch as the clone
- * recorded it (`origin/HEAD`), without contacting the remote. The default
- * falls back to the current branch when the clone has no `origin/HEAD`.
+ * recorded it (`origin/HEAD`), without contacting the remote. `defaultBranch`
+ * stays undefined when the clone has no `origin/HEAD`; the checkout branch is
+ * not evidence that the remote has it, and saving an unpushed branch makes
+ * `origin/<branch>` worktree creation fail.
  *
  * @param cwd - Repository checkout
  */
@@ -668,10 +707,22 @@ export async function detectCheckoutBranches(
     ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
     { cwd },
   );
-  const remoteDefault = originHead.success
+  const defaultBranch = originHead.success
     ? originHead.output.trim().replace(/^origin\//, "") || undefined
     : undefined;
-  return { branch, defaultBranch: remoteDefault ?? branch };
+  return { branch, defaultBranch };
+}
+
+/**
+ * Whether `branch` exists on origin as this checkout last fetched it. Worktrees
+ * are created from `origin/<branch>`, so a branch without this ref is not safe
+ * to record as `default_branch`.
+ *
+ * @param cwd - Repository checkout
+ * @param branch - Branch name without the `origin/` prefix
+ */
+export async function remoteTrackingBranchExists(cwd: string, branch: string): Promise<boolean> {
+  return Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd });
 }
 
 /** The comment `devintern init` writes above a repo's `manual_only = true`. */

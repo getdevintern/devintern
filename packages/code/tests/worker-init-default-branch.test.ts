@@ -1,16 +1,17 @@
 /**
- * The interactive wizard records the branch tasks start from and pull requests
- * target (`[[repos]].default_branch`): silently when the checkout is on the
- * remote's default branch, with a question when it is on another branch.
+ * The interactive wizard records `[[repos]].default_branch`, the base task
+ * worktrees and task PRs use: silently when the checkout is on the remote's
+ * default branch, with a question when it is on another branch.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import { runWorkerInit } from "../src/lib/init/worker-init";
+import { Utils } from "../src/lib/utils";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { upsertRepoDefaultBranch } from "../src/lib/workspace/init";
 
@@ -96,15 +97,18 @@ describe("worker init interactive default_branch", () => {
     return loadWorkspaceConfig(join(workspaceDir, "workspace.toml"));
   }
 
-  /** Run the wizard; `answer` replies to the PR-target question, `""` means Enter. */
-  async function runWizard(answer: (question: string) => string): Promise<string[]> {
+  /** Run the wizard; `answer` replies to the base-branch question, `""` means Enter. */
+  async function runWizard(
+    answer: (question: string) => string,
+    logs: string[] = [],
+  ): Promise<string[]> {
     const questions: string[] = [];
     const result = await runWorkerInit({
       cwd: repoDir,
-      log: () => {},
+      log: (message) => logs.push(message),
       prompt: async (question) => {
         questions.push(question);
-        if (question.startsWith("Open PRs against")) return answer(question);
+        if (question.startsWith("Base tasks and PRs on")) return answer(question);
         if (question.startsWith("Ready-tasks query")) return "*";
         return "";
       },
@@ -119,12 +123,38 @@ describe("worker init interactive default_branch", () => {
     return questions;
   }
 
-  test("a checkout on another branch asks and saves the answer", async () => {
+  /** Put the checkout's current branch on origin, as a fetched remote would. */
+  function publishCurrentBranch(): void {
+    git("update-ref refs/remotes/origin/feature/pr-base HEAD");
+  }
+
+  test("a checkout on another branch asks and saves a branch that exists on origin", async () => {
     git("checkout -q -b feature/pr-base");
+    writeFileSync(join(repoDir, "base.txt"), "base\n");
+    git("add base.txt");
+    git("commit -q -m 'feature base'");
+    publishCurrentBranch();
     const questions = await runWizard(() => "feature/pr-base");
 
-    expect(questions).toContain("Open PRs against feature/pr-base or main? [main]: ");
+    expect(questions).toContain("Base tasks and PRs on feature/pr-base or main? [main]: ");
     expect(config().repos[0]?.defaultBranch).toBe("feature/pr-base");
+
+    // The saved branch is what createFeatureBranch uses for the task branch and
+    // what the worker passes through as --pr-target-branch.
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const branch = await Utils.createFeatureBranch("TEST-1", config().repos[0]?.defaultBranch, {
+        cwd: repoDir,
+      });
+      expect(branch.success).toBe(true);
+    } finally {
+      log.mockRestore();
+    }
+    const subjects = execSync("git log --format=%s feature/test-1", {
+      cwd: repoDir,
+      encoding: "utf8",
+    });
+    expect(subjects).toContain("feature base");
   });
 
   test("a checkout on the default branch saves it silently", async () => {
@@ -135,21 +165,70 @@ describe("worker init interactive default_branch", () => {
     });
 
     expect(asked).toBe(false);
-    expect(questions.some((question) => question.startsWith("Open PRs against"))).toBe(false);
+    expect(questions.some((question) => question.startsWith("Base tasks and PRs on"))).toBe(false);
     expect(config().repos[0]?.defaultBranch).toBe("main");
+  });
+
+  test("a checkout on an unpushed branch is not saved", async () => {
+    git("checkout -q -b feature/unpushed");
+    const logs: string[] = [];
+    const questions = await runWizard(() => "", logs);
+
+    expect(questions.some((question) => question.startsWith("Base tasks and PRs on"))).toBe(false);
+    expect(config().repos[0]?.defaultBranch).toBe("main");
+    expect(logs.join("\n")).toContain('"feature/unpushed", but that branch is not on origin');
   });
 
   test("a re-run offers the saved branch and Enter keeps it", async () => {
     git("checkout -q -b feature/pr-base");
+    publishCurrentBranch();
     await runWizard(() => "feature/pr-base");
     expect(config().repos[0]?.defaultBranch).toBe("feature/pr-base");
 
     const questions = await runWizard(() => "");
 
     const question = questions.find((candidate) =>
-      candidate.startsWith("Open PRs against feature/pr-base or main?"),
+      candidate.startsWith("Base tasks and PRs on feature/pr-base or main?"),
     );
     expect(question).toContain("[feature/pr-base]");
     expect(config().repos[0]?.defaultBranch).toBe("feature/pr-base");
+  });
+
+  test("a saved branch deleted from origin is replaced on a re-run", async () => {
+    git("checkout -q -b feature/pr-base");
+    publishCurrentBranch();
+    await runWizard(() => "feature/pr-base");
+    git("update-ref -d refs/remotes/origin/feature/pr-base");
+
+    const questions = await runWizard(() => "feature/pr-base");
+
+    expect(questions.some((question) => question.startsWith("Base tasks and PRs on"))).toBe(false);
+    expect(config().repos[0]?.defaultBranch).toBe("main");
+  });
+
+  test("without origin/HEAD the key stays unset instead of guessing the checkout branch", async () => {
+    git("checkout -q -b feature/local-only");
+    git("symbolic-ref --delete refs/remotes/origin/HEAD");
+    const logs: string[] = [];
+    const questions = await runWizard(() => "", logs);
+
+    expect(questions.some((question) => question.startsWith("Base tasks and PRs on"))).toBe(false);
+    expect(config().repos[0]?.defaultBranch).toBeUndefined();
+    expect(logs.join("\n")).toContain("no origin/HEAD");
+  });
+
+  test("without origin/HEAD a saved branch missing from origin is cleared", async () => {
+    git("checkout -q -b feature/pr-base");
+    publishCurrentBranch();
+    await runWizard(() => "feature/pr-base");
+    expect(config().repos[0]?.defaultBranch).toBe("feature/pr-base");
+
+    git("symbolic-ref --delete refs/remotes/origin/HEAD");
+    git("update-ref -d refs/remotes/origin/feature/pr-base");
+    const logs: string[] = [];
+    await runWizard(() => "", logs);
+
+    expect(config().repos[0]?.defaultBranch).toBeUndefined();
+    expect(logs.join("\n")).toContain('Saved default_branch "feature/pr-base" is not on origin');
   });
 });

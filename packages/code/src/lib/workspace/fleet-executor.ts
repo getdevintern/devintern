@@ -199,6 +199,24 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
 }
 
 /**
+ * Give a task run its repo's `default_branch` as `--pr-target-branch` unless
+ * the configured args already choose one.
+ *
+ * `RepoManager.createTaskWorktree` cuts the worktree from `origin/<branch>`, and
+ * the pipeline cuts the feature branch from `options.prTargetBranch`; passing
+ * the same branch keeps the worktree base, the feature branch, and the PR base
+ * in agreement. An explicit flag stays authoritative.
+ */
+export function repoTaskArgs(args: string[], repo: RepoConfig): string[] {
+  const branch = repo.defaultBranch;
+  if (!branch) return args;
+  if (args.some((arg) => arg === "--pr-target-branch" || arg.startsWith("--pr-target-branch="))) {
+    return args;
+  }
+  return [...args, "--pr-target-branch", branch];
+}
+
+/**
  * Build the CLI args for an error-monitor remediation run.
  *
  * The monitor already qualified the error group, so the generic feasibility
@@ -576,7 +594,7 @@ export function createGatedFleetTaskExecutor(
           activeTaskWorktrees.add(worktree);
           let ok: TaskExecutionResult;
           try {
-            ok = await runTask(options.taskRef ?? taskKey, extraArgs, {
+            ok = await runTask(options.taskRef ?? taskKey, repoTaskArgs(extraArgs, repo), {
               cwd: worktree,
               env: childEnv,
               signal,

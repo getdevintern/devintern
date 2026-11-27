@@ -193,10 +193,11 @@ describe("runNonInteractiveWorkerInit", () => {
       name: "app",
       remote: "git@github.com:acme/app.git",
       added: true,
-      defaultBranch: "main",
       branch: "main",
     });
-    expect(config.repos[0]?.defaultBranch).toBe("main");
+    // No origin/HEAD: the checkout branch is not assumed to be the remote
+    // default, so the worker resolves it from the clone at run time.
+    expect(config.repos[0]?.defaultBranch).toBeUndefined();
     expect(report.filesWritten).toEqual([
       join(workspaceDir, ".env"),
       join(workspaceDir, "workspace.toml"),
@@ -796,8 +797,7 @@ describe("runNonInteractiveWorkerInit", () => {
       name: "app",
       remote: "https://gitlab.com/acme/app.git",
       added: true,
-      // `git init -b main` with no origin/HEAD: the checked-out branch is recorded.
-      defaultBranch: "main",
+      // `git init -b main` with no origin/HEAD: no unverified default_branch is recorded.
       branch: "main",
     });
     const config = loadWorkspaceConfig(join(workspaceDir, "workspace.toml"));

@@ -52,10 +52,14 @@ describe("worker init parity: interactive and non-interactive write the same wor
     root = mkdtempSync(join(tmpdir(), "worker-init-parity-"));
     repoDir = join(root, "repo");
     mkdirSync(repoDir, { recursive: true });
-    execSync(`git init -q -b main && git remote add origin ${REMOTE}`, {
-      cwd: repoDir,
-      stdio: "ignore",
-    });
+    execSync(
+      "git init -q -b main && " +
+        "git -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m init && " +
+        `git remote add origin ${REMOTE} && ` +
+        "git update-ref refs/remotes/origin/main HEAD && " +
+        "git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main",
+      { cwd: repoDir, stdio: "ignore" },
+    );
   });
 
   afterEach(() => {
