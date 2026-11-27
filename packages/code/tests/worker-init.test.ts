@@ -144,6 +144,9 @@ describe("runWorkerInit", () => {
   const savedTracker = process.env.TASK_TRACKER;
   const savedWorkspace = process.env.DEVINTERN_WORKSPACE_DIR;
   const savedSentryToken = process.env.SENTRY_AUTH_TOKEN;
+  // Worker task subprocesses carry a real LICENSE_KEY; the license step
+  // branches on it, so the suite starts from the no-key default.
+  const savedLicenseKey = process.env.LICENSE_KEY;
   const savedConfigDir = process.env[ANALYTICS_CONFIG_DIR_ENV];
 
   beforeEach(() => {
@@ -159,6 +162,7 @@ describe("runWorkerInit", () => {
     process.env.TASK_TRACKER = "markdown";
     process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
     delete process.env.SENTRY_AUTH_TOKEN;
+    delete process.env.LICENSE_KEY;
     logs = [];
   });
 
@@ -174,6 +178,8 @@ describe("runWorkerInit", () => {
     else process.env.DEVINTERN_WORKSPACE_DIR = savedWorkspace;
     if (savedSentryToken === undefined) delete process.env.SENTRY_AUTH_TOKEN;
     else process.env.SENTRY_AUTH_TOKEN = savedSentryToken;
+    if (savedLicenseKey === undefined) delete process.env.LICENSE_KEY;
+    else process.env.LICENSE_KEY = savedLicenseKey;
     rmSync(tempDir, { recursive: true, force: true });
   });
 
