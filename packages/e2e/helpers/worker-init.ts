@@ -34,7 +34,7 @@ import type { CommandResult } from "./process";
 export interface WorkerInitReport {
   schema: string;
   version: number;
-  result: "success" | "action_required" | "failure";
+  result: "success" | "action_required" | "failure" | "unchanged";
   error?: string;
   workspaceDir: string;
   tracker: string | null;
