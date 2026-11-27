@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -16,6 +17,7 @@ import { stdinClosedError } from "@devintern/auth";
 import { isPromptAbort } from "../src/lib/cli/prompt-abort";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/code-host/github/app-setup";
+import { readGitHubCliToken } from "../src/lib/init/github-cli-token";
 import {
   ANALYTICS_CONFIG_DIR_ENV,
   setAnalyticsCaptureForTests,
@@ -229,7 +231,7 @@ describe("runWorkerInit", () => {
   });
 
   test("writes task_query to workspace.toml, not WORKER_TASK_QUERY", async () => {
-    const result = await runWorkerInit(deps(["status=todo"], { dryRunQuery: async () => 3 }));
+    const result = await runWorkerInit(deps(["", "status=todo"], { dryRunQuery: async () => 3 }));
     expect(result.ok).toBe(true);
     const config = loadWorkspaceConfig(path.join(workspaceDir, "workspace.toml"));
     expect(config.defaults.taskQuery).toBe("status=todo");
@@ -238,6 +240,94 @@ describe("runWorkerInit", () => {
     expect(env).not.toContain("WORKER_TASK_QUERY");
     expect(logs.join("\n")).toContain("3 task(s) match");
     expect(logs.join("\n")).not.toContain("webhook listener");
+  });
+
+  describe("GitHub PR token fallback for a GitHub remote", () => {
+    const savedGithubToken = process.env.GITHUB_TOKEN;
+    const savedGithubRepo = process.env.GITHUB_REPO;
+
+    beforeEach(() => {
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITHUB_REPO;
+    });
+
+    afterEach(() => {
+      if (savedGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedGithubToken;
+      if (savedGithubRepo === undefined) delete process.env.GITHUB_REPO;
+      else process.env.GITHUB_REPO = savedGithubRepo;
+    });
+
+    /** Answer the token question and the rest of the wizard. */
+    function scriptedPrompt(questions: string[], token: string) {
+      return async (question: string): Promise<string> => {
+        questions.push(question);
+        if (question.startsWith("GitHub token for creating")) return token;
+        if (question.startsWith("Ready-tasks")) return "status=todo";
+        return "n";
+      };
+    }
+
+    test("asks for the token when gh is absent", async () => {
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => null,
+          prompt: scriptedPrompt(questions, "ghp_from_prompt"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        true,
+      );
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=ghp_from_prompt",
+      );
+    });
+
+    test("asks for the token when gh is signed out", async () => {
+      const ghDir = mkdtempSync(path.join(tempDir, "gh-signed-out-"));
+      writeFileSync(
+        path.join(ghDir, "gh"),
+        "#!/bin/sh\necho 'You are not logged into any GitHub hosts.' >&2\nexit 1\n",
+      );
+      chmodSync(path.join(ghDir, "gh"), 0o755);
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () =>
+            readGitHubCliToken({ env: { ...process.env, PATH: `${ghDir}:/usr/bin:/bin` } }),
+          prompt: scriptedPrompt(questions, "ghp_signed_out"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        true,
+      );
+      expect(readFileSync(path.join(workspaceDir, ".env"), "utf8")).toContain(
+        "GITHUB_TOKEN=ghp_signed_out",
+      );
+    });
+
+    test("asks for another token when gh's token is rejected", async () => {
+      const questions: string[] = [];
+      const result = await runWorkerInit(
+        deps([], {
+          githubCliToken: () => ({ token: "gho_rejected", account: "octocat" }),
+          githubTokenProbe: async () => {
+            throw new Error("GitHub API error (401): Bad credentials");
+          },
+          prompt: scriptedPrompt(questions, "ghp_replacement"),
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(questions.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        true,
+      );
+      const env = readFileSync(path.join(workspaceDir, ".env"), "utf8");
+      expect(env).toContain("GITHUB_TOKEN=ghp_replacement");
+      expect(env).not.toContain("gho_rejected");
+    });
   });
 
   test("configures task hours and pull-request maintenance policy", async () => {
@@ -259,7 +349,7 @@ describe("runWorkerInit", () => {
   test("failing dry run offers a retry then accepts the corrected query", async () => {
     let calls = 0;
     const result = await runWorkerInit(
-      deps(["bad query", "y", "status=todo"], {
+      deps(["", "bad query", "y", "status=todo"], {
         dryRunQuery: async (q) => {
           calls++;
           if (q === "bad query") throw new Error("syntax error");

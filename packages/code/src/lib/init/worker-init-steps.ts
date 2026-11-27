@@ -303,7 +303,8 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
  * Pull-request token. A workspace with a GitHub remote needs `GITHUB_TOKEN`
  * for PRs even when the tracker is elsewhere; when it is not set, offer the
  * signed-in `gh` session. Flags mode resolved it while planning the query.
- * A rejected `gh` token falls back to the same prompt as a pasted one.
+ * Without a usable `gh` session (absent, signed out, declined, or rejected),
+ * ask for a token exactly as before.
  */
 async function githubTokenStep(run: SetupRun): Promise<boolean> {
   if (run.input === "flags" || run.trackerType === "github") return true;
@@ -331,13 +332,12 @@ async function githubTokenStep(run: SetupRun): Promise<boolean> {
     saveGitHubToken(envPath, offer.token, run.log);
     return true;
   }
-  if (offer.status === "rejected") {
-    // The rejection warning is already logged; ask for a token that works
-    // instead of silently finishing without one.
-    const values: Record<string, string> = {};
-    await promptSteps([GITHUB_PR_TOKEN_STEP], run.prompt, run.log, values, run.promptSecret);
-    if (values.GITHUB_TOKEN) saveGitHubToken(envPath, values.GITHUB_TOKEN, run.log);
-  }
+  // No usable `gh` session (absent, signed out, declined, or rejected): ask for
+  // a token as before. The rejection warning is already logged when the probe
+  // refused it; an empty answer still skips the optional token.
+  const values: Record<string, string> = {};
+  await promptSteps([GITHUB_PR_TOKEN_STEP], run.prompt, run.log, values, run.promptSecret);
+  if (values.GITHUB_TOKEN) saveGitHubToken(envPath, values.GITHUB_TOKEN, run.log);
   return true;
 }
 
@@ -700,10 +700,11 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
     // when nobody is signed in yet, `fail` for anything else.
     checks.push(mapped);
   }
-  // A non-GitHub tracker only needs GITHUB_TOKEN for PRs, which no tracker
-  // probe covers; report the rejected CLI token as a credentials failure so
-  // the run stops with the same `fix-credentials` next step.
-  if (plan.githubTokenRejected && plan.tracker !== "github") {
+  // A rejected CLI token is never written. The credential check above may
+  // still see it transiently (or not cover it at all for a non-GitHub
+  // tracker), so report it as a credentials failure unconditionally: every run
+  // stops with the same `fix-credentials` next step.
+  if (plan.githubTokenRejected) {
     checks.push({
       name: "credentials",
       label: "GitHub credential probe",

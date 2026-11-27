@@ -358,7 +358,7 @@ describe("non-interactive setup", () => {
     expect(report.result).toBe("failure");
     expect(report.code).toBe("credentials_rejected");
     expect(report.persisted).toBe(false);
-    expect(report.tokenSource).toBe("gh");
+    expect(report.tokenSource).toBeUndefined();
     expect(report.nextSteps.map((step) => step.id)).toContain("fix-credentials");
     expect(
       report.warnings.some((warning) => warning.includes("GitHub CLI token was rejected")),
@@ -366,6 +366,29 @@ describe("non-interactive setup", () => {
     const envPath = join(workspaceDir, ".env");
     const saved = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
     expect(saved).not.toContain(TOKEN);
+    expect(renderNonInteractiveReport(report).join("\n")).not.toContain(
+      "GitHub token from the GitHub CLI",
+    );
+  });
+
+  test("a rejection that is not repeated by the readiness probe still fails", async () => {
+    let probes = 0;
+    const report = await run({
+      githubCliToken: () => ({ token: TOKEN, account: "octocat" }),
+      probe: async () => {
+        probes += 1;
+        if (probes === 1) throw new Error("GitHub API error (401): Bad credentials");
+      },
+    });
+    expect(probes).toBe(2);
+    expect(report.result).toBe("failure");
+    expect(report.code).toBe("credentials_rejected");
+    expect(report.persisted).toBe(false);
+    expect(report.tokenSource).toBeUndefined();
+    expect(report.nextSteps.map((step) => step.id)).toContain("fix-credentials");
+    expect(report.checks.find((check) => check.name === "credentials")?.status).toBe("fail");
+    const envPath = join(workspaceDir, ".env");
+    expect(existsSync(envPath) ? readFileSync(envPath, "utf8") : "").not.toContain(TOKEN);
   });
 
   test("a rejected gh token is not saved and fails with fix-credentials", async () => {
@@ -381,7 +404,7 @@ describe("non-interactive setup", () => {
     expect(report.result).toBe("failure");
     expect(report.code).toBe("credentials_rejected");
     expect(report.persisted).toBe(false);
-    expect(report.tokenSource).toBe("gh");
+    expect(report.tokenSource).toBeUndefined();
     expect(report.nextSteps.map((step) => step.id)).toContain("fix-credentials");
     const envPath = join(workspaceDir, ".env");
     expect(existsSync(envPath) ? readFileSync(envPath, "utf8") : "").not.toContain(TOKEN);

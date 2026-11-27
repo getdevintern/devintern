@@ -414,8 +414,10 @@ function credentialTokenSource(
 /**
  * Resolve and probe `gh`'s token when this setup needs a GitHub token and none
  * is set. A rejected token is reported but never kept in the saved
- * credentials: the readiness step fails with the existing `fix-credentials`
- * step, whether the GitHub tracker or a GitHub remote for PRs needs the token.
+ * credentials: the token may still reach the readiness probe, so the readiness
+ * step adds an unconditional credentials failure and the run stops with the
+ * existing `fix-credentials` step, whether the GitHub tracker or a GitHub
+ * remote for PRs needs the token.
  */
 async function githubCliTokenForPlan(
   tracker: string | undefined,
@@ -454,7 +456,7 @@ async function githubCliTokenForPlan(
       `⚠️  The GitHub CLI token was rejected (${message}); it will not be saved. ` +
         "Use a token with repository access, or re-run with --env-file.",
     );
-    return { token: token.token, source: "gh", rejected: true, rejection: message };
+    return { token: token.token, rejected: true, rejection: message };
   }
   notes.push(
     `🔑 Using the GitHub CLI token${token.account ? ` for ${token.account}` : ""} ` +
