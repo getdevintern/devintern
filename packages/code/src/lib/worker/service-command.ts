@@ -25,6 +25,7 @@ import {
   toReportCheck,
 } from "../observability/readiness-json";
 import type { NextStep, ReportCheck } from "../observability/readiness-json";
+import { renderNextSteps } from "../observability/next-steps-text";
 import { parseEnvFile } from "../workspace/env";
 import { DEFAULT_MEMORY_BUDGET } from "./memory-budget";
 import type { MemoryBudgetPercentages } from "./memory-budget";
@@ -560,11 +561,7 @@ export function renderServiceReport(
   }
   for (const warning of report.warnings) lines.push(`⚠️  ${warning}`);
   if (report.nextSteps.length > 0 && !report.start) {
-    lines.push("", "Next steps:");
-    report.nextSteps.forEach((step, index) => {
-      lines.push(`   ${index + 1}. ${step.message}`);
-      lines.push(`      ${step.command}`);
-    });
+    lines.push("", "Next steps:", ...renderNextSteps(report.nextSteps, { indent: "   " }));
   }
   return lines;
 }

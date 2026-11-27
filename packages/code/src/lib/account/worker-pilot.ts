@@ -70,10 +70,13 @@ export function signInCommand(loginCommand: string = WORKER_LOGIN_COMMAND): stri
   return `${loginCommand} github`;
 }
 
+/** Opens the headless sign-in alternative in {@link signInHint} (text output drops it). */
+export const NO_TERMINAL_SIGN_IN = "Without a terminal:";
+
 /** Hint for the entitlement row when sign-in is the next step. */
 export function signInHint(loginCommand: string = WORKER_LOGIN_COMMAND): string {
   return (
-    `Run \`${signInCommand(loginCommand)}\` (or ${OTHER_LOGIN_METHODS}). Without a terminal: ` +
+    `Run \`${signInCommand(loginCommand)}\` (or ${OTHER_LOGIN_METHODS}). ${NO_TERMINAL_SIGN_IN} ` +
     `\`${signInCommand(loginCommand)} --no-wait\`. A paid LICENSE_KEY in the workspace .env works instead`
   );
 }

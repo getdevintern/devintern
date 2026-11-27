@@ -195,7 +195,7 @@ describe("worker init --non-interactive host problems", () => {
     const checkLines = lines.filter((line) => /^ {2}\S+ \S+: /.test(line));
     expect(checkLines[0]).toContain("harness: missing");
     const steps = lines.filter((line) => /^ {2}\d+\. /.test(line));
-    expect(steps[0]).toBe("  1. Install the agent CLI:");
+    expect(steps[0]).toBe("  1. Install the agent CLI");
     expect(report.checks.map((check) => check.name)).toEqual(["tracker-auth", "query", "harness"]);
     expect(report.nextSteps.map((step) => step.id)).toEqual(["service", "install-agent"]);
   });
