@@ -243,5 +243,6 @@ The mention itself is the instruction: the agent works on what the comment asks,
 - Comments posted by the bot or by the worker itself are never acted on.
 - Each mention is handled once, even when both the relay and polling see it.
 - Fork PRs are skipped unless they allow maintainer edits.
+- A mention on a merged or closed PR starts no run; the bot replies once on the PR and asks you to open a new PR or file a ticket instead.
 - Mentions posted before the worker first started are ignored.
 - A mention that fails is retried up to `WORKER_FEEDBACK_MAX_ATTEMPTS` times (default 3). Mentions interrupted by shutdown or usage limits are retried without counting as an attempt.

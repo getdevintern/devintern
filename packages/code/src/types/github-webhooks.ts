@@ -27,6 +27,9 @@ export interface GitHubPullRequest {
   title: string;
   body: string | null;
   state: "open" | "closed";
+  /** Whether a closed PR was merged. */
+  merged?: boolean;
+  merged_at?: string | null;
   html_url: string;
   user: GitHubUser;
   head: {

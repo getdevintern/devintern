@@ -25,6 +25,8 @@ The listener acts only when the App's bot is **`@`-mentioned**:
 
 Individual `pull_request_review_comment` events, approvals, and dismissals do not start runs.
 
+On a merged or closed PR, a mention in a review body or top-level comment starts no run; the bot replies once on the PR instead.
+
 ## Prerequisites
 
 - A **customer-owned GitHub App** (`GITHUB_APP_ID` + private key). It supplies the bot identity used for `@mention` matching and `slug[bot]` commits. See [Advanced: customer-owned GitHub App](./configuration.md#advanced-customer-owned-github-app).

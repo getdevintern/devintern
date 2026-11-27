@@ -14,8 +14,10 @@
  * Guardrails, in order:
  * 1. Bot identity required — without a resolvable bot username there is
  *    nothing to match, and the sweep stays dormant.
- * 2. Fork PRs are skipped (with an explanatory comment) unless
+ * 2. Open fork PRs are skipped (with an explanatory comment) unless
  *    `maintainer_can_modify` allows pushing to the contributor's branch.
+ *    Mentions on closed or merged PRs are handed to the handler, which
+ *    replies once on the PR instead of starting a run.
  * 3. The permission gate (write/maintain/admin; API errors are retried, never
  *    treated as a grant) and the mention gate both apply inside the shared
  *    review pipeline this feeds.
@@ -78,7 +80,7 @@ export interface MentionSweepGitHub {
   fetchReviewsSince?(sinceIso: string): Promise<SweptComment[]>;
   /** Bot login (e.g. `devintern[bot]`), or null when not resolvable. */
   getBotUsername(): Promise<string | null>;
-  /** PR lookup; must reject/throw for plain (non-PR) issues. */
+  /** PR lookup (open, closed, or merged); must reject/throw for plain (non-PR) issues. */
   getPr(prNumber: number): Promise<SweptPrInfo>;
   /** Best-effort explanatory comment (fork skip). */
   postComment(prNumber: number, body: string): Promise<void>;
@@ -96,7 +98,9 @@ export interface MentionSweepAcquirerOptions {
   queue: WebhookQueue;
   github: MentionSweepGitHub;
   /**
-   * Feed one mention into the review pipeline (injected for tests).
+   * Feed one mention into the review pipeline (injected for tests). Mentions
+   * on closed or merged PRs arrive here too: the handler must check the PR
+   * state and reply rather than start a run.
    *
    * Returns the run outcome so an `"interrupted"`/`"deferred"` run can release
    * the comment's dedupe claim and be retried instead of being lost.
@@ -367,16 +371,14 @@ export class MentionSweepAcquirer implements Acquirer {
       }
 
       try {
-        // Confirm it's an open PR (plain issues reject here) and apply the
-        // fork guard before feeding the pipeline.
+        // Confirm it's a PR (plain issues reject here) and apply the fork
+        // guard before feeding the pipeline. A mention on a closed or merged
+        // PR still goes to the handler, which replies on the PR instead of
+        // starting a run; the dedupe claim above keeps that to one reply.
         const pr = await github.getPr(prNumber);
-        if (pr.state !== "open") {
-          continue;
-        }
-
         const isFork =
           pr.headRepoFullName !== undefined && pr.headRepoFullName !== this.options.repo;
-        if (isFork && !pr.maintainerCanModify) {
+        if (pr.state === "open" && isFork && !pr.maintainerCanModify) {
           console.log(
             `⛔ [${this.name}] skipping mention on fork PR #${prNumber} ` +
               `(maintainer edits not allowed)`,
