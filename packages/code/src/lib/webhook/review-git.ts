@@ -203,8 +203,7 @@ export async function commitUncommittedReviewChanges(ctx: ReviewGitContext): Pro
         ctx.harness,
         ctx.executablePath,
         ctx.maxTurns,
-        ctx.worktreePath,
-        ctx.branch,
+        { cwd: ctx.worktreePath, expectedBranch: ctx.branch },
       );
 
       if (fixed) {
@@ -272,8 +271,7 @@ export async function validateLocalPrePushHook(
         ctx.harness,
         ctx.executablePath,
         ctx.maxTurns,
-        ctx.worktreePath,
-        ctx.branch,
+        { cwd: ctx.worktreePath, expectedBranch: ctx.branch },
       );
 
       if (fixed) {
@@ -387,8 +385,7 @@ export async function pushReviewedChanges(
         ctx.harness,
         ctx.executablePath,
         ctx.maxTurns,
-        ctx.worktreePath,
-        ctx.branch,
+        { cwd: ctx.worktreePath, expectedBranch: ctx.branch },
       );
 
       if (fixed) {
