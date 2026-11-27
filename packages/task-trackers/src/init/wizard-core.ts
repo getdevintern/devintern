@@ -8,6 +8,7 @@
  * reuse the API clients in this package).
  */
 
+import { AZURE_DEVOPS_FAKE_OPT_IN, azureDevOpsFakeBaseUrl } from "../config/azure-devops-fake.ts";
 import { BUNDLED_TRELLO_API_KEY } from "../config/load-tracker-config.ts";
 import {
   AsanaClient,
@@ -83,8 +84,18 @@ export function isInteractive(argv: string[], stdin: { isTTY?: boolean }): boole
   return !argv.includes("--yes") && !argv.includes("--no-interactive") && stdin.isTTY === true;
 }
 
+/** Test seams for {@link defaultProbe}. */
+export interface ProbeOptions {
+  /** Honor a loopback `AZURE_DEVOPS_BASE_URL` (defaults to the process's e2e opt-in). */
+  allowAzureDevOpsFake?: boolean;
+}
+
 /** Cheap authenticated API call per tracker to validate pasted credentials. */
-export async function defaultProbe(trackerId: string, env: Record<string, string>): Promise<void> {
+export async function defaultProbe(
+  trackerId: string,
+  env: Record<string, string>,
+  options: ProbeOptions = {},
+): Promise<void> {
   switch (trackerId) {
     case "jira":
       // /myself, not project search: Jira Cloud answers 200 with an empty list
@@ -122,6 +133,10 @@ export async function defaultProbe(trackerId: string, env: Record<string, string
         organization: env.AZURE_DEVOPS_ORG ?? "",
         pat: env.AZURE_DEVOPS_PAT ?? "",
         defaultProject: env.AZURE_DEVOPS_PROJECT ?? "",
+        baseUrl: azureDevOpsFakeBaseUrl(
+          env.AZURE_DEVOPS_BASE_URL,
+          options.allowAzureDevOpsFake ?? AZURE_DEVOPS_FAKE_OPT_IN,
+        ),
       }).getProjects();
       return;
     case "asana":
