@@ -87,7 +87,7 @@ describe("NonoSandboxProvider.wrapCommand", () => {
   });
 
   test("wraps the agent after -- with policy grants and no profile by default", () => {
-    const wrapped = new NonoSandboxProvider().wrapCommand(
+    const wrapped = new NonoSandboxProvider(process.env).wrapCommand(
       "/usr/bin/claude",
       ["-p", "hi"],
       policy(),
@@ -411,7 +411,7 @@ describe("NonoSandboxProvider.wrapCommand", () => {
 
   test("passes AGENT_SANDBOX_NONO_PROFILE as --profile", () => {
     process.env.AGENT_SANDBOX_NONO_PROFILE = "devintern";
-    const wrapped = new NonoSandboxProvider().wrapCommand(
+    const wrapped = new NonoSandboxProvider(process.env).wrapCommand(
       "/usr/bin/claude",
       ["-p", "hi"],
       policy(),
@@ -422,7 +422,7 @@ describe("NonoSandboxProvider.wrapCommand", () => {
   });
 
   test("maps a domain allowlist to repeated --allow-domain flags", () => {
-    const wrapped = new NonoSandboxProvider().wrapCommand(
+    const wrapped = new NonoSandboxProvider(process.env).wrapCommand(
       "/usr/bin/claude",
       [],
       policy({ network: { allowedDomains: ["api.anthropic.com", "github.com"] } }),
@@ -437,7 +437,7 @@ describe("NonoSandboxProvider.wrapCommand", () => {
     const home = process.env.HOME ?? "";
     const cursorConfig = join(home, ".config/cursor");
     if (!existsSync(cursorConfig)) return; // machine-dependent; skip when absent
-    const wrapped = new NonoSandboxProvider().wrapCommand(
+    const wrapped = new NonoSandboxProvider(process.env).wrapCommand(
       "/usr/bin/cursor-agent",
       ["-p", "hi"],
       policy({ harnessName: "cursor" }),
@@ -454,7 +454,7 @@ describe("NonoSandboxProvider.wrapCommand", () => {
     const home = process.env.HOME ?? "";
     const stateDir = join(home, ".local/state/opencode");
     if (!existsSync(stateDir)) return;
-    const wrapped = new NonoSandboxProvider().wrapCommand(
+    const wrapped = new NonoSandboxProvider(process.env).wrapCommand(
       "/usr/bin/opencode",
       ["run", "test"],
       policy({ harnessName: "opencode" }),
@@ -468,7 +468,11 @@ describe("NonoSandboxProvider.wrapCommand", () => {
 
   test("grants /dev/ptmx so lefthook can allocate a PTY", () => {
     if (!existsSync("/dev/ptmx")) return; // absent on some constrained hosts
-    const wrapped = new NonoSandboxProvider().wrapCommand("/usr/bin/claude", [], policy());
+    const wrapped = new NonoSandboxProvider(process.env).wrapCommand(
+      "/usr/bin/claude",
+      [],
+      policy(),
+    );
     const sep = wrapped.args.indexOf("--");
     const allowFiles: string[] = [];
     for (let i = 0; i < sep; i++) {
@@ -714,6 +718,8 @@ describe("sandboxBunEnv", () => {
 
 describe("NonoSandboxProvider harness state grants", () => {
   const originalHome = process.env.HOME;
+  const originalDshHome = process.env.DSH_HOME;
+  const originalCustomStateRoot = process.env.DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME;
   let home: string;
 
   beforeEach(() => {
@@ -722,11 +728,25 @@ describe("NonoSandboxProvider harness state grants", () => {
     home = mkdtempSync(join(tmpdir(), "nono-home-"));
     process.env.HOME = home;
     delete process.env.AGENT_SANDBOX_NONO_PROFILE;
+    // A developer's DSH overrides (including the documented opt-in) must not
+    // decide whether the refusal tests below pass.
+    delete process.env.DSH_HOME;
+    delete process.env.DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME;
     resetNonoPackState();
   });
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalDshHome === undefined) {
+      delete process.env.DSH_HOME;
+    } else {
+      process.env.DSH_HOME = originalDshHome;
+    }
+    if (originalCustomStateRoot === undefined) {
+      delete process.env.DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME;
+    } else {
+      process.env.DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME = originalCustomStateRoot;
+    }
     resetNonoPackState();
   });
 
@@ -741,12 +761,87 @@ describe("NonoSandboxProvider harness state grants", () => {
   }
 
   function wrap(harnessName: string, cli = `/usr/local/bin/${harnessName}`) {
-    return new NonoSandboxProvider().wrapCommand(cli, ["-p", "hi"], policy({ harnessName }));
+    return new NonoSandboxProvider(process.env).wrapCommand(
+      cli,
+      ["-p", "hi"],
+      policy({ harnessName }),
+    );
   }
 
   test("grants grok write access to ~/.grok (auth, sessions and logs)", () => {
     mkdirSync(join(home, ".grok"), { recursive: true });
     expect(allows(wrap("grok"))).toContain(join(home, ".grok"));
+  });
+
+  test("grants a custom DSH_HOME instead of ~/.dsh for deepseek", () => {
+    const dshHome = mkdtempSync(join(home, ".dsh-nono-home-"));
+    process.env.DSH_HOME = dshHome;
+    try {
+      mkdirSync(join(dshHome, "profiles"), { recursive: true });
+      const grants = allows(wrap("deepseek"));
+      expect(grants).toContain(dshHome);
+      expect(grants).not.toContain(join(home, ".dsh"));
+    } finally {
+      delete process.env.DSH_HOME;
+      rmSync(dshHome, { recursive: true, force: true });
+    }
+  });
+
+  test("creates and grants a trusted custom DSH_HOME that does not exist yet", () => {
+    const dshHome = join(home, `.dsh-fresh-${process.pid}-${Date.now()}`);
+    expect(existsSync(dshHome)).toBe(false);
+    process.env.DSH_HOME = dshHome;
+    try {
+      const grants = allows(wrap("deepseek"));
+      expect(existsSync(dshHome)).toBe(true);
+      expect(grants).toContain(dshHome);
+    } finally {
+      delete process.env.DSH_HOME;
+      rmSync(dshHome, { recursive: true, force: true });
+    }
+  });
+
+  test("creates and grants the default ~/.dsh on a fresh install", () => {
+    expect(existsSync(join(home, ".dsh"))).toBe(false);
+    const grants = allows(wrap("deepseek"));
+    expect(existsSync(join(home, ".dsh"))).toBe(true);
+    expect(grants).toContain(join(home, ".dsh"));
+  });
+
+  test("grants a DSH_HOME merged after module load (repo .env) with no snapshot", () => {
+    const custom = join(home, ".dsh-custom");
+    process.env.DSH_HOME = custom;
+    try {
+      // The registry constructs providers with no snapshot, exactly like the
+      // Code/PM hosts. DSH_HOME is merged into process.env after import (the
+      // repository .env), and the dsh child inherits that value, so the grant
+      // must follow it instead of the startup default ~/.dsh.
+      const grants = allows(
+        new NonoSandboxProvider().wrapCommand(
+          "/usr/local/bin/dsh",
+          ["headless"],
+          policy({ harnessName: "deepseek" }),
+        ),
+      );
+      expect(grants).toContain(custom);
+      expect(grants).not.toContain(join(home, ".dsh"));
+    } finally {
+      delete process.env.DSH_HOME;
+    }
+  });
+
+  test("does not grant an unrelated $HOME subtree chosen via DSH_HOME", () => {
+    const sshDir = join(home, ".ssh");
+    mkdirSync(sshDir, { recursive: true });
+    process.env.DSH_HOME = sshDir;
+    try {
+      const grants = allows(wrap("deepseek"));
+      expect(grants).not.toContain(sshDir);
+      // The untrusted override is ignored, so the safe default is used.
+      expect(grants).toContain(join(home, ".dsh"));
+    } finally {
+      delete process.env.DSH_HOME;
+    }
   });
 
   test("never grants write access to toolchain dirs such as mise", () => {
@@ -844,12 +939,12 @@ describe("nono pack profile status", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      new NonoSandboxProvider().wrapCommand(
+      new NonoSandboxProvider(process.env).wrapCommand(
         "/usr/local/bin/grok",
         [],
         policy({ harnessName: "grok" }),
       );
-      new NonoSandboxProvider().wrapCommand(
+      new NonoSandboxProvider(process.env).wrapCommand(
         "/usr/local/bin/grok",
         [],
         policy({ harnessName: "grok" }),
@@ -869,7 +964,7 @@ describe("nono pack profile status", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      new NonoSandboxProvider().wrapCommand(
+      new NonoSandboxProvider(process.env).wrapCommand(
         "/usr/local/bin/opencode",
         [],
         policy({ harnessName: "opencode" }),
@@ -888,7 +983,7 @@ describe("nono pack profile status", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      new NonoSandboxProvider().wrapCommand(
+      new NonoSandboxProvider(process.env).wrapCommand(
         "/usr/local/bin/grok",
         [],
         policy({ harnessName: "grok" }),

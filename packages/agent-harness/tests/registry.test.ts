@@ -6,13 +6,14 @@ import { ClaudeCodeHarness } from "../src/harnesses/claude-code.js";
 describe("registry", () => {
   test("listHarnesses returns all built-in harnesses", () => {
     const harnesses = listHarnesses();
-    expect(harnesses.length).toBe(14);
+    expect(harnesses.length).toBe(15);
     const names = harnesses.map((h) => h.name);
     expect(names).toContain("claude-code");
     expect(names).toContain("opencode");
     expect(names).toContain("codex");
     expect(names).toContain("cursor");
     expect(names).toContain("deepseek");
+    expect(names).toContain("reasonix");
     expect(names).toContain("antigravity");
     expect(names).not.toContain("gemini");
     expect(names).toContain("goose");
