@@ -4,7 +4,7 @@ sidebarLabel: "Quick Start"
 description: "Use when installing DevIntern Code for the first time: set up a worker that turns ready tracker tickets into pull requests, or run one task by hand."
 section: "Automation"
 order: 0
-dateModified: 2026-11-26
+dateModified: 2026-11-27
 tags: ["devintern/code", "quick start", "worker", "jira", "github", "cli"]
 ---
 
@@ -25,7 +25,24 @@ Prefer to set up from a chat? Install the [devintern-setup skill](agent-skills.m
 
 ## 1. Install
 
-Install [Bun](https://bun.sh). On Debian and Ubuntu, the Bun installer needs `unzip`:
+Install DevIntern Code with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh
+```
+
+The script installs [Bun](https://bun.sh) if it is missing, installs `@getdevintern/code` globally, adds `~/.bun/bin` to your shell profile, and prints the installed version. It is safe to re-run and upgrades DevIntern to the latest version. It never runs `sudo`: if a system package such as `unzip` is missing, it prints the command to install it and stops. Set `DEVINTERN_VERSION` to install a specific version, or `DEVINTERN_NO_MODIFY_PATH=1` to leave your shell profile alone.
+
+Then install and sign in to a coding agent:
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash   # Claude Code, the default agent
+claude                                           # sign in once, then exit
+```
+
+### Install manually
+
+Install Bun. On Debian and Ubuntu, the Bun installer needs `unzip`:
 
 ```bash
 sudo apt-get install -y unzip   # Debian/Ubuntu only
