@@ -67,8 +67,32 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: External dependency: notifications (Slack incoming webhooks, generic JSON webhook)
 - Status: `default`
 - Evidence: `tests/local/worker-notification-delivery.test.ts` (`bun run --filter @devintern/e2e test`). A real worker with `[notifications.slack]` and `[notifications.webhook]` (`url_env`, `secret_env`) reads both endpoint URLs and the signing secret only from the workspace `.env` and posts to a loopback receiver. A failed ad-hoc task (fake agent exits non-zero) raises one high-severity `retries_exhausted` notification. The webhook gets exactly one JSON `POST` with the documented payload (`source: "devintern"`, `version: 1`, `type: "notification"`, `event: "created"`, the notification's `kind`, `severity`, `repo`, `title`, `groupKey`, and `dashboardUrl` = `<dashboard_url>/#/runs/<id>`) and `X-DevIntern-Signature: sha256=<HMAC-SHA256 of the raw body>`. Slack gets one JSON `POST` with the title, repo, and an "Open in dashboard" link under `dashboard_url`. A later tick does not resend. Re-running the same task (`worker add --resume`) folds into the same group (count 2), and within the default 60-minute `rate_limit_minutes` nothing more is sent on either channel. A new group still reaches Slack while the webhook answers HTTP 500: the webhook is tried 3 times (one try plus two retries) and given up, the Slack send is not delayed by those retries, the worker logs `webhook delivery of notification #<id> failed: webhook answered HTTP 500`, and the run outcome is unchanged. Neither body nor the worker log contains the dummy Slack token path, the signing secret, their URL-encoded forms, or the receiver URL.
-- Missing: The desktop channel (`notify-send`/`osascript` on a real notification daemon), `digest_time` digests, `notify_resolved` resolve messages, `min_severity = "normal"` and `kinds`/`exclude_kinds` filters, the release of a held repeat once the rate-limit window ends, an inline webhook `url`, and `devintern worker doctor --test-notifications` (`event: "test"`; the next gap for this area). Only `retries_exhausted` is driven end to end; `escalated` and `internal_error` are unit-tested only. No real Slack workspace is contacted, so Slack's acceptance of the body and its HTTP semantics are not proven.
-- Last reviewed: 2026-11-27
+- Missing: The desktop channel (`notify-send`/`osascript` on a real notification daemon), `digest_time` digests, the release of a held repeat once the rate-limit window ends, and an inline webhook `url`. Filters, resolve messages, and `worker doctor --test-notifications` have their own rows below. Only `retries_exhausted` and `work_spawned` are driven end to end; `escalated` and `internal_error` are unit-tested only. No real Slack workspace is contacted, so Slack's acceptance of the body and its HTTP semantics are not proven.
+- Last reviewed: 2026-11-28
+
+### Notification test messages: `devintern worker doctor --test-notifications`
+
+- Surface: External dependency: notifications (Slack incoming webhooks, generic JSON webhook)
+- Status: `default`
+- Evidence: `tests/local/worker-notification-doctor.test.ts` (`bun run --filter @devintern/e2e test`). With `[notifications.slack]` and a signed `[notifications.webhook]` reading their endpoints and secret only from the workspace `.env`: plain `worker doctor` lists both channels (`✅ Notification delivery — slack, webhook; links open <dashboard_url> (send a test with --test-notifications)`) and sends nothing. `--test-notifications` sends exactly one message per channel and exits `0` with `test message sent` under each channel line. The webhook body has `event: "test"`, `source: "devintern"`, `version: 1`, `type: "notification"` and `dashboardUrl` = `<dashboard_url>/#/inbox`, with `X-DevIntern-Signature: sha256=<HMAC-SHA256 of the raw body>` from the `secret_env` secret; Slack gets one unsigned JSON `POST` with an "Open in dashboard" link to `<dashboard_url>/#/inbox`. With the webhook answering HTTP 500, doctor exits `1` with `❌ Notification delivery — slack, webhook: 1 test message(s) failed`, `test failed: webhook answered HTTP 500` under the webhook line, the endpoint hint, and `Setup: not_ready — 1 check failed (Notification delivery).`; the webhook is tried 3 times (each signed) while Slack still gets its message. A refusing recording proxy sees no request, doctor creates no state database, and no output or body contains the dummy token, secret, or receiver URL.
+- Missing: The desktop channel's test message, `--offline` skipping network channels, and a real Slack workspace.
+- Last reviewed: 2026-11-28
+
+### Notification filters: `kinds`, `exclude_kinds`, `min_severity`
+
+- Surface: External dependency: notifications (Slack incoming webhooks, generic JSON webhook)
+- Status: `partial`
+- Evidence: `tests/local/worker-notification-filters.test.ts` (`bun run --filter @devintern/e2e test`). A real worker raises a high-severity `retries_exhausted` (failed ad-hoc task) and a normal-severity `work_spawned` (the fake agent delegates a follow-up with `worker add`, linked through `DEVINTERN_RUN_ID`). Slack sets `exclude_kinds = ["retries_exhausted"]` and keeps the default `min_severity = "high"`; the webhook sets `min_severity = "normal"` and no kind filter. The webhook receives both (one signed `event: "created"` message each, with the right `kind`, `severity`, and run link); Slack receives neither, and both of its delivery records are `skipped` (the first by kind, the second by severity). A later tick sends nothing more. An unknown kind in `kinds` or `exclude_kinds` fails `worker doctor` (exit `1`) with `❌ Workspace config — [notifications.<channel>].<key> has unknown kind "<name>"; known kinds: …` per entry.
+- Missing: An include-list `kinds` filter is only checked for config validation, not for delivery; combining `kinds` with `exclude_kinds` on one channel; `pr_opened` and `pr_auto_merged` (normal severity) need a forge, so only `work_spawned` proves the severity half.
+- Last reviewed: 2026-11-28
+
+### Notification resolve messages: `notify_resolved`
+
+- Surface: External dependency: notifications (Slack incoming webhooks, generic JSON webhook)
+- Status: `default`
+- Evidence: `tests/local/worker-notification-resolved.test.ts` (`bun run --filter @devintern/e2e test`). With `notify_resolved = true` on the webhook only, a one-shot failure (`E2E_FAIL_ONCE_FILE`) raises `retries_exhausted`, delivered as `event: "created"` to both channels. `worker add --resume` of the same task then succeeds, the run rules resolve the row, and the webhook gets exactly one signed `event: "resolved"` message for that notification (same `id`, `groupKey`, `title`, run link, and `resolvedAt` equal to the stored `resolved_at`). Slack gets no resolve message; the delivery records show `resolved_sent` 1 for the webhook and 0 for Slack; a later tick does not resend.
+- Missing: Slack's `Resolved: <title>` rendering (not driven), a resolve send that fails and is retried on a later tick, and a resolve of a notification the channel never delivered.
+- Last reviewed: 2026-11-28
 
 ## Backlog
 
@@ -104,6 +128,27 @@ Priority numbers are the global ranking from the
 ### `tests/local/worker-notification-delivery.test.ts`
 
 - Proves: worker notification delivery from a failed run to Slack and a signed generic webhook (payload shape, HMAC signature, dashboard links), no resend on later ticks, the per-group rate limit holding a repeat, a failing webhook (HTTP 500, bounded retries) not blocking Slack or changing the run outcome, and no credential in request bodies or the worker log.
-- How: `WorkerFixture` with `[notifications]` tables in `workspaceTomlExtra`, endpoint URLs and a generated dummy signing secret in the workspace `.env`, and `helpers/notification-receiver.ts`, a loopback server that records method, path, headers, and raw body and can answer a chosen status per path. The fake agent fails prompts carrying `E2E_FAIL_PROMPT_MARKER`. Delivery ticks every 30 s and a channel only delivers notifications newer than its first tick, so the test enqueues the failing task after the first tick and waits for ticks through the queue DB (`notification_delivery_ticks`) instead of fixed sleeps. Secret comparisons assert booleans, and diagnostics redact the token and secret.
+- How: `WorkerFixture` with `[notifications]` tables in `workspaceTomlExtra`, endpoint URLs and a generated dummy signing secret in the workspace `.env` (shared setup in `helpers/notification-delivery.ts`), and `helpers/notification-receiver.ts`, a loopback server that records method, path, headers, and raw body and can answer a chosen status per path. The fake agent fails prompts carrying `E2E_FAIL_PROMPT_MARKER`. Delivery ticks every 30 s and a channel only delivers notifications newer than its first tick, so the test enqueues the failing task after the first tick and waits for ticks through the queue DB (`notification_delivery_ticks`) instead of fixed sleeps. Secret comparisons assert booleans, and diagnostics redact the token and secret.
 - Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/worker-notification-delivery.test.ts` from `packages/e2e`.
 - Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. About 2.5 minutes, mostly waiting on the 30 s delivery interval.
+
+### `tests/local/worker-notification-doctor.test.ts`
+
+- Proves: `worker doctor --test-notifications` sends exactly one test message per configured channel (signed webhook with `event: "test"` and the documented envelope; Slack with an inbox link), plain `worker doctor` sends nothing, and a webhook answering HTTP 500 fails the notification row (exit `1`, the product's failure line and hint) after 3 attempts while Slack still gets its message.
+- How: `WorkerFixture` (prepared, never started) with the `[notifications]` block from `helpers/notification-delivery.ts`, endpoint URLs and a generated dummy secret in the workspace `.env`, `helpers/notification-receiver.ts` as the loopback endpoint, and `helpers/recording-proxy.ts` refusing all egress. Leak checks assert booleans.
+- Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/worker-notification-doctor.test.ts` from `packages/e2e`.
+- Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. About 5 s.
+
+### `tests/local/worker-notification-filters.test.ts`
+
+- Proves: per-channel `exclude_kinds` and `min_severity` decide delivery (the unfiltered `min_severity = "normal"` webhook gets a high `retries_exhausted` and a normal `work_spawned`; Slack, excluding `retries_exhausted` at the default `high`, gets neither), and an unknown kind name is rejected at config load.
+- How: `WorkerFixture` with the shared notification setup and a refusing recording proxy. `work_spawned` comes from the fake agent's `E2EDELEGATEFOLLOWUP` marker (added to `helpers/fake-agent.ts`), which runs the built CLI's `worker add` from inside the run, so the queue links the follow-up to the delegating run. Ticks are read from the queue DB (`notification_delivery_ticks`), and the test waits for all four `notification_deliveries` records before checking counts. The config check runs `worker doctor` on a workspace with misspelled kinds.
+- Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/worker-notification-filters.test.ts` from `packages/e2e`.
+- Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. About 90 s, mostly waiting on the 30 s delivery interval.
+
+### `tests/local/worker-notification-resolved.test.ts`
+
+- Proves: with `notify_resolved = true` on the webhook, a notification resolved by a later successful run of the same task sends exactly one signed `event: "resolved"` message there, none to Slack (no `notify_resolved`), and no resend on later ticks.
+- How: `WorkerFixture` with the shared notification setup and a refusing recording proxy. The fake agent's `E2E_FAIL_ONCE_FILE` sentinel is planted after the warm-up so only the task under test fails, once; `worker add --resume` then succeeds (as `tests/local/dashboard-inbox.test.ts` does for auto-resolve). Delivery state (`resolved_sent`) is read from the queue DB.
+- Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/worker-notification-resolved.test.ts` from `packages/e2e`.
+- Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. About 2 minutes, mostly waiting on the 30 s delivery interval.
