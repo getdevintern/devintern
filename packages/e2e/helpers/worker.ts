@@ -144,6 +144,19 @@ export interface WorkerRunRecord {
   finished_at: number | null;
 }
 
+/**
+ * One row from `actioned_tasks`. The PR path (`applyActionedTransition`) sets
+ * `transitioned` and `transition_status` when it moved the ticket to its
+ * post-PR status; the no-PR marker leaves them at `0` and `null`.
+ */
+export interface WorkerActionedTask {
+  verified: number;
+  pending: number;
+  updated_stamp: string | null;
+  transitioned: number;
+  transition_status: string | null;
+}
+
 /** One `[[automations]]` entry written into the generated workspace.toml. */
 export interface WorkerAutomation {
   id: string;
@@ -751,12 +764,10 @@ export class WorkerFixture {
   }
 
   /** Local actioned marker for one ticket (`actioned_tasks` table), if any. */
-  actionedTask(
-    source: string,
-    taskKey: string,
-  ): { verified: number; pending: number; updated_stamp: string | null } | undefined {
-    return this.query<{ verified: number; pending: number; updated_stamp: string | null }>(
-      "SELECT verified, pending, updated_stamp FROM actioned_tasks WHERE source = ? AND task_key = ?",
+  actionedTask(source: string, taskKey: string): WorkerActionedTask | undefined {
+    return this.query<WorkerActionedTask>(
+      `SELECT verified, pending, updated_stamp, transitioned, transition_status
+         FROM actioned_tasks WHERE source = ? AND task_key = ?`,
       [source, taskKey],
     )[0];
   }
