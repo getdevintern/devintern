@@ -28,6 +28,12 @@ export interface ActiveTaskContext {
    * followed) mid-run: the actionable reason the run escalates with.
    */
   stackBlocked?: string;
+  /**
+   * Set when delivery accepted a run with nothing to commit because the agent
+   * reported `status=noop`: the `noop: …` outcome reason the run is recorded
+   * with.
+   */
+  noopDeliveryReason?: string;
 }
 
 /** A PR that was requested after a successful push but could not be created. */

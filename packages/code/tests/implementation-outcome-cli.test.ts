@@ -88,6 +88,7 @@ async function runCli(
   flags: string[],
   cwd = dir,
   taskContent = PLAIN_TASK,
+  extraEnv: Record<string, string> = {},
 ): Promise<CliRun> {
   const dbPath = join(dir, "queue.db");
   const hintPath = join(dir, "outcome.json");
@@ -104,6 +105,7 @@ async function runCli(
       WEBHOOK_QUEUE_DB: dbPath,
       [RUN_OUTCOME_FILE_ENV]: hintPath,
       ...GIT_IDENTITY_ENV,
+      ...extraEnv,
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -133,6 +135,14 @@ async function runCli(
 
 const BLOCKED = `${SUMMARY}\n<!-- devintern:outcome status=blocked reason="the unit test gate did not pass" -->\n`;
 
+/** A git checkout with one commit; the task file and run artifacts are ignored. */
+async function initCheckout(): Promise<void> {
+  await git(dir, "init", "-q", "-b", "main");
+  writeFileSync(join(dir, ".gitignore"), "output/\nqueue.db*\noutcome.json\nagent*\nrelease.md\n");
+  await git(dir, "add", ".gitignore");
+  await git(dir, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init");
+}
+
 const SHAPES: Array<{ name: string; flags: () => Promise<string[]> }> = [
   { name: "--no-git (open_pr = false)", flags: async () => ["--no-git"] },
   {
@@ -142,13 +152,7 @@ const SHAPES: Array<{ name: string; flags: () => Promise<string[]> }> = [
   {
     name: "--allow-no-changes in a git checkout",
     flags: async () => {
-      await git(dir, "init", "-q", "-b", "main");
-      writeFileSync(
-        join(dir, ".gitignore"),
-        "output/\nqueue.db*\noutcome.json\nagent*\nrelease.md\n",
-      );
-      await git(dir, "add", ".gitignore");
-      await git(dir, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init");
+      await initCheckout();
       return ["--allow-no-changes"];
     },
   },
@@ -229,4 +233,70 @@ describe("agent outcome marker → run status", () => {
       expect(taskStatus()).toBe("Done");
     }, 40_000);
   });
+});
+
+describe("no-change run in a git checkout without --allow-no-changes", () => {
+  const NOOP = `${SUMMARY}\n<!-- devintern:outcome status=noop reason="already merged in #283" -->\n`;
+  const IN_SCOPE: Array<{ name: string; env: Record<string, string> }> = [
+    { name: "ad-hoc task", env: { DEVINTERN_RUN_ORIGIN: "local" } },
+    {
+      name: "scheduled automation",
+      env: { DEVINTERN_RUN_ORIGIN: "scheduled", DEVINTERN_AUTOMATION_ID: "nightly" },
+    },
+  ];
+
+  for (const shape of IN_SCOPE) {
+    describe(shape.name, () => {
+      test("status=noop records a succeeded run with a noop: reason", async () => {
+        await initCheckout();
+        const result = await runCli(
+          NOOP,
+          ["--agent-path", writeStubAgent(NOOP)],
+          dir,
+          PLAIN_TASK,
+          shape.env,
+        );
+        expect(result.exitCode).toBe(0);
+        expect(result.run.status).toBe("succeeded");
+        expect(result.run.outcomeReason).toBe("noop: already merged in #283");
+        expect(result.hint).toEqual({
+          status: "succeeded",
+          reason: "noop: already merged in #283",
+        });
+      }, 40_000);
+
+      test("status=blocked records an escalated run", async () => {
+        await initCheckout();
+        const result = await runCli(
+          BLOCKED,
+          ["--agent-path", writeStubAgent(BLOCKED)],
+          dir,
+          PLAIN_TASK,
+          shape.env,
+        );
+        expect(result.run.status).toBe("escalated");
+        expect(result.run.outcomeReason).toBe("blocked: the unit test gate did not pass");
+      }, 40_000);
+
+      test("no marker still fails with Implementation was not committed", async () => {
+        await initCheckout();
+        const result = await runCli(
+          SUMMARY,
+          ["--agent-path", writeStubAgent(SUMMARY)],
+          dir,
+          PLAIN_TASK,
+          shape.env,
+        );
+        expect(result.run.status).toBe("failed");
+        expect(result.output).toContain("Implementation was not committed");
+      }, 40_000);
+    });
+  }
+
+  test("a run outside an ad-hoc task or automation still fails on status=noop", async () => {
+    await initCheckout();
+    const result = await runCli(NOOP, ["--agent-path", writeStubAgent(NOOP)]);
+    expect(result.run.status).toBe("failed");
+    expect(result.output).toContain("Implementation was not committed");
+  }, 40_000);
 });
