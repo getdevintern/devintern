@@ -50,7 +50,8 @@ export {
   describeCustomWorkerSettings,
 } from "./worker-init-policy";
 export type { WorkerInitDeps, WorkerInitResult } from "./worker-init-run";
-export { WORKER_INIT_STEPS, defaultEnsureTracker } from "./worker-init-steps";
+export { WORKER_INIT_STEPS } from "./worker-init-steps";
+export { defaultEnsureTracker } from "./worker-init-tracker";
 export { describeQueryFailure } from "./worker-init-query-failure";
 
 /**

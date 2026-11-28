@@ -12,16 +12,9 @@
  * atomically under the workspace lock, and a failed input check restores them.
  */
 
-import { existsSync, mkdirSync, readFileSync } from "fs";
-import { dirname, join, resolve } from "path";
+import { join } from "path";
 
-import {
-  condenseMessage,
-  createPromptAttempts,
-  defaultProbe,
-  parseEnvContent,
-} from "@devintern/task-trackers";
-import { findProjectRoot } from "@devintern/utils";
+import { condenseMessage, createPromptAttempts, defaultProbe } from "@devintern/task-trackers";
 
 import {
   WORKER_PILOT_OFFER,
@@ -48,14 +41,12 @@ import {
   trackersSupportingPolling,
 } from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
-import { writeSecretFile } from "../utils/secret-file";
 import { loadWorkspaceConfig } from "../workspace/config";
 import {
   ensureWorkspaceAndAddRepo,
   writeWorkerOperatingPolicy,
   writeWorkspaceDefaults,
 } from "../workspace/init";
-import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import {
   ensureWorkspaceCodeState,
   resolveWorkspaceDir,
@@ -70,10 +61,9 @@ import {
   serviceStep,
 } from "./worker-init-activation";
 import { readGitHubCliToken } from "./github-cli-token";
-import type { GitHubCliToken } from "./github-cli-token";
 import { recordRepoDefaultBranch } from "./worker-init-branch";
 import { errorMessage } from "./worker-init-fs";
-import { githubTokenStep, originGitHubSlug } from "./worker-init-github-token";
+import { githubTokenStep } from "./worker-init-github-token";
 import { hostStep, withoutRepeatedHostFailures } from "./worker-init-host";
 import { defaultDevinternLabelOps } from "./worker-init-label";
 import { describeQueryFailure, githubCredentialRow } from "./worker-init-query-failure";
@@ -103,19 +93,30 @@ import {
   configureWorkerOperatingPolicy,
   describeCustomWorkerSettings,
 } from "./worker-init-policy";
-import type { LogFn, PromptFn } from "./worker-init-policy";
 import { DEFAULT_PROBE_TIMEOUT_MS, secretValues, withTimeout } from "./worker-init-run";
 import type { FlagsRun, PromptRun, ReadinessBlocker, SetupRun } from "./worker-init-run";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
-import { runTrackerSetup } from "./wizard";
+import {
+  askBackToTracker,
+  defaultEnsureTracker,
+  noteTrackerRepo,
+  reconfigureTracker,
+  trackerDisplayName,
+} from "./worker-init-tracker";
 
 /** The wizard that asks each worker setting one by one. */
 const CUSTOMIZE_COMMAND = "devintern worker init --customize";
 
-/** One setup step. Returns false to stop setup (the step has said why). */
+/**
+ * What a step returns: true to continue, false to stop setup (the step has
+ * said why), or `{ back }` to run again from an earlier step (wizard only).
+ */
+export type StepResult = boolean | { back: string };
+
+/** One setup step. */
 export interface WorkerInitStep {
   id: string;
-  run: (run: SetupRun) => Promise<boolean>;
+  run: (run: SetupRun) => Promise<StepResult>;
 }
 
 /** Every `worker init` step, in order, for both input sources. */
@@ -134,10 +135,28 @@ export const WORKER_INIT_STEPS: readonly WorkerInitStep[] = [
   { id: "service", run: serviceStep },
 ];
 
-/** Run {@link WORKER_INIT_STEPS} in order; false when a step stopped setup. */
-export async function runWorkerInitSteps(run: SetupRun): Promise<boolean> {
-  for (const step of WORKER_INIT_STEPS) {
-    if (!(await step.run(run))) return false;
+/**
+ * Run {@link WORKER_INIT_STEPS} in order; false when a step stopped setup.
+ * A step that goes back re-runs every step from the one it names, which
+ * learns it is being revisited from `run.revisit`.
+ */
+export async function runWorkerInitSteps(
+  run: SetupRun,
+  steps: readonly WorkerInitStep[] = WORKER_INIT_STEPS,
+): Promise<boolean> {
+  for (let index = 0; index < steps.length;) {
+    const result = await steps[index]!.run(run);
+    if (result === false) return false;
+    if (result === true) {
+      index++;
+      continue;
+    }
+    const target = steps.findIndex((step) => step.id === result.back);
+    if (target < 0 || target >= index || run.input !== "prompt") {
+      throw new Error(`worker init step "${steps[index]!.id}" cannot go back to "${result.back}"`);
+    }
+    run.revisit = result.back;
+    index = target;
   }
   return true;
 }
@@ -217,6 +236,17 @@ async function trackerStep(run: SetupRun): Promise<boolean> {
     run.draft = planned.draft;
     return true;
   }
+  if (run.revisit === "tracker") {
+    run.revisit = undefined;
+    run.log("\n1️⃣  Tracker configuration (again)");
+    if (!(await reconfigureTracker(run))) {
+      run.log("❌ Tracker setup did not finish. Re-run `devintern worker init`.");
+      trackWorkerInitFailed("tracker_setup_incomplete");
+      return false;
+    }
+    await noteTrackerRepo(run);
+    return true;
+  }
   run.log("\n1️⃣  Tracker configuration");
   const trackerType = run.deps.ensureTracker
     ? await run.deps.ensureTracker({
@@ -247,6 +277,7 @@ async function trackerStep(run: SetupRun): Promise<boolean> {
   run.trackerName = trackerDisplayName(trackerType);
   run.queryExample = TRACKER_CAPABILITIES[trackerType]?.queryExample;
   run.log(`   Using ${run.trackerName}.`);
+  await noteTrackerRepo(run);
   return true;
 }
 
@@ -328,7 +359,7 @@ async function workspaceStep(run: SetupRun): Promise<boolean> {
  * the Enter default), validates it with a live dry run, and writes it; flags
  * mode takes `--task-query` and completes the plan with the credentials.
  */
-async function queryStep(run: SetupRun): Promise<boolean> {
+async function queryStep(run: SetupRun): Promise<StepResult> {
   if (run.input === "flags") {
     // Read `gh` with the run's environment (tests pin PATH here); an injected
     // reader keeps a test hermetic when the developer host is signed in.
@@ -356,14 +387,22 @@ async function queryStep(run: SetupRun): Promise<boolean> {
   }
   const { workspaceDir } = run;
   const currentQuery = loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).defaults.taskQuery;
-  const query = await promptReadyQuery(run, currentQuery);
+  const { query, back } = await promptReadyQuery(run, currentQuery);
+  // Saved before going back too: the revisited query prompt offers it as the default.
   writeWorkspaceDefaults(workspaceDir, { tracker: run.trackerType, taskQuery: query });
   run.log(`💾 Wrote [defaults].task_query to ${join(workspaceDir, "workspace.toml")}`);
-  return true;
+  return back ? { back: "tracker" } : true;
 }
 
-/** Prompt for the ready-tasks query until one is entered (and, with a dry run, works). */
-async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined): Promise<string> {
+/**
+ * Prompt for the ready-tasks query until one is entered (and, with a dry run,
+ * works). `back` when the dry run failed on credentials or repository access
+ * and the user chose to fix them in the tracker step.
+ */
+async function promptReadyQuery(
+  run: PromptRun,
+  currentQuery: string | undefined,
+): Promise<{ query: string; back?: boolean }> {
   run.log("\n3️⃣  Which tasks should the worker pick up?");
   // A re-run keeps the saved query as the Enter default; a new workspace uses the default.
   const fallback = currentQuery || defaultTaskQuery(run.trackerType);
@@ -407,10 +446,11 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
       } catch (error) {
         const failure = describeQueryFailure((error as Error).message, process.env.GITHUB_REPO);
         if (failure.access) {
-          // Not the query's fault: editing it cannot help.
+          // Not the query's fault: editing it cannot help, the tracker settings can.
           run.log(`❌ ${failure.text}`);
+          if (await askBackToTracker(run)) return { query, back: true };
           run.log(
-            `   Keeping the query. Fix the token or GITHUB_REPO in ${workspaceEnvPath(resolveWorkspaceDir())}, ` +
+            `   Keeping the query. Fix the token or GITHUB_REPO in ${workspaceEnvPath(run.workspaceDir || resolveWorkspaceDir())}, ` +
               "then check with `devintern worker doctor`.",
           );
           break;
@@ -440,7 +480,7 @@ async function promptReadyQuery(run: PromptRun, currentQuery: string | undefined
     }
     break;
   }
-  return query;
+  return { query };
 }
 
 /**
@@ -659,10 +699,6 @@ function installAgentBlocker(
   return { ...blocker, text: `${harness.label}: install the agent CLI (${how})` };
 }
 
-function trackerDisplayName(tracker: string): string {
-  return TRACKER_CAPABILITIES[tracker]?.displayName ?? tracker;
-}
-
 /** Probe the tracker credentials the way the wizard does. */
 async function credentialCheck(
   plan: Plan,
@@ -833,146 +869,6 @@ async function labelCheck(run: FlagsRun, timeoutMs: number): Promise<InitCheck |
       message: `${name}: could not ${createLabel ? "create" : "look up"} the ${DEVINTERN_LABEL} label: ${condenseMessage(errorMessage(error))}`,
       hint: `Create the ${DEVINTERN_LABEL} label in ${name} (the token may lack permission to manage labels)`,
     };
-  }
-}
-
-function applyEnvFile(envPath: string): Record<string, string> {
-  if (!existsSync(envPath)) {
-    return {};
-  }
-  const env = parseEnvContent(readFileSync(envPath, "utf8"));
-  for (const [key, value] of Object.entries(env)) {
-    // Match dotenv's normal precedence: an explicit shell value wins.
-    if (process.env[key] === undefined) {
-      process.env[key] = value;
-    }
-  }
-  return env;
-}
-
-export async function defaultEnsureTracker(
-  cwd: string,
-  prompt: PromptFn,
-  promptSecret: PromptFn,
-  log: LogFn,
-  githubCliToken?: () => GitHubCliToken | null,
-): Promise<string | null> {
-  // A legacy checkout `.env` is reused once; `add-repo` merges it into the
-  // workspace env in the next step.
-  const projectRoot = findProjectRoot({ startDir: cwd });
-  const legacyEnvPath = resolve(projectRoot, ".devintern-code", ".env");
-  if (existsSync(legacyEnvPath)) {
-    const env = applyEnvFile(legacyEnvPath);
-    return (env.TASK_TRACKER || process.env.TASK_TRACKER || "jira").toLowerCase();
-  }
-
-  // An existing workspace that already names a tracker needs no setup.
-  const sharedEnvPath = workspaceEnvPath(resolveWorkspaceDir());
-  const shared = applyEnvFile(sharedEnvPath);
-  if (shared.TASK_TRACKER) return shared.TASK_TRACKER.toLowerCase();
-
-  // `worker init --non-interactive` records the tracker in `[defaults].tracker`
-  // (workspace.toml is the source of truth) and its credentials in the workspace
-  // `.env`, without TASK_TRACKER. Treat that pair as configured.
-  const workspaceDir = resolveWorkspaceDir();
-  const configPath = workspaceConfigPath(workspaceDir);
-  const configured = existsSync(configPath) ? loadWorkspaceConfig(configPath).defaults.tracker : "";
-  if (
-    configured &&
-    trackerRequiredEnv(configured).every((key) => shared[key] || process.env[key])
-  ) {
-    log(`   Using ${configured} from ${configPath}`);
-    // The later steps (query dry run, readiness) build their client from this.
-    process.env.TASK_TRACKER ??= configured.toLowerCase();
-    return configured.toLowerCase();
-  }
-
-  // `devintern init` saved this checkout's tracker in its own env file
-  // (`~/.devintern/env/<repo>.env`). The worker polls with the workspace
-  // `.env`, so copy those settings there instead of asking for them again.
-  const reused = await reuseCheckoutTrackerEnv(cwd, workspaceDir, sharedEnvPath, log);
-  if (reused) return reused;
-
-  log("   No tracker config yet — running that subset of `devintern init`.");
-  const originSlug = await originGitHubSlug(cwd);
-  const result = await runTrackerSetup(prompt, log, defaultProbe, cwd, {
-    promptSecret,
-    envLabel: sharedEnvPath,
-    stepDefaults: originSlug ? { GITHUB_REPO: originSlug } : undefined,
-    // The worker's own GitHub-token step offers this after the workspace is
-    // known, so a declined offer is not repeated here.
-    offerPrToken: false,
-    ...(githubCliToken ? { githubCliToken } : {}),
-    writeEnv: async (envContent) => {
-      mergeIntoSharedEnv(sharedEnvPath, envContent, log);
-      return sharedEnvPath;
-    },
-  });
-  if (!result) {
-    return null;
-  }
-  applyEnvFile(sharedEnvPath);
-  return result.trackerId;
-}
-
-/**
- * Reuse the tracker settings `devintern init` saved for the checkout at `cwd`
- * (its `[[repos]]` entry's `env_file`): when they name a tracker and hold its
- * required keys, merge them into the workspace `.env` and apply them.
- *
- * @returns The tracker id, or null when the checkout has no usable settings
- */
-async function reuseCheckoutTrackerEnv(
-  cwd: string,
-  workspaceDir: string,
-  sharedEnvPath: string,
-  log: LogFn,
-): Promise<string | null> {
-  let envFile: string | undefined;
-  try {
-    envFile = (await findWorkspaceRepoForCheckout({ cwd, workspaceDir }))?.repo.envFile;
-  } catch {
-    return null;
-  }
-  if (!envFile) return null;
-  const envPath = resolve(workspaceDir, envFile);
-  if (!existsSync(envPath)) return null;
-  const content = readFileSync(envPath, "utf8");
-  const env = parseEnvContent(content);
-  const tracker = env.TASK_TRACKER?.toLowerCase();
-  if (!tracker || !trackerRequiredEnv(tracker).every((key) => env[key])) return null;
-  log(`   Using ${trackerDisplayName(tracker)} from ${envPath} (saved by \`devintern init\`).`);
-  mergeIntoSharedEnv(sharedEnvPath, content, log);
-  applyEnvFile(sharedEnvPath);
-  return tracker;
-}
-
-/**
- * Merge wizard output into the workspace's shared `.env`: keys it lacks are
- * appended; keys it already has are kept (other repos rely on them) and a
- * differing value is reported instead of overwritten.
- */
-function mergeIntoSharedEnv(envPath: string, envContent: string, log: LogFn): void {
-  const incoming = parseEnvContent(envContent);
-  const existingText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
-  const existing = parseEnvContent(existingText);
-  const additions: string[] = [];
-  const differing: string[] = [];
-  for (const [key, value] of Object.entries(incoming)) {
-    if (!(key in existing)) additions.push(`${key}=${value}`);
-    else if (existing[key] !== value) differing.push(key);
-  }
-  mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
-  const separator = existingText === "" || existingText.endsWith("\n") ? "" : "\n";
-  writeSecretFile(
-    envPath,
-    existingText + separator + additions.map((line) => `${line}\n`).join(""),
-  );
-  log(`   Saved tracker settings to ${envPath}`);
-  if (differing.length > 0) {
-    log(
-      `   ⚠️  Kept the existing values for: ${differing.join(", ")} (edit ${envPath} to change them).`,
-    );
   }
 }
 

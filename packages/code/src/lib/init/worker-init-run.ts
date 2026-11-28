@@ -83,6 +83,19 @@ export interface WorkerInitDeps {
     promptSecret: PromptFn;
     log: LogFn;
   }) => Promise<string | null>;
+  /**
+   * Override asking the tracker settings again after the query step went
+   * back (default: re-prompt them with the saved values as Enter defaults,
+   * validate, and update the workspace `.env`). Return false to abort.
+   */
+  reconfigureTracker?: (ctx: {
+    cwd: string;
+    trackerType: string;
+    workspaceDir: string;
+    prompt: PromptFn;
+    promptSecret: PromptFn;
+    log: LogFn;
+  }) => Promise<boolean>;
   /** Reads a signed-in GitHub CLI token for tracker setup; defaults to `gh`. */
   githubCliToken?: () => GitHubCliToken | null;
   /** Probes a reused GitHub CLI token; defaults to the tracker credential probe. */
@@ -244,6 +257,14 @@ export interface PromptRun {
   githubAppWait?: GitHubAppWaitResult;
   /** Paired repositories a completed App pairing did not grant (set with `partial`). */
   githubAppMissing?: string[];
+  /**
+   * Set while a later step has sent the wizard back to this step id (the
+   * query step, after a credential or repository-access failure); the
+   * revisited step clears it.
+   */
+  revisit?: string;
+  /** How many times the query step has sent the wizard back to the tracker step. */
+  trackerRevisits?: number;
   /** Set by the tracker step. */
   trackerType: string;
   trackerName: string;

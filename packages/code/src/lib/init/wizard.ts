@@ -614,6 +614,73 @@ export async function runTrackerSetup(
 }
 
 /**
+ * Ask the current tracker's settings again, each with its saved value as the
+ * Enter default, validate the connection, and update them in `envPath` (other
+ * lines are kept). `devintern init`'s "Update credentials" and the worker
+ * wizard's way back from a failed query both use it.
+ *
+ * @returns The values entered (keys of the tracker's setup steps)
+ */
+export async function updateTrackerCredentials(options: {
+  trackerId: string;
+  envPath: string;
+  cwd: string;
+  prompt: PromptFn;
+  promptSecret?: PromptFn;
+  log: LogFn;
+  probe: ProbeFn;
+  githubCliToken?: () => GitHubCliToken | null;
+  /** Offer the optional PR token when the env file has none (default true). */
+  offerPrToken?: boolean;
+}): Promise<Record<string, string>> {
+  const { trackerId, envPath, cwd, prompt, log, probe } = options;
+  const promptSecret = options.promptSecret ?? prompt;
+  const readGh = options.githubCliToken ?? readGitHubCliToken;
+  const originalContent = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  const existing = parseEnvContent(originalContent);
+  const steps = TRACKER_SETUP[trackerId] ?? [];
+  const docs = TRACKER_DOCS[trackerId];
+  if (docs) log(`\n📖 Setup guide: ${docs}`);
+  const values: Record<string, string> = {};
+  const stepsToPrompt = await trackerTokenSteps({
+    trackerId,
+    steps,
+    existing,
+    values,
+    readGh,
+    prompt,
+    log,
+    probe,
+  });
+  await promptSteps(stepsToPrompt, prompt, log, values, promptSecret);
+  absolutizeMarkdownTasksDir(values, cwd, log);
+
+  // Optional PR-integration token, kept from config when present.
+  if (trackerId !== "github" && !existing.GITHUB_TOKEN && (options.offerPrToken ?? true)) {
+    await promptGitHubPrToken({ values, existing, readGh, prompt, promptSecret, log, probe });
+  }
+
+  // "Edit values" after a failed check changes the object it is given.
+  const merged = { ...existing, ...values };
+  if (trackerId !== "markdown") {
+    await validateConnection(
+      trackerId,
+      merged,
+      steps,
+      { prompt, probe, log, promptSecret },
+      envPath,
+    );
+  }
+  const updates = Object.fromEntries(
+    Object.entries(merged).filter(([key, value]) => key in values || existing[key] !== value),
+  );
+
+  writeSecretFile(envPath, upsertEnvVars(originalContent, updates));
+  log(`\n✅ Updated ${envPath}`);
+  return updates;
+}
+
+/**
  * Re-run `devintern init` over an existing configuration: update the current
  * tracker's credentials (existing values become Enter-to-keep defaults) or
  * switch trackers, preserving unrelated lines in `.env`.
@@ -671,48 +738,16 @@ export async function runInitUpgrade(
     }
 
     if (choice === "1") {
-      const steps = TRACKER_SETUP[currentTracker] ?? [];
-      const docs = TRACKER_DOCS[currentTracker];
-      if (docs) log(`\n📖 Setup guide: ${docs}`);
-      const values: Record<string, string> = {};
-      const stepsToPrompt = await trackerTokenSteps({
+      await updateTrackerCredentials({
         trackerId: currentTracker,
-        steps,
-        existing,
-        values,
-        readGh,
+        envPath,
+        cwd,
         prompt,
+        promptSecret,
         log,
         probe,
+        githubCliToken: readGh,
       });
-      await promptSteps(stepsToPrompt, prompt, log, values, promptSecret);
-      absolutizeMarkdownTasksDir(values, cwd, log);
-
-      // Optional PR-integration token, kept from config when present.
-      if (currentTracker !== "github" && !existing.GITHUB_TOKEN) {
-        await promptGitHubPrToken({
-          values,
-          existing,
-          readGh,
-          prompt,
-          promptSecret,
-          log,
-          probe,
-        });
-      }
-
-      if (currentTracker !== "markdown") {
-        await validateConnection(
-          currentTracker,
-          { ...existing, ...values },
-          steps,
-          { prompt, probe, log, promptSecret },
-          envLabel,
-        );
-      }
-
-      writeSecretFile(envPath, upsertEnvVars(originalContent, values));
-      log(`\n✅ Updated ${envLabel}`);
       return;
     }
 

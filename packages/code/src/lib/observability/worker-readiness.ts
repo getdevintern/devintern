@@ -40,6 +40,7 @@ import { resolveDashboardPort } from "./dashboard-port";
 import { entitlementCheck } from "./worker-entitlement";
 import type { WorkerEntitlementLike } from "./worker-entitlement";
 import { defaultQueryZeroMatchHint } from "../trackers/capabilities";
+import { trackerRepoNotice } from "../trackers/github/tracker-repo-notice";
 import { createTrackerClient, trackerRequiredEnv } from "../trackers/manager";
 import { redactUrlCredentials } from "./dashboard-workspace";
 import {
@@ -693,6 +694,20 @@ async function collectConfigScopedChecks(
       label: "Tracker credentials",
       status: "ok",
       detail: source.name,
+    });
+  }
+
+  // 2a. GitHub Issues in a repository the worker does not open PRs in: legitimate, so info only.
+  const prRepos = config.repos.map((repo) => gitHubSlugFromRemote(repo.remote));
+  for (const source of sources) {
+    if (source.tracker !== "github") continue;
+    const notice = trackerRepoNotice(source.env.GITHUB_REPO, prRepos);
+    if (!notice) continue;
+    checks.push({
+      id: "tracker-repo",
+      label: "Tracker repository",
+      status: "ok",
+      detail: `${notice} (fine if intended; otherwise fix GITHUB_REPO)`,
     });
   }
 
