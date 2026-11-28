@@ -465,6 +465,8 @@ export async function runInteractiveWorkerInit(args: string[]): Promise<number> 
       devinternLabelOps: defaultDevinternLabelOps,
       firstTask: { sampleTicketOps: defaultSampleTicketOps },
       dryRunQuery: async (query) => {
+        // A fresh client each time: going back to the tracker step can change the credentials.
+        trackerManager.reset();
         const result = await trackerManager.getClient().searchTasks(query);
         return result.tasks.length;
       },

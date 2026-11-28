@@ -1194,6 +1194,27 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(config.repos.map((repo) => repo.remote)).toEqual(["https://gitlab.com/acme/app.git"]);
   });
 
+  test("a GitHub tracker repo other than the checkout is an info check, not a failure", async () => {
+    const report = await run(
+      { tracker: "github", taskQuery: "is:open label:ai", repoFromCwd: true },
+      { processEnv: { GITHUB_TOKEN: "ghp_x", GITHUB_REPO: "acme/issues" } },
+    );
+    expect(report.error).toBeUndefined();
+    expect(report.result).toBe("success");
+    const notice = report.checks.find((check) => check.name === "tracker-repo");
+    expect(notice?.status).toBe("pass");
+    expect(notice?.message).toContain("Tickets come from acme/issues, PRs go to acme/app");
+  });
+
+  test("a GitHub tracker repo that is the checkout adds no tracker-repo check", async () => {
+    const report = await run(
+      { tracker: "github", taskQuery: "is:open label:ai", repoFromCwd: true },
+      { processEnv: { GITHUB_TOKEN: "ghp_x", GITHUB_REPO: "Acme/App" } },
+    );
+    expect(report.error).toBeUndefined();
+    expect(report.checks.some((check) => check.name === "tracker-repo")).toBe(false);
+  });
+
   test("--repo-from-cwd with a non-GitHub origin does not invent GITHUB_REPO", async () => {
     git(repoDir, "remote set-url origin https://gitlab.com/acme/app.git");
     const report = await run(

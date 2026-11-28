@@ -117,6 +117,27 @@ describe("collectWorkerDoctorChecks", () => {
     expect(checks.every((check) => check.status === "ok")).toBe(true);
   });
 
+  test("GitHub Issues in another repo than the worker's repos is an ok info row", async () => {
+    const workspacePath = writeWorkspace(
+      '[defaults]\ntracker = "github"\ntask_query = "is:open"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n',
+      "GITHUB_TOKEN=ghp_x\nGITHUB_REPO=acme/no-access-issues\n",
+    );
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, passingDeps());
+    const [notice] = byId(checks, "tracker-repo");
+    expect(notice?.status).toBe("ok");
+    expect(notice?.detail).toContain("Tickets come from acme/no-access-issues, PRs go to acme/app");
+    expect(renderReadinessReport(checks).hasFailures).toBe(false);
+  });
+
+  test("no tracker-repo row when GITHUB_REPO is one of the worker's repos", async () => {
+    const workspacePath = writeWorkspace(
+      '[defaults]\ntracker = "github"\ntask_query = "is:open"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n',
+      "GITHUB_TOKEN=ghp_x\nGITHUB_REPO=acme/app\n",
+    );
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, passingDeps());
+    expect(byId(checks, "tracker-repo")).toEqual([]);
+  });
+
   test("invalid workspace.toml lists every parse problem as a failing check", async () => {
     const workspacePath = writeWorkspace(`
 [defaults]

@@ -28,7 +28,7 @@ Set in the workspace `.env` (`~/.devintern/.env`, written by `devintern worker i
 | ---------------------- | -------- | ----------------------------------------------------------------------------------- |
 | `TASK_TRACKER`         | Yes      | `github`                                                                            |
 | `GITHUB_TOKEN`         | Yes      | Personal access token (the same one used for PR creation)                            |
-| `GITHUB_REPO`          | Yes      | Repository whose issues you implement, as `owner/repo`. `devintern worker init` derives it from your `origin` remote and writes it to the workspace `.env`, so you only set it by hand for another repository |
+| `GITHUB_REPO`          | Yes      | Repository whose issues you implement, as `owner/repo`. `devintern worker init` derives it from your `origin` remote and writes it to the workspace `.env`, so you only set it by hand for another repository. When it differs from every worker repository, `worker init` and `worker doctor` show an info line ("Tickets come from …, PRs go to …"): fine if intended, otherwise a typo to fix |
 | `GITHUB_STATUS_LABELS` | No       | Comma-separated status labels (e.g. `To Do,In Progress,In Review`); on each transition the others are removed |
 
 GitHub App credentials (`GITHUB_APP_ID` + private key) cannot replace `GITHUB_TOKEN` for this tracker. See [GitHub authentication](./configuration.md#github-authentication).
