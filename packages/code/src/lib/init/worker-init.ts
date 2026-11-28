@@ -29,6 +29,7 @@ import { GITHUB_APP_INSTALL_URL } from "../code-host/github/app-setup";
 import { trackWorkerInitCompleted, trackWorkerInitStarted } from "../observability/analytics";
 import { SERVICE_RESTART_COMMAND, dashboardUrlFor } from "../worker/service-report";
 import { workspaceConfigPath } from "../workspace/paths";
+import { offerFirstTask, sampleTaskAddCommand } from "./worker-init-first-task";
 import { emptyOutcome } from "./worker-init-run";
 import type { PromptRun, WorkerInitDeps, WorkerInitResult } from "./worker-init-run";
 import { runWorkerInitSteps } from "./worker-init-steps";
@@ -132,6 +133,11 @@ function logWorkerNextSteps(ctx: PromptRun): void {
       `   2. Open ${dashboardUrlFor(ctx.workspaceDir) ?? "the dashboard"} to see worker status and runs.`,
     );
     ctx.log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
+    if (!serviceRunning) {
+      ctx.log(
+        `   4. Once it runs, try a sample task: ${sampleTaskAddCommand(ctx.workspaceDir, ctx.repoName)}`,
+      );
+    }
   }
   if (githubApp !== "skipped") return;
 
@@ -193,6 +199,18 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
 
     logWorkerNextSteps(run);
     const { outcome } = run;
+    if (deps.firstTask && outcome.service.serviceRunning && outcome.blockers.length === 0) {
+      await offerFirstTask({
+        trackerType: run.trackerType,
+        trackerName: run.trackerName,
+        workspaceDir: run.workspaceDir,
+        ...(run.repoName ? { repoName: run.repoName } : {}),
+        log,
+        prompt: run.prompt,
+        env: process.env,
+        deps: deps.firstTask,
+      });
+    }
     trackWorkerInitCompleted({
       tracker: run.trackerType,
       relayConnect: outcome.relayConnect,

@@ -1920,6 +1920,90 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
     expect(logs.join("\n")).toContain("systemctl --user enable --now devintern-worker");
   });
 
+  describe("sample first task once the worker runs", () => {
+    /** A custom unit the wizard keeps and reports running (no install commands). */
+    function runningServiceDeps(
+      answerSample: string,
+      firstTask: NonNullable<Parameters<typeof runWorkerInit>[0]>["firstTask"],
+    ) {
+      const unitDir = path.join(tempDir, ".config", "systemd", "user");
+      mkdirSync(unitDir, { recursive: true });
+      writeFileSync(path.join(unitDir, "devintern-worker.service"), "[Service]\n", "utf8");
+      const base = deps(["status=todo", "n", "n"], {
+        platform: "linux",
+        homedir: tempDir,
+        run: async () => ({ status: 0, stdout: "active", stderr: "" }),
+        firstTask,
+      });
+      const questions: string[] = [];
+      return {
+        questions,
+        deps: {
+          ...base,
+          prompt: async (question: string) => {
+            questions.push(question);
+            return question.includes("so you can watch the first run")
+              ? answerSample
+              : base.prompt(question);
+          },
+        },
+      };
+    }
+
+    test("declining creates nothing", async () => {
+      let created = 0;
+      const { deps: wizardDeps, questions } = runningServiceDeps("n", {
+        sampleTicketOps: () => ({
+          location: "tasks",
+          noun: "task file",
+          create: async () => {
+            created++;
+            return { key: "x" };
+          },
+        }),
+        findRun: () => {
+          throw new Error("must not wait after declining");
+        },
+      });
+      const result = await runWorkerInit(wizardDeps);
+      expect(result.ok).toBe(true);
+      expect(questions.some((q) => q.includes("Write a sample task file to tasks"))).toBe(true);
+      expect(created).toBe(0);
+      expect(logs.join("\n")).toContain("No sample created.");
+    });
+
+    test("accepting creates the sample and shows its run starting", async () => {
+      const { deps: wizardDeps } = runningServiceDeps("y", {
+        sampleTicketOps: () => ({
+          location: "tasks",
+          noun: "task file",
+          create: async (match) => {
+            expect(match.fields).toEqual({ status: "todo" });
+            return { key: "devintern-sample-first-task" };
+          },
+        }),
+        findRun: () => ({ id: 9, status: "in_progress" }),
+      });
+      await runWorkerInit(wizardDeps);
+      expect(logs.join("\n")).toContain("The worker started devintern-sample-first-task (run #9).");
+    });
+
+    test("not offered when the worker is not running", async () => {
+      const result = await runWorkerInit(
+        deps(["status=todo", "n", "n", "n"], {
+          noService: true,
+          firstTask: {
+            sampleTicketOps: () => {
+              throw new Error("must not offer a sample");
+            },
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      expect(logs.join("\n")).not.toContain("so you can watch the first run");
+    });
+  });
+
   test("accepting installs and bootstraps the launchd agent on macOS", async () => {
     const commands: string[][] = [];
     const plistPath = path.join(tempDir, "Library", "LaunchAgents", "com.devintern.worker.plist");

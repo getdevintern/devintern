@@ -439,6 +439,7 @@ export async function runInteractiveWorkerInit(args: string[]): Promise<number> 
   const { checkWorkerEntitlement, reportWorkerInitAbort, runWorkerInit } =
     await import("../init/worker-init");
   const { defaultDevinternLabelOps } = await import("../init/worker-init-label");
+  const { defaultSampleTicketOps } = await import("../init/worker-init-first-task");
   const { isInteractive } = await import("../init/wizard");
   if (!isInteractive(args, process.stdin)) {
     console.log("❌ 'devintern worker init' needs a terminal for its prompts.");
@@ -462,6 +463,7 @@ export async function runInteractiveWorkerInit(args: string[]): Promise<number> 
         return defaultCheckHost({ noService });
       },
       devinternLabelOps: defaultDevinternLabelOps,
+      firstTask: { sampleTicketOps: defaultSampleTicketOps },
       dryRunQuery: async (query) => {
         const result = await trackerManager.getClient().searchTasks(query);
         return result.tasks.length;

@@ -23,6 +23,7 @@ import type {
 } from "../worker/service";
 import type { StartCheck } from "../worker/service-control";
 import type { GitHubCliToken } from "./github-cli-token";
+import type { FirstTaskDeps } from "./worker-init-first-task";
 import type { DevinternLabelOpsFactory } from "./worker-init-label";
 import type { GitHubAppWaitDeps, GitHubAppWaitResult } from "./worker-init-github-app-wait";
 import type { AppliedWrite, Plan, PlanDraft } from "./worker-init-noninteractive-plan";
@@ -67,6 +68,12 @@ export interface WorkerInitDeps {
    * Without it the wizard never offers to create the label.
    */
   devinternLabelOps?: DevinternLabelOpsFactory;
+  /**
+   * The closing sample-task offer once the worker runs (issue, task file, or
+   * `worker add`, then a bounded wait for its run). Without it the wizard
+   * never offers one.
+   */
+  firstTask?: FirstTaskDeps;
   /** Automation license check; returns a human-readable failure, or null when entitled. */
   checkAutomationLicense?: (workspaceDir: string) => Promise<string | null>;
   /** Override tracker-config step. Return tracker id, or null to abort. */
