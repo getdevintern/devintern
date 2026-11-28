@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Use when running DevIntern as a long-running worker that picks up tracker tasks, handles PR reviews and CI failures, and runs as a service."
 section: "Automation"
 order: 2
-dateModified: 2026-11-26
+dateModified: 2026-11-28
 ---
 
 # Worker Daemon
@@ -320,7 +320,16 @@ memory_swap_max_percent = 15   # 0 gives the worker no swap
 devintern worker service install
 ```
 
-A service installed by an earlier version has neither the budget nor the crash-loop guard; the same command updates it. See [The worker uses too much memory](./worker-troubleshooting.md#the-worker-uses-too-much-memory) for what happens when the cap is reached.
+Each job (a task run, review fix, conflict resolution, CI fix, auto-merge, or scheduled automation) also gets its own memory cap inside that budget. A runaway job is stopped at its own cap, so the worker and the other jobs keep running, and the run records `agent exceeded the job memory limit (<size>)`. By default each job may use half of `memory_max_percent` (32% of RAM with the defaults), always below `memory_high_percent`. Keep an explicit value below `memory_high_percent` too: a job that reaches the throttle instead of its own cap slows every job down instead of being stopped. Turn it off with `0`; restart the worker after changing it:
+
+```toml
+[workspace.execution]
+job_memory_max_percent = 40   # keep below memory_high_percent
+```
+
+The per-job cap needs the installed systemd service (it uses the unit's delegated cgroup); a worker started by hand, macOS, and Docker-sandboxed agents run jobs without it. The worker logs the effective cap at startup.
+
+A service installed by an earlier version has neither the budget, the per-job cap, nor the crash-loop guard; the same command updates it. See [The worker uses too much memory](./worker-troubleshooting.md#the-worker-uses-too-much-memory) for what happens when the cap is reached.
 
 While running, the worker also pauses new jobs when the host runs low on memory (below 5% of RAM, high kernel memory pressure, or the worker's own cgroup nearing `MemoryHigh`). The worker log shows `pausing new jobs: <reason>` when this starts and another line when it ends. A PR job waiting for a slot shows "Waiting for the host to have enough free memory" in the dashboard; expand the row to see which limit fired and its numbers. Queued jobs start when memory recovers; running jobs are never interrupted. `DEVINTERN_MEMORY_ADMISSION=0` disables the pause. macOS launchd agents have no equivalent cgroup budget.
 

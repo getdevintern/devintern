@@ -48,6 +48,7 @@ import { classifyAgentPrState, resolveAgentPrMerge } from "../review/agent-pr-re
 import { serializePrRun } from "./review-polling";
 import { childOutputMode, forwardChildOutput } from "../observability/child-output";
 import { runWithFailover } from "../worker/failover";
+import { jobMemoryLimitReason, jobMemorySpawn } from "../worker/job-cgroup";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
 import type {
@@ -250,7 +251,7 @@ export function runCiFixViaCli(
             return;
           }
           const detached = process.platform !== "win32";
-          const child = spawn(
+          const job = jobMemorySpawn(
             process.execPath,
             [
               process.argv[1],
@@ -260,13 +261,14 @@ export function runCiFixViaCli(
               feedbackPath,
               ...(opts.expectedHeadSha ? ["--expected-head", opts.expectedHeadSha] : []),
             ],
-            {
-              stdio: ["inherit", childOutputMode(), childOutputMode()],
-              cwd: opts.cwd,
-              env,
-              detached,
-            },
+            env,
           );
+          const child = spawn(job.command, job.args, {
+            stdio: ["inherit", childOutputMode(), childOutputMode()],
+            cwd: opts.cwd,
+            env: job.env,
+            detached,
+          });
           forwardChildOutput(child, `ci-fix ${prUrl}`);
           abort = () => {
             if (child.pid === undefined) return;
@@ -288,9 +290,14 @@ export function runCiFixViaCli(
           };
           opts.signal?.addEventListener("abort", abort, { once: true });
           child.on("close", (code) => {
+            const memory = job.onClose();
+            if (memory.exceeded && !opts.signal?.aborted) {
+              console.warn(`⚠️  ci-fix for ${prUrl}: ${jobMemoryLimitReason(memory.label)}`);
+            }
             finish(code ?? 1);
           });
           child.on("error", (error) => {
+            job.onClose();
             console.error(`❌ Failed to spawn ci-fix for ${prUrl}: ${error.message}`);
             finish(1);
           });

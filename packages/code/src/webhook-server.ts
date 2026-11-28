@@ -7,6 +7,7 @@
  * registered review, lifecycle, synchronization, and CI work.
  */
 
+import { existsSync } from "fs";
 import { createServer } from "http";
 import type { IncomingMessage, ServerResponse } from "http";
 import { parseEnvInteger } from "./lib/config/env-integer";
@@ -49,6 +50,11 @@ import {
 } from "./lib/webhook/review-pipeline";
 import { handleGitLabWebhook, processGitLabWithPersistence } from "./lib/webhook/gitlab-webhook";
 import type { QueuedGitLabWebhook } from "./lib/webhook/gitlab-webhook";
+import { startJobCgroups } from "./lib/worker/job-cgroup";
+import { DEFAULT_MEMORY_BUDGET } from "./lib/worker/memory-budget";
+import { loadWorkspaceConfig } from "./lib/workspace/config";
+import type { WorkspaceExecutionSettings } from "./lib/workspace/config-types";
+import { resolveWorkspaceDir, workspaceConfigPath } from "./lib/workspace/paths";
 
 /**
  * Handle an incoming GitHub webhook HTTP request.
@@ -331,6 +337,20 @@ async function handleIssueComment(
   });
 }
 
+/** `[workspace.execution]` memory settings, or the defaults without a readable workspace.toml. */
+function webhookExecutionMemory(): Pick<
+  WorkspaceExecutionSettings,
+  "memory" | "jobMemoryMaxPercent"
+> {
+  const path = workspaceConfigPath(resolveWorkspaceDir());
+  try {
+    if (existsSync(path)) return loadWorkspaceConfig(path).workspace.execution;
+  } catch {
+    // An unreadable config keeps the defaults; the worker reports the problem.
+  }
+  return { memory: DEFAULT_MEMORY_BUDGET };
+}
+
 /**
  * Start the code-host webhook HTTP server and recover pending queue events.
  *
@@ -424,6 +444,10 @@ export async function startWebhookServer(
       `   Queue stats: ${stats.pending} pending, ${stats.processing} processing, ${stats.failed} failed`,
     );
   }
+
+  // Per-job memory cgroups for the CI-fix / conflict / auto-merge jobs this
+  // server spawns (one at a time) when it runs as the installed service.
+  startJobCgroups(webhookExecutionMemory());
 
   // Shared failover controller: same chain, windows, and failback timers the
   // fleet worker uses. Persist through the queue DB so a restart resumes on

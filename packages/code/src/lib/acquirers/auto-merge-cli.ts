@@ -16,6 +16,7 @@ import { AUTO_MERGE_OUTCOMES } from "../review/auto-merge";
 import type { AutoMergeOutcome, AutoMergePolicy, AutoMergeResult } from "../review/auto-merge";
 import type { CiChecksProblem } from "../review/ci-checks";
 import { getWorkerFailover, runWithFailover } from "../worker/failover";
+import { jobMemoryLimitReason, jobMemorySpawn } from "../worker/job-cgroup";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
   HARNESS_UNAVAILABLE_EXIT_CODE,
@@ -154,20 +155,21 @@ function spawnOnce(
     let output = "";
     let settled = false;
     const stdout = childOutputMode();
-    const child = spawn(
+    const job = jobMemorySpawn(
       process.execPath,
       [opts.entrypoint ?? (process.argv[1] as string), "auto-merge", prUrl, ...args],
       {
-        detached: true,
-        stdio: ["inherit", stdout, stdout, "pipe"],
-        cwd: opts.cwd,
-        env: {
-          ...opts.env,
-          DEVINTERN_RESULT_FD: "3",
-          ...(opts.runId !== undefined ? harnessLogRunEnv(opts.runId) : {}),
-        },
+        ...opts.env,
+        DEVINTERN_RESULT_FD: "3",
+        ...(opts.runId !== undefined ? harnessLogRunEnv(opts.runId) : {}),
       },
     );
+    const child = spawn(job.command, job.args, {
+      detached: true,
+      stdio: ["inherit", stdout, stdout, "pipe"],
+      cwd: opts.cwd,
+      env: job.env,
+    });
     forwardChildOutput(child, `auto-merge ${prUrl}`);
     const abort = () => killTree(child.pid);
     opts.signal?.addEventListener("abort", abort, { once: true });
@@ -187,8 +189,14 @@ function spawnOnce(
       settled = true;
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", abort);
+      const memory = job.onClose();
+      const result =
+        parseAutoMergeResultLine(output) ??
+        (memory.exceeded && code !== 0 && !opts.signal?.aborted
+          ? { outcome: "failed", message: jobMemoryLimitReason(memory.label), reviewed: false }
+          : null);
       // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
-      resolve({ code, result: parseAutoMergeResultLine(output) });
+      resolve({ code, result });
     };
     child.on("close", (code) => finish(code ?? 1));
     child.on("error", (error) => {

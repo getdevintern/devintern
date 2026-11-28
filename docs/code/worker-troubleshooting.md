@@ -4,7 +4,7 @@ sidebarLabel: "Worker Troubleshooting"
 description: "Use when the worker service keeps failing or stops at logout, or a worker task did not run, ran again, or failed: retrying tickets, actioned tickets, interrupted runs, pickup log messages, and reading worker logs."
 section: "Automation"
 order: 2.3
-dateModified: 2026-11-27
+dateModified: 2026-11-28
 ---
 
 # Worker Troubleshooting
@@ -56,7 +56,7 @@ If `worker service install` says the worker would not start, it did not install 
 
 ## The worker uses too much memory
 
-The generated systemd unit caps the worker at a share of host RAM. The cap covers the worker, every run child, and everything an agent starts in the worker's own cgroup (test runners, browsers, dev servers). Runs with `AGENT_SANDBOX=docker` are outside it: the agent runs in a guest microVM that outlives the `sbx` client, so the host-memory admission check below still reacts but a single heavy sandboxed run can exceed the cap. At `MemoryHigh` the kernel throttles the cgroup; at `MemoryMax` the kernel kills the largest process inside the worker's own cgroup, usually a test runner or browser, so the desktop and other apps keep their memory. The run that owned it fails; the worker and other running jobs continue. If the worker itself is killed, the service restarts it. When that keeps happening, `worker service status` shows `failed`, and `devintern worker logs` shows the runs that were interrupted.
+The generated systemd unit caps the worker at a share of host RAM. The cap covers the worker, every run child, and everything an agent starts in the worker's own cgroup (test runners, browsers, dev servers). Runs with `AGENT_SANDBOX=docker` are outside it: the agent runs in a guest microVM that outlives the `sbx` client, so the host-memory admission check below still reacts but a single heavy sandboxed run can exceed the cap. Each job also has its own cap (`job_memory_max_percent`): a job that reaches it is stopped on its own and its run shows `agent exceeded the job memory limit`; raise the cap if a legitimate build or test suite needs more. At `MemoryHigh` the kernel throttles the cgroup; at `MemoryMax` the kernel kills the largest process inside the worker's own cgroup, usually a test runner or browser, so the desktop and other apps keep their memory. The run that owned it fails; the worker and other running jobs continue. If the worker itself is killed, the service restarts it. When that keeps happening, `worker service status` shows `failed`, and `devintern worker logs` shows the runs that were interrupted.
 
 The defaults are 50% of RAM for `MemoryHigh`, 65% for `MemoryMax`, and 15% for swap. Override them in `workspace.toml`, then reinstall the service so the unit is rewritten:
 

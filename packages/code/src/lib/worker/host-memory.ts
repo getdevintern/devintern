@@ -32,6 +32,9 @@
 
 import { readFileSync } from "fs";
 
+/** Leaf the daemon moves itself into when it runs per-job cgroups (`job-cgroup.ts`). */
+export const DAEMON_CGROUP_LEAF = "devintern-daemon";
+
 /** Point-in-time memory reading used for an admission decision. */
 export interface HostMemorySnapshot {
   /** Host RAM in bytes (`MemTotal`). */
@@ -137,7 +140,10 @@ export function readCgroupMemory(
     .map((line) => /^0::(.+)$/.exec(line)?.[1])
     .find((path): path is string => Boolean(path));
   if (!unified) return null;
-  const base = `/sys/fs/cgroup${unified.replace(/\/$/, "")}`;
+  // With per-job cgroups the daemon sits in a leaf of its service cgroup;
+  // the limits and the usage that matter are the service's.
+  const service = unified.replace(/\/$/, "").replace(new RegExp(`/${DAEMON_CGROUP_LEAF}$`), "");
+  const base = `/sys/fs/cgroup${service}`;
   const current = readUtf8(`${base}/memory.current`, deps)?.trim();
   const maxBytes = parseCgroupLimit(readUtf8(`${base}/memory.max`, deps)?.trim());
   const highBytes = parseCgroupLimit(readUtf8(`${base}/memory.high`, deps)?.trim());

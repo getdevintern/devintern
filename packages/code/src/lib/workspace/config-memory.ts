@@ -53,3 +53,28 @@ export function parseMemoryBudget(
   if (problem) errors.push(`${label}.${problem}`);
   return memory;
 }
+
+/**
+ * Read the service memory budget plus the per-job cap
+ * (`job_memory_max_percent`, 0 = off), which cannot exceed the service's
+ * `memory_max_percent`: the job cgroups live inside the service cgroup.
+ *
+ * @param table - The `[workspace.execution]` table
+ * @param errors - Accumulator for validation problems
+ */
+export function parseExecutionMemory(
+  table: Record<string, unknown>,
+  errors: string[],
+): { memory: MemoryBudgetPercentages; jobMemoryMaxPercent?: number } {
+  const label = "[workspace.execution]";
+  const memory = parseMemoryBudget(table, label, errors);
+  const jobMemoryMaxPercent = readOptionalInteger(table, "job_memory_max_percent", label, errors, {
+    min: 0,
+    max: 100,
+    message: `${label}.job_memory_max_percent must be an integer between 0 and 100.`,
+  });
+  if (jobMemoryMaxPercent !== undefined && jobMemoryMaxPercent > memory.maxPercent) {
+    errors.push(`${label}.job_memory_max_percent cannot exceed ${label}.memory_max_percent.`);
+  }
+  return { memory, ...(jobMemoryMaxPercent !== undefined ? { jobMemoryMaxPercent } : {}) };
+}

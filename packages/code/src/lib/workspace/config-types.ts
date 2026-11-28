@@ -29,6 +29,12 @@ export interface WorkspaceExecutionSettings {
    * after `devintern worker service install` rewrites the unit.
    */
   memory: MemoryBudgetPercentages;
+  /**
+   * Per-job memory cap in percent of host RAM (`job_memory_max_percent`);
+   * `0` turns it off. Unset defaults to half of `memory.maxPercent`, kept
+   * below `memory.highPercent` (see `worker/job-cgroup.ts`).
+   */
+  jobMemoryMaxPercent?: number;
 }
 
 /** Workspace-wide settings from the `[workspace]` table. */

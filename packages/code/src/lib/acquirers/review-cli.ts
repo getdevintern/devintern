@@ -15,6 +15,7 @@ import { parseEnvInteger } from "../config/env-integer";
 import { childOutputMode, forwardChildOutput } from "../observability/child-output";
 import { formatMentionArg } from "../review/mention-trigger";
 import type { MentionTrigger } from "../review/mention-trigger";
+import { jobMemoryLimitReason, jobMemorySpawn } from "../worker/job-cgroup";
 import type { TaskExecutionResult } from "./task-polling";
 import {
   cliResultToTaskResult,
@@ -388,16 +389,17 @@ function spawnResolveOnce(
     // Detached so the whole process group (agent harnesses included) can be
     // signalled on timeout.
     const output = childOutputMode(opts.outputStdio);
-    const child = spawn(
+    const job = jobMemorySpawn(
       process.execPath,
       [opts.entrypoint ?? process.argv[1], "resolve-conflicts", prUrl, ...extraArgs],
-      {
-        detached: true,
-        stdio: ["inherit", output, output, "pipe"],
-        cwd: opts.cwd,
-        env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" },
-      },
+      { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" },
     );
+    const child = spawn(job.command, job.args, {
+      detached: true,
+      stdio: ["inherit", output, output, "pipe"],
+      cwd: opts.cwd,
+      env: job.env,
+    });
     forwardChildOutput(child, `resolve-conflicts ${prUrl}`);
     let aborted = false;
     abort = () => {
@@ -426,6 +428,7 @@ function spawnResolveOnce(
       resultOutput += chunk.toString();
     });
     child.on("close", (code) => {
+      const memory = job.onClose();
       if (aborted) {
         finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
         return;
@@ -463,11 +466,14 @@ function spawnResolveOnce(
               ? "resolver completed"
               : code === 2
                 ? "resolver deferred"
-                : `resolver exited with code ${code}`,
+                : memory.exceeded
+                  ? jobMemoryLimitReason(memory.label)
+                  : `resolver exited with code ${code}`,
         },
       });
     });
     child.on("error", (error) => {
+      job.onClose();
       finish({
         code: 1,
         result: { outcome: "failed", message: `failed to spawn resolver: ${error.message}` },
@@ -505,16 +511,17 @@ async function runSubcommandViaCli(
           return;
         }
         const output = childOutputMode(opts.outputStdio);
-        const child = spawn(
+        const job = jobMemorySpawn(
           process.execPath,
           [opts.entrypoint ?? process.argv[1], subcommand, prUrl, ...(opts.extraArgs ?? [])],
-          {
-            stdio: ["inherit", output, output],
-            cwd: opts.cwd,
-            env,
-            detached: process.platform !== "win32",
-          },
+          env,
         );
+        const child = spawn(job.command, job.args, {
+          stdio: ["inherit", output, output],
+          cwd: opts.cwd,
+          env: job.env,
+          detached: process.platform !== "win32",
+        });
         forwardChildOutput(child, `${subcommand} ${prUrl}`);
         const abort = () => {
           interrupted = true;
@@ -529,9 +536,14 @@ async function runSubcommandViaCli(
         };
         opts.signal?.addEventListener("abort", abort, { once: true });
         child.on("close", (code) => {
+          const memory = job.onClose();
+          if (memory.exceeded && !interrupted) {
+            console.warn(`⚠️  ${subcommand} for ${prUrl}: ${jobMemoryLimitReason(memory.label)}`);
+          }
           finish(code ?? 1);
         });
         child.on("error", (error) => {
+          job.onClose();
           captureError(error, { command: subcommand, repo, prNumber, stage: "spawn" });
           console.error(`❌ Failed to spawn ${subcommand} for ${prUrl}: ${error.message}`);
           finish(1);
