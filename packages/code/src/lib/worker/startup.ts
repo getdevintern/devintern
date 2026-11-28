@@ -42,8 +42,11 @@ export function isPermanentLicenseDenial(result: {
   valid: boolean;
   message: string;
   signInRequired?: boolean;
+  retryable?: boolean;
 }): boolean {
   if (result.valid) return false;
+  // The structured flag wins: the message may quote a server reason.
+  if (result.retryable) return false;
   if (result.signInRequired) return true;
   return /invalid or revoked|does not match this product|requires an automation license|has no matching license|not signed in|Pilot (has )?(ended|expired)|already used/i.test(
     result.message,

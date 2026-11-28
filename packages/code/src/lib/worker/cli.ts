@@ -679,8 +679,9 @@ async function exitOnLicenseDenial(
 
 /** What to run after a permanent license failure, worded for a service. */
 function licenseFixHint(result: { signInRequired?: boolean }, loginCommand: string): string {
+  // The license message above already names the sign-in; repeat only the command.
   const fix = result.signInRequired
-    ? `Sign in with \`${loginCommand} github\` (or google, x, email you@company.com), or set LICENSE_KEY in the workspace .env`
+    ? `Sign in with \`${loginCommand}\`, or set LICENSE_KEY in the workspace .env`
     : "Set LICENSE_KEY in the workspace .env (https://devintern.com/pricing)";
   return [
     `   The worker will not retry until this is fixed. ${fix},`,
@@ -696,7 +697,7 @@ async function exitOnStartupError(error: unknown, loginCommand: string): Promise
   await flushAnalytics();
   if (error instanceof LicenseCheckError) {
     // requireLicense already printed the reason.
-    if (isPermanentLicenseDenial({ valid: false, message })) {
+    if (isPermanentLicenseDenial({ valid: false, message, retryable: error.retryable })) {
       exitWorkerStartupPermanently(licenseFixHint({}, loginCommand));
     }
     process.exit(1);

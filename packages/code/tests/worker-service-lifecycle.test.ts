@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { workerPilotSignInMessage } from "@devintern/license-check";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -120,6 +121,33 @@ describe("lifecycle record", () => {
 });
 
 describe("permanent startup failures", () => {
+  test("the Worker Pilot licence messages keep their exit behaviour", () => {
+    // Never signed in: permanent (signInRequired), as before.
+    expect(
+      isPermanentLicenseDenial({
+        valid: false,
+        message: workerPilotSignInMessage("devintern worker login"),
+        signInRequired: true,
+      }),
+    ).toBe(true);
+    // Invalid LICENSE_KEY: permanent, as before.
+    expect(
+      isPermanentLicenseDenial({
+        valid: false,
+        message:
+          "LICENSE_KEY is invalid or revoked. Check the key at https://devintern.com/account, or remove LICENSE_KEY ...",
+      }),
+    ).toBe(true);
+    // Pilot over (signed in, not entitled): retryable, as before.
+    expect(
+      isPermanentLicenseDenial({
+        valid: false,
+        message:
+          "Your free Worker Pilot is over and this account has no automation license. Set LICENSE_KEY ...",
+      }),
+    ).toBe(false);
+  });
+
   test("sign-in and license denials are permanent; network failures are not", () => {
     expect(isPermanentLicenseDenial({ valid: false, message: "x", signInRequired: true })).toBe(
       true,

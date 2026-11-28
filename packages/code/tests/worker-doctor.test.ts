@@ -573,18 +573,21 @@ remote = "git@github.com:acme/backend.git"
       status: "action",
       detail: "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
     });
-    // A non-default workspace: the command names it, with a method.
-    expect(entitlement?.hint).toContain(
-      `devintern worker login --workspace ${workspacePath} github`,
+    // A non-default workspace: the command names it. The interactive form
+    // leads (it asks for the method); the headless form names one.
+    expect(entitlement?.hint).toStartWith(
+      `Sign in to start your free 14-day Worker Pilot: \`devintern worker login --workspace ${workspacePath}\``,
     );
-    expect(entitlement?.hint).toContain("--no-wait");
+    expect(entitlement?.hint).toContain(
+      `\`devintern worker login --workspace ${workspacePath} github --no-wait\``,
+    );
     const report = renderReadinessReport(checks);
     expect(report).toMatchObject({ hasFailures: false, hasActions: true });
     expect(report.lines).toContain(
       "👉 Automation entitlement — Not started: sign in to begin your 14-day free Worker Pilot, no card required",
     );
     expect(workerDoctorClosingLine(checks, report)).toStartWith(
-      "👉 Setup is fine; one step left before the worker can start. Run `devintern worker login",
+      "👉 Setup is fine; one step left before the worker can start. Sign in to start your free 14-day Worker Pilot: `devintern worker login",
     );
   });
 

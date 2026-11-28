@@ -38,6 +38,70 @@ export {
 
 const DEFAULT_API_BASE = "https://devintern.com";
 
+/** The Worker Pilot sign-in and license docs (docs/code/worker.md). */
+export const WORKER_PILOT_DOCS_URL =
+  "https://devintern.com/docs/code/worker#worker-pilot-and-licenses";
+
+/**
+ * What a worker with no `LICENSE_KEY` and no session needs: sign in to start
+ * the Worker Pilot (the interactive form, which asks for the method), or set
+ * an existing license key instead. The worker start path, `worker doctor`,
+ * and `worker service` all show this text.
+ *
+ * @param loginCommand - Sign-in command (may include `--workspace <path>`).
+ * @returns The message, ending with the docs link.
+ */
+export function workerPilotSignInMessage(loginCommand: string = "devintern worker login"): string {
+  return (
+    `Sign in to start your free 14-day Worker Pilot: \`${loginCommand}\` (no card required). ` +
+    "Already have a Supporter, Team, or Business license? Set LICENSE_KEY in the workspace .env instead. " +
+    `See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
+/**
+ * A signed-in account with no automation license and no Worker Pilot left.
+ * The result is marked `retryable`, so the worker service keeps treating it
+ * as before (a retryable denial).
+ */
+function workerPilotOverMessage(): string {
+  return (
+    "Your free Worker Pilot is over and this account has no automation license. " +
+    "Set LICENSE_KEY in the workspace .env to a Supporter, Team, or Business license key from " +
+    `https://devintern.com/account (buy one at https://devintern.com/pricing). See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
+/**
+ * A signed-in session the license server refused (HTTP 401): an expired or
+ * revoked token. Signing in again fixes it, so this does not claim the Pilot
+ * ended. The result is marked `retryable`, so the worker service keeps
+ * retrying, as before, whatever the quoted reason says.
+ */
+function sessionRejectedMessage(loginCommand: string, reason: string | undefined): string {
+  return (
+    `The license server rejected your session${reason ? ` (${reason})` : ""}. ` +
+    `Sign in again: \`${loginCommand}\`. ` +
+    "Or set LICENSE_KEY in the workspace .env to a Supporter, Team, or Business license key. " +
+    `See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
+/** A signed-in account with no automation license and no Pilot granted, for a reason we can't map. */
+function noPilotGrantedMessage(reason: string | undefined): string {
+  return (
+    `This account has no automation license, and the license server did not grant a Worker Pilot${reason ? ` (${reason})` : ""}. ` +
+    "Set LICENSE_KEY in the workspace .env to a Supporter, Team, or Business license key from " +
+    `https://devintern.com/account (buy one at https://devintern.com/pricing). See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
+/** Whether a server `reason` says the Worker Pilot ended or was already used. */
+function isPilotOverReason(reason: string | undefined): boolean {
+  if (!reason) return false;
+  return /\b(trial|pilot)\b/i.test(reason) && /\b(ended|expired|over|used)\b/i.test(reason);
+}
+
 /** How long a cached last-known-good entitlement is honored when the license server is unreachable. */
 const GRACE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -64,6 +128,13 @@ export interface LicenseCheckResult {
    * on a non-release build. `source` stays `license-key` for older callers.
    */
   skipped?: boolean;
+  /**
+   * True when a signed-in account was denied (no automation license, no
+   * Pilot granted, or the session was refused) and a later attempt can pass.
+   * Retry decisions read this flag, never the message, because the message
+   * can quote the server's own reason.
+   */
+  retryable?: boolean;
 }
 
 export interface LicenseCheckOptions {
@@ -224,7 +295,7 @@ const ENTITLEMENT_TOTAL_ATTEMPTS = ENTITLEMENT_MAX_RETRIES + 1;
 
 type EntitlementCheckResult =
   | { status: "entitled"; response: EntitlementResponse }
-  | { status: "not_entitled"; reason?: string }
+  | { status: "not_entitled"; reason?: string; sessionRejected?: boolean }
   | { status: "error"; error: string };
 
 function formatEntitlementHttpError(status: number, bodyText: string): string {
@@ -331,7 +402,11 @@ async function checkEntitlementViaWebsite(
     // 401 is a definitive denial of this token, not an infrastructure error.
     if (response.status === 401) {
       const bodyText = await response.text();
-      return { status: "not_entitled", reason: formatEntitlementHttpError(401, bodyText) };
+      return {
+        status: "not_entitled",
+        reason: formatEntitlementHttpError(401, bodyText),
+        sessionRejected: true,
+      };
     }
 
     const bodyText = await response.text();
@@ -345,10 +420,9 @@ async function checkEntitlementViaWebsite(
 /** Validate an explicit `LICENSE_KEY` against the Polar customer portal. */
 async function checkExplicitLicenseKey(
   explicitKey: string,
-  productKey: string,
-  supabaseConfig: LicenseCheckOptions["supabaseConfig"],
-  requireAutomation: boolean,
+  options: LicenseCheckOptions,
 ): Promise<LicenseCheckResult> {
+  const { productKey, supabaseConfig, requireAutomation = false } = options;
   try {
     const result = await validatePolarLicenseKey(explicitKey);
     if (!result.valid) {
@@ -356,7 +430,7 @@ async function checkExplicitLicenseKey(
       return {
         valid: false,
         source: "license-key",
-        message: "License key is invalid or revoked.",
+        message: invalidKeyMessage(options),
       };
     }
 
@@ -412,6 +486,20 @@ async function checkExplicitLicenseKey(
 }
 
 /**
+ * An invalid or revoked `LICENSE_KEY`. Where the Worker Pilot is allowed, it
+ * names the Pilot sign-in as the way to run without a key.
+ */
+function invalidKeyMessage(options: LicenseCheckOptions): string {
+  const message = "LICENSE_KEY is invalid or revoked.";
+  if (!options.requireAutomation || !options.allowTrial) return message;
+  return (
+    `${message} Check the key at https://devintern.com/account, or remove LICENSE_KEY from the ` +
+    "workspace .env and sign in to start your free 14-day Worker Pilot: " +
+    `\`${options.loginCommand ?? "devintern login"}\`. See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
+/**
  * Resolves whether the caller may use a devintern CLI product.
  *
  * Resolution order:
@@ -455,7 +543,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
   // 1. Direct license key validation via Polar public customer portal API
   const explicitKey = licenseKey || env.LICENSE_KEY;
   if (explicitKey) {
-    return checkExplicitLicenseKey(explicitKey, productKey, supabaseConfig, requireAutomation);
+    return checkExplicitLicenseKey(explicitKey, options);
   }
 
   // 2. Authenticated user → check Polar entitlements via devintern.com
@@ -467,6 +555,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
   }
 
   let entitlementCheckError: string | undefined;
+  let denial: EntitlementDenial | undefined;
 
   if (user?.accessToken) {
     const entitlementResult = await checkEntitlementViaWebsite(
@@ -509,6 +598,10 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     if (entitlementResult.status === "not_entitled") {
       // Definitive answer from the server: no entitlement (or revoked).
       clearCachedEntitlement(supabaseConfig);
+      denial = {
+        reason: entitlementResult.reason,
+        sessionRejected: entitlementResult.sessionRejected === true,
+      };
     }
 
     if (entitlementResult.status === "error") {
@@ -523,7 +616,14 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     }
   }
 
-  return noLicenseResult(options, user !== null, entitlementCheckError);
+  return noLicenseResult(options, user !== null, entitlementCheckError, denial);
+}
+
+/** The server's definitive "no" for a signed-in user, kept for the denial message. */
+interface EntitlementDenial {
+  reason?: string;
+  /** HTTP 401: the session token itself was refused. */
+  sessionRejected: boolean;
 }
 
 /**
@@ -536,14 +636,39 @@ function noLicenseResult(
   options: LicenseCheckOptions,
   signedIn: boolean,
   entitlementCheckError: string | undefined,
+  denial?: EntitlementDenial,
 ): LicenseCheckResult {
   const { requireAutomation = false, allowTrial = false } = options;
   const messages: string[] = [];
   const loginCommand = options.loginCommand ?? "devintern login";
+  if (requireAutomation && allowTrial) {
+    // The Worker Pilot leads; an existing license key is the alternative.
+    if (!signedIn) {
+      return {
+        valid: false,
+        source: "none",
+        message: workerPilotSignInMessage(loginCommand),
+        signInRequired: true,
+      };
+    }
+    let message: string;
+    if (entitlementCheckError) {
+      message =
+        `License entitlement check failed: ${entitlementCheckError}. ` +
+        `Set LICENSE_KEY in the workspace .env to skip the account check. See ${WORKER_PILOT_DOCS_URL}`;
+    } else if (denial?.sessionRejected) {
+      message = sessionRejectedMessage(loginCommand, denial.reason);
+    } else if (isPilotOverReason(denial?.reason)) {
+      message = workerPilotOverMessage();
+    } else {
+      message = noPilotGrantedMessage(denial?.reason);
+    }
+    return { valid: false, source: "none", message, retryable: true };
+  }
   if (requireAutomation) {
     messages.push(
       options.setup
-        ? "No automation license or Worker Pilot was found, and the unattended worker needs one to start."
+        ? "No automation license was found, and the unattended worker needs one to start."
         : "Automated execution detected (CI / systemd / cron) but no automation license was found.",
     );
     if (entitlementCheckError) {
@@ -553,11 +678,7 @@ function noLicenseResult(
       "Set LICENSE_KEY to a Supporter, Team, or Business license key from https://devintern.com/account, or purchase one at https://devintern.com/pricing.",
     );
     if (!signedIn) {
-      messages.push(
-        allowTrial
-          ? `Alternatively, run \`${loginCommand}\` to start your 14-day free Worker Pilot (no card required).`
-          : "Alternatively, sign in if your account already holds one.",
-      );
+      messages.push("Alternatively, sign in if your account already holds one.");
     }
   } else {
     if (!signedIn) {
@@ -576,7 +697,6 @@ function noLicenseResult(
     valid: false,
     source: "none",
     message: messages.join(" "),
-    ...(!signedIn && requireAutomation && allowTrial ? { signInRequired: true } : {}),
   };
 }
 
@@ -586,9 +706,13 @@ function noLicenseResult(
  * catch this error and exit with code 1.
  */
 export class LicenseCheckError extends Error {
-  constructor(message: string) {
+  /** Copied from {@link LicenseCheckResult.retryable}. */
+  readonly retryable: boolean;
+
+  constructor(message: string, options: { retryable?: boolean } = {}) {
     super(message);
     this.name = "LicenseCheckError";
+    this.retryable = options.retryable === true;
   }
 }
 
@@ -614,7 +738,7 @@ export async function activateWorkerTrial(options: {
     return {
       valid: false,
       source: "none",
-      message: `Run \`${options.loginCommand ?? "devintern login"}\` to start your 14-day free Worker Pilot (no card required).`,
+      message: workerPilotSignInMessage(options.loginCommand ?? "devintern login"),
       signInRequired: true,
     };
   }
@@ -672,7 +796,7 @@ export function requireLicense(result: LicenseCheckResult): void {
   if (!result.valid) {
     console.error("\n❌ License check failed");
     console.error(`   ${result.message}\n`);
-    throw new LicenseCheckError(result.message);
+    throw new LicenseCheckError(result.message, { retryable: result.retryable });
   }
 
   if (result.source === "grace") {

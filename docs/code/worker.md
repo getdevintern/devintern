@@ -343,4 +343,6 @@ A hand-written launchd agent must set `DEVINTERN_SERVICE=1` in its `EnvironmentV
 
 The **Worker Pilot** gives a signed-in user 14 days of unattended use with no task-count limit and no card required. The 14 days start when the worker first starts with a valid workspace, not when you sign in. Run `devintern worker login github` (or `google`, `x`, `email you@company.com`), then `devintern worker`. On a host without a terminal, see [Signing in without a terminal](#signing-in-without-a-terminal). `worker doctor` shows the Pilot's end date.
 
-After the pilot, the worker needs an automation license (Supporter, Team, or Business). A paid `LICENSE_KEY` does not need a login. If access expires while running, in-flight work finishes and new pickup pauses until a license is added. Interactive CLI use stays free.
+When nobody is signed in, the worker refuses to start with `Sign in to start your free 14-day Worker Pilot: devintern worker login`. `worker doctor` and `worker service status` show the same text. Run that command: it asks how to sign in and opens your browser.
+
+After the pilot, the worker needs an automation license (Supporter, Team, or Business). Set it as `LICENSE_KEY` in the workspace `.env`; a license key does not need a login. If access expires while running, in-flight work finishes and new pickup pauses until a license is added. Interactive CLI use stays free.

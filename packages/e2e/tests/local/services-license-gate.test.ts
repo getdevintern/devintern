@@ -43,11 +43,14 @@ const AUTOMATION_DENIAL =
 const LICENSE_KEY_GUIDANCE =
   "Set LICENSE_KEY to a Supporter, Team, or Business license key from https://devintern.com/account";
 const SIGN_IN_ALTERNATIVE = "Alternatively, sign in if your account already holds one.";
-const WORKER_PILOT_ALTERNATIVE =
-  "Alternatively, run `devintern login` to start your 14-day free Worker Pilot (no card required).";
+/** Where the Worker Pilot is allowed, its sign-in leads and LICENSE_KEY is the alternative. */
+const WORKER_PILOT_SIGN_IN =
+  "Sign in to start your free 14-day Worker Pilot: `devintern login` (no card required).";
+const WORKER_PILOT_LICENSE_KEY_ALTERNATIVE =
+  "Already have a Supporter, Team, or Business license? Set LICENSE_KEY in the workspace .env instead.";
 /** The daemon names the workspace sign-in (with `--workspace` for a non-default workspace). */
-const WORKER_DAEMON_PILOT_ALTERNATIVE =
-  /Alternatively, run `devintern worker login( --workspace [^`]+)?` to start your 14-day free Worker Pilot \(no card required\)\./;
+const WORKER_DAEMON_PILOT_SIGN_IN =
+  /Sign in to start your free 14-day Worker Pilot: `devintern worker login( --workspace [^`]+)?` \(no card required\)\./;
 const NOT_SIGNED_IN = "Not signed in. Run `devintern login`.";
 
 /**
@@ -177,9 +180,9 @@ test.skipIf(skip)(
       run.env.DEVINTERN_WORKER_TRIAL = "1";
       const result = await run.runTask();
       expect(result.exitCode).toBe(AUTOMATION_ACCESS_EXIT_CODE);
-      expect(result.stderr).toContain(AUTOMATION_DENIAL);
-      expect(result.stderr).toContain(LICENSE_KEY_GUIDANCE);
-      expect(result.stderr).toContain(WORKER_PILOT_ALTERNATIVE);
+      expect(result.stderr).toContain(WORKER_PILOT_SIGN_IN);
+      expect(result.stderr).toContain(WORKER_PILOT_LICENSE_KEY_ALTERNATIVE);
+      expect(result.stderr).not.toContain(AUTOMATION_DENIAL);
       expect(proxy.requests()).toEqual([]);
       await expectNoWork(run);
     });
@@ -292,10 +295,11 @@ test.skipIf(skip)(
       expect(worker.exitStatus).toBe(78);
       expect(worker.logs).toContain("❌ License check failed");
       expect(worker.logs).toContain("The worker will not retry until this is fixed");
-      expect(worker.logs).toContain(AUTOMATION_DENIAL);
-      // The worker allows the trial, so it points a signed-out user at the
-      // workspace sign-in (the session the daemon reads).
-      expect(worker.logs).toMatch(WORKER_DAEMON_PILOT_ALTERNATIVE);
+      // The worker allows the trial, so it leads with the workspace sign-in
+      // (the session the daemon reads); LICENSE_KEY is the alternative.
+      expect(worker.logs).toMatch(WORKER_DAEMON_PILOT_SIGN_IN);
+      expect(worker.logs).toContain(WORKER_PILOT_LICENSE_KEY_ALTERNATIVE);
+      expect(worker.logs).not.toContain(AUTOMATION_DENIAL);
       expect(worker.logs).not.toContain("Draining injected tasks");
       expect(worker.agentInvocations()).toEqual([]);
       expect(worker.agentTimeline()).toEqual([]);
