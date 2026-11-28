@@ -577,7 +577,10 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       pending.length === 0 &&
       states.every((state) => state === "success" || state === "empty") &&
       states.some((state) => state === "success");
-    if (fullyGreen) this.resetRetryBudget(repo, prNumber, "CI passed");
+    if (fullyGreen) {
+      this.resetRetryBudget(repo, prNumber, "CI passed");
+      this.settleDeferredFixes(repo, prNumber);
+    }
     return { pending, ciChanged, fullyGreen };
   }
 
@@ -791,6 +794,27 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
 
     return this.handleFreshCiFailures({ repo, prNumber, headSha, fresh, pending });
+  }
+
+  /**
+   * Green CI supersedes a CI fix deferred by a usage limit: nothing is left
+   * for it to fix, so settle it instead of leaving it "waiting to retry".
+   */
+  private settleDeferredFixes(repo: string, prNumber: number): void {
+    try {
+      const settled = this.options.workerState.settleDeferredCiFixRuns(repo, prNumber);
+      if (settled.length > 0) {
+        console.log(
+          `   [${this.name}] ${this.describe(repo, prNumber)} CI is green; settled ` +
+            `${settled.length} deferred CI fix run(s)`,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `⚠️  [${this.name}] could not settle deferred CI fixes for ` +
+          `${this.describe(repo, prNumber)}: ${(error as Error).message}`,
+      );
+    }
   }
 
   /** Schedule the next observation for CI that is still terminal green. */

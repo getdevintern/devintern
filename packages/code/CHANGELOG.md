@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deferred PR runs no longer wait forever**: a CI fix, conflict resolution, or auto-merge run deferred by a usage limit stayed under "Waiting to retry" on the dashboard after its PR merged or closed, or after CI went green, because nothing would ever retry it. Those runs are now marked abandoned with the reason they were superseded, and the worker settles existing ones on startup
+
 ## [2.30.0] - 2026-11-27
 
 Onboarding release: set up a worker end to end from a terminal, a script, an SSH session, or a coding agent, with honest readiness at every step and the 14-day Worker Pilot reachable without a browser on the host. The relay routes events per worker, the background service is reliable, agent start failures stop looping silently, @mentions on human-authored PRs work, and a notification center (dashboard inbox, desktop, Slack, webhook) surfaces what needs you. Auto-merge waits on CI and reviews oversized diffs.

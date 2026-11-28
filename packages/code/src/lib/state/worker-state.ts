@@ -26,6 +26,11 @@ import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 import { notifyPrClosed, notifyPrOpened } from "../notifications/event-rules";
 import { parseRunId, RUN_ID_ENV } from "./run-outputs";
 import {
+  abandonDeferredPrRuns,
+  abandonDeferredRunsOnClosedPrs,
+  closedPrReason,
+} from "./deferred-pr-runs";
+import {
   optionalEnum,
   optionalNumber,
   optionalString,
@@ -884,7 +889,7 @@ export class WorkerState {
     // A closed PR resolves the escalations about it, same as markAgentPrClosed.
     for (const pr of foreign) {
       this.notifyClosed(
-        "SELECT web_url FROM agent_prs WHERE provider = 'github' AND repo = ? AND pr_number = ?",
+        "SELECT web_url, close_reason FROM agent_prs WHERE provider = 'github' AND repo = ? AND pr_number = ?",
         [pr.repo, pr.prNumber],
         `https://github.com/${pr.repo}/pull/${pr.prNumber}`,
       );
@@ -927,22 +932,74 @@ export class WorkerState {
     })();
     if (closed) {
       this.notifyClosed(
-        "SELECT web_url FROM agent_prs WHERE provider = 'github' AND repo = ? AND pr_number = ?",
+        "SELECT web_url, close_reason FROM agent_prs WHERE provider = 'github' AND repo = ? AND pr_number = ?",
         [repo, prNumber],
         `https://github.com/${repo}/pull/${prNumber}`,
       );
     }
   }
 
-  /** Resolve escalations about a PR that just closed (best-effort, never throws). */
+  /**
+   * Resolve escalations about a PR that just closed and settle its deferred
+   * PR-driven runs, whose retry can no longer come (best-effort, never throws).
+   */
   private notifyClosed(query: string, params: Array<string | number>, fallbackUrl?: string): void {
+    const row = this.readClosedPr(query, params);
+    const url = row?.web_url ?? fallbackUrl;
+    if (!url) return;
     try {
-      const row = this.db.query(query).get(...params) as { web_url: string | null } | null;
-      const url = row?.web_url ?? fallbackUrl;
-      if (url) notifyPrClosed(this.db, url);
+      notifyPrClosed(this.db, url);
     } catch (error) {
       console.warn(`⚠️  Notification (pr-closed) failed: ${(error as Error).message}`);
     }
+    try {
+      abandonDeferredPrRuns(this.db, { prUrl: url }, closedPrReason(row?.close_reason));
+    } catch (error) {
+      console.warn(`⚠️  Could not settle deferred runs for ${url}: ${(error as Error).message}`);
+    }
+  }
+
+  private readClosedPr(
+    query: string,
+    params: Array<string | number>,
+  ): { web_url: string | null; close_reason: string | null } | null {
+    try {
+      return this.db.query(query).get(...params) as {
+        web_url: string | null;
+        close_reason: string | null;
+      } | null;
+    } catch (error) {
+      console.warn(`⚠️  Could not read the closed PR's record: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Settle a PR's deferred CI-fix runs once its CI is green: there is nothing
+   * left for them to fix, and a new failure starts a fresh run.
+   *
+   * @param repo - Repo slug the runs were recorded with
+   * @param prNumber - PR number
+   * @returns Ids of the runs settled
+   */
+  settleDeferredCiFixRuns(repo: string, prNumber: number): number[] {
+    return abandonDeferredPrRuns(
+      this.db,
+      { repo, prNumber },
+      "superseded: CI passed before this deferred CI fix retried",
+      ["ci_fix"],
+    );
+  }
+
+  /**
+   * Settle deferred PR-driven runs (no task key) whose PR the registry already
+   * records as closed: no close event will settle them any more, so they would
+   * keep showing as "waiting to retry". Run once at worker startup.
+   *
+   * @returns Ids of the runs settled
+   */
+  settleDeferredRunsOnClosedPrs(): number[] {
+    return abandonDeferredRunsOnClosedPrs(this.db);
   }
 
   /**
@@ -966,7 +1023,7 @@ export class WorkerState {
     })();
     if (closed) {
       this.notifyClosed(
-        `SELECT web_url FROM agent_prs WHERE provider = ? AND instance_url = ?
+        `SELECT web_url, close_reason FROM agent_prs WHERE provider = ? AND instance_url = ?
          AND project_path = ? AND change_number = ?`,
         [identity.provider, identity.instanceUrl, identity.projectPath, identity.number],
         identity.webUrl,
