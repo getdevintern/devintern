@@ -632,6 +632,11 @@ export async function updateTrackerCredentials(options: {
   githubCliToken?: () => GitHubCliToken | null;
   /** Offer the optional PR token when the env file has none (default true). */
   offerPrToken?: boolean;
+  /**
+   * Asked before writing when the update replaces existing values (the
+   * changed keys); false leaves the env file as it was and returns `{}`.
+   */
+  confirmOverwrite?: (changedKeys: string[]) => Promise<boolean>;
 }): Promise<Record<string, string>> {
   const { trackerId, envPath, cwd, prompt, log, probe } = options;
   const promptSecret = options.promptSecret ?? prompt;
@@ -674,6 +679,17 @@ export async function updateTrackerCredentials(options: {
   const updates = Object.fromEntries(
     Object.entries(merged).filter(([key, value]) => key in values || existing[key] !== value),
   );
+  const replaced = Object.keys(updates).filter(
+    (key) => existing[key] !== undefined && existing[key] !== updates[key],
+  );
+  if (
+    replaced.length > 0 &&
+    options.confirmOverwrite &&
+    !(await options.confirmOverwrite(replaced))
+  ) {
+    log(`   Left ${envPath} unchanged.`);
+    return {};
+  }
 
   writeSecretFile(envPath, upsertEnvVars(originalContent, updates));
   log(`\n✅ Updated ${envPath}`);

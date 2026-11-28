@@ -6,14 +6,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
 import { runWorkerInit } from "../src/lib/init/worker-init";
 import { runWorkerInitSteps } from "../src/lib/init/worker-init-steps";
 import type { WorkerInitStep } from "../src/lib/init/worker-init-steps";
-import { MAX_TRACKER_REVISITS } from "../src/lib/init/worker-init-tracker";
+import { MAX_TRACKER_REVISITS, reconfigureTracker } from "../src/lib/init/worker-init-tracker";
 import { emptyOutcome } from "../src/lib/init/worker-init-run";
 import type { PromptRun, SetupRun } from "../src/lib/init/worker-init-run";
 import { trackerRepoNotice } from "../src/lib/trackers/github/tracker-repo-notice";
@@ -131,6 +131,99 @@ describe("worker init tracker recovery", () => {
     expect(config.defaults.taskQuery).toBe("is:open label:ai");
   });
 
+  /**
+   * The real tracker revisit (no `reconfigureTracker` override): the saved
+   * workspace `.env` has the wrong GITHUB_REPO, which this run already
+   * applied to process.env; the repo prompt gets `repoAnswer`.
+   */
+  function defaultRevisit(repoAnswer: string, extraAnswers: Record<string, string> = {}) {
+    const envPath = path.join(workspaceDir, ".env");
+    writeFileSync(
+      envPath,
+      "# shared\nTASK_TRACKER=github\nGITHUB_TOKEN=ghp_test\nGITHUB_REPO=acme/no-access-app\n",
+    );
+    const probed: Record<string, string>[] = [];
+    let queryAnswered = false;
+    const d = deps([], {
+      reconfigureTracker: undefined,
+      trackerProbe: async (_tracker: string, env: Record<string, string>) => {
+        probed.push({ ...env });
+      },
+      prompt: async (question: string) => {
+        d.questions.push(question);
+        if (question.startsWith("Ready-tasks query")) {
+          if (queryAnswered) return "";
+          queryAnswered = true;
+          return "is:open label:ai";
+        }
+        if (question === BACK_PROMPT) return "b";
+        if (question.startsWith("Repository ")) return repoAnswer;
+        for (const [prefix, answer] of Object.entries(extraAnswers)) {
+          if (question.startsWith(prefix)) return answer;
+        }
+        return "";
+      },
+    });
+    return { d, envPath, probed };
+  }
+
+  test("going back updates the workspace .env and the next dry run uses it", async () => {
+    const { d, envPath, probed } = defaultRevisit("acme/app");
+    const result = await runWorkerInit(d.deps);
+    expect(result.ok).toBe(true);
+    expect(readFileSync(envPath, "utf8")).toBe(
+      "# shared\nTASK_TRACKER=github\nGITHUB_TOKEN=ghp_test\nGITHUB_REPO=acme/app\n",
+    );
+    // The new value wins over the one applied before going back.
+    expect(process.env.GITHUB_REPO).toBe("acme/app");
+    expect(probed.map((env) => env.GITHUB_REPO)).toEqual(["acme/app"]);
+    expect(d.queries).toEqual(["is:open label:ai", "is:open label:ai"]);
+    const text = logs.join("\n");
+    expect(text).toContain("✅ Query works: 2 task(s) match right now.");
+    // One repository and no teams: nothing else reads this .env.
+    expect(text).not.toContain("is shared by");
+    expect(d.questions.some((q) => q.startsWith("Replace "))).toBe(false);
+  });
+
+  test("a shared .env is named before the prompts and replaced only after confirming", async () => {
+    writeFileSync(
+      path.join(workspaceDir, "workspace.toml"),
+      '[defaults]\ntracker = "github"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n\n[[repos]]\nname = "web"\nremote = "git@github.com:acme/web.git"\n',
+    );
+    const { d, envPath } = defaultRevisit("acme/app", { "Replace ": "y" });
+    const result = await runWorkerInit(d.deps);
+    expect(result.ok).toBe(true);
+    const text = logs.join("\n");
+    expect(text).toContain(
+      `⚠️  ${envPath} is shared by 2 repositories: a change here applies to all of them.`,
+    );
+    expect(d.questions).toContain("Replace GITHUB_REPO for all 2 repositories? [Y/n]: ");
+    expect(readFileSync(envPath, "utf8")).toContain("GITHUB_REPO=acme/app\n");
+    expect(process.env.GITHUB_REPO).toBe("acme/app");
+  });
+
+  test("declining to replace a shared value leaves the .env and the process as they were", async () => {
+    writeFileSync(
+      path.join(workspaceDir, "workspace.toml"),
+      '[defaults]\ntracker = "github"\n\n[[repos]]\nname = "app"\nremote = "git@github.com:acme/app.git"\n\n[[teams]]\nname = "core"\nrepos = ["app"]\ntask_query = "is:open"\n',
+    );
+    const { d, envPath } = defaultRevisit("acme/app", { "Replace ": "n" });
+    // Going back again would only repeat the same choice.
+    const before = readFileSync(envPath, "utf8");
+    let backs = 0;
+    const prompt = d.deps.prompt;
+    d.deps.prompt = async (question: string) => {
+      if (question === BACK_PROMPT && backs++ > 0) return "k";
+      return prompt(question);
+    };
+    const result = await runWorkerInit(d.deps);
+    expect(result.ok).toBe(true);
+    expect(d.questions).toContain("Replace GITHUB_REPO for all 1 repository and 1 team? [Y/n]: ");
+    expect(readFileSync(envPath, "utf8")).toBe(before);
+    expect(process.env.GITHUB_REPO).toBe("acme/no-access-app");
+    expect(logs.join("\n")).toContain("Kept the saved values.");
+  });
+
   test("k keeps the query and says where to fix the settings", async () => {
     const d = deps(["is:open label:ai", "k"]);
     const result = await runWorkerInit(d.deps);
@@ -191,6 +284,51 @@ describe("worker init tracker recovery", () => {
     const result = await runWorkerInit(d.deps);
     expect(result.ok).toBe(true);
     expect(logs.join("\n")).not.toContain("Tickets come from");
+  });
+});
+
+describe("reconfigureTracker", () => {
+  let workspaceDir: string;
+  const savedKey = process.env.LINEAR_API_KEY;
+
+  beforeEach(() => {
+    workspaceDir = mkdtempSync(path.join(tmpdir(), "devintern-reconfigure-"));
+  });
+
+  afterEach(() => {
+    if (savedKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = savedKey;
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("does not offer the PR token: the worker's GitHub-token step does", async () => {
+    const envPath = path.join(workspaceDir, ".env");
+    writeFileSync(envPath, "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_old\n");
+    const questions: string[] = [];
+    const logs: string[] = [];
+    const ask = async (question: string) => {
+      questions.push(question);
+      return question.startsWith("Linear API key") ? "lin_new" : "";
+    };
+    const run: PromptRun = {
+      input: "prompt",
+      deps: { trackerProbe: async () => {}, githubCliToken: () => null },
+      cwd: workspaceDir,
+      projectRoot: workspaceDir,
+      log: (message) => logs.push(message),
+      prompt: ask,
+      promptSecret: ask,
+      guard: ((promise: Promise<unknown>) => promise) as PromptRun["guard"],
+      trackerType: "linear",
+      trackerName: "Linear",
+      workspaceDir,
+      outcome: emptyOutcome(),
+    };
+    expect(await reconfigureTracker(run)).toBe(true);
+    expect(questions.length).toBeGreaterThan(0);
+    expect(questions.some((q) => /GitHub/i.test(q))).toBe(false);
+    expect(logs.join("\n")).not.toContain("DevIntern opens pull requests on GitHub");
+    expect(readFileSync(envPath, "utf8")).not.toContain("GITHUB_TOKEN");
   });
 });
 

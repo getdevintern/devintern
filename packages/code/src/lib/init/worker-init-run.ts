@@ -96,6 +96,8 @@ export interface WorkerInitDeps {
     promptSecret: PromptFn;
     log: LogFn;
   }) => Promise<boolean>;
+  /** Validates the settings asked again after going back; defaults to the tracker credential probe. */
+  trackerProbe?: (trackerId: string, env: Record<string, string>) => Promise<void>;
   /** Reads a signed-in GitHub CLI token for tracker setup; defaults to `gh`. */
   githubCliToken?: () => GitHubCliToken | null;
   /** Probes a reused GitHub CLI token; defaults to the tracker credential probe. */

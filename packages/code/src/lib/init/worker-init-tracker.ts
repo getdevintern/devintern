@@ -60,7 +60,8 @@ export async function askBackToTracker(run: PromptRun): Promise<boolean> {
  * The tracker step again, after the query step went back: ask the current
  * tracker's settings with the saved values as Enter defaults, validate them,
  * update the workspace `.env`, and apply them to this process so the next
- * dry run uses them.
+ * dry run uses them. When other repositories or teams read that `.env`, say
+ * so first and ask before replacing a value they rely on.
  */
 export async function reconfigureTracker(run: PromptRun): Promise<boolean> {
   run.log(`   Update the ${run.trackerName} settings; press Enter to keep a value.`);
@@ -74,21 +75,66 @@ export async function reconfigureTracker(run: PromptRun): Promise<boolean> {
       log: run.log,
     });
   }
+  const workspaceDir = run.workspaceDir || resolveWorkspaceDir();
+  const envPath = workspaceEnvPath(workspaceDir);
+  const sharedBy = sharedEnvUsers(workspaceDir);
+  if (sharedBy) {
+    run.log(`   ⚠️  ${envPath} is shared by ${sharedBy}: a change here applies to all of them.`);
+  }
   const values = await updateTrackerCredentials({
     trackerId: run.trackerType,
-    envPath: workspaceEnvPath(run.workspaceDir || resolveWorkspaceDir()),
+    envPath,
     cwd: run.cwd,
     prompt: run.prompt,
     promptSecret: run.promptSecret,
     log: run.log,
-    probe: defaultProbe,
+    probe: run.deps.trackerProbe ?? defaultProbe,
     ...(run.deps.githubCliToken ? { githubCliToken: run.deps.githubCliToken } : {}),
     // The worker's own GitHub-token step offers the PR token.
     offerPrToken: false,
+    ...(sharedBy
+      ? { confirmOverwrite: (keys: string[]) => confirmSharedOverwrite(run, keys, sharedBy) }
+      : {}),
   });
   // The new values must win over the ones applied earlier in this run.
   for (const [key, value] of Object.entries(values)) process.env[key] = value;
   return true;
+}
+
+/**
+ * Who else reads the workspace `.env` besides this checkout: "3 repositories
+ * and 1 team", or null when this is the only repository and there are no teams.
+ */
+function sharedEnvUsers(workspaceDir: string): string | null {
+  const configPath = workspaceConfigPath(workspaceDir);
+  let repos = 0;
+  let teams = 0;
+  try {
+    if (!existsSync(configPath)) return null;
+    const config = loadWorkspaceConfig(configPath);
+    repos = config.repos.length;
+    teams = config.teams.length;
+  } catch {
+    // An unreadable workspace is reported by the workspace step.
+    return null;
+  }
+  if (repos <= 1 && teams === 0) return null;
+  const parts = [`${repos} ${repos === 1 ? "repository" : "repositories"}`];
+  if (teams > 0) parts.push(`${teams} ${teams === 1 ? "team" : "teams"}`);
+  return parts.join(" and ");
+}
+
+async function confirmSharedOverwrite(
+  run: PromptRun,
+  keys: string[],
+  sharedBy: string,
+): Promise<boolean> {
+  const answer = (await run.prompt(`Replace ${keys.join(", ")} for all ${sharedBy}? [Y/n]: `))
+    .trim()
+    .toLowerCase();
+  if (answer === "" || answer === "y" || answer === "yes") return true;
+  run.log("   Kept the saved values.");
+  return false;
 }
 
 /**
