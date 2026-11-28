@@ -5,18 +5,25 @@ import type {
   InitializeProjectRequest,
   UpdateProjectTrackerRequest,
 } from "../../shared/ipc-contract.ts";
-import {
-  inspectPmInitContext,
-  listPmTrackers,
-  probePmConnection,
-  writePmProjectConfig,
-} from "@getdevintern/pm/init";
 import { track } from "../analytics.ts";
+import {
+  assertReuseForActiveProject,
+  inspectProjectInitForRenderer,
+  parseReusedSecretsRequest,
+  probeWithReusedSecrets,
+  updateTrackerCredentials,
+  writeInitialProjectConfig,
+} from "../init-credentials.ts";
 import { listProjectBindings } from "../project-bindings.ts";
-import { persistTrackerCredentials, readProjectEnv } from "../project-env.ts";
 import { removeConnectedProject } from "../remove-connected-project.ts";
 import { recordRecentProjectDir } from "../recent-projects.ts";
-import { detectGitRepository, getSession, loadProject, switchContext } from "../session.ts";
+import {
+  currentProjectDir,
+  detectGitRepository,
+  getSession,
+  loadProject,
+  switchContext,
+} from "../session.ts";
 import { readSettings, updateSettings } from "../settings.ts";
 import { handle } from "./register.ts";
 
@@ -88,16 +95,18 @@ export function registerProjectIpcHandlers(): void {
     return status;
   });
 
+  // Secret values never cross IPC: the renderer gets their keys, and probe /
+  // save fill the ones the user left blank (see init-credentials.ts).
   handle(IPC_CHANNELS.inspectProjectInit, async (_event, dir: string) => {
-    const context = await inspectPmInitContext(dir);
-    const { env } = await readProjectEnv(dir);
-    return { ...context, trackers: listPmTrackers(), currentEnv: env };
+    return inspectProjectInitForRenderer(dir);
   });
 
   handle(
     IPC_CHANNELS.probeTrackerConnection,
-    async (_event, trackerId: string, values: Record<string, string>) => {
-      return probePmConnection(trackerId, values);
+    async (_event, trackerId: string, values: Record<string, string>, reuse: unknown) => {
+      const request = parseReusedSecretsRequest(reuse);
+      if (request) assertReuseForActiveProject(request.projectDir, currentProjectDir());
+      return probeWithReusedSecrets(trackerId, values, request);
     },
   );
 
@@ -108,11 +117,14 @@ export function registerProjectIpcHandlers(): void {
         "This folder is not a git repository. Choose a git-connected project before setting up PM.",
       );
     }
-    await writePmProjectConfig({
-      cwd: input.projectDir,
+    const reuseFromCode = input.reuseFromCode === true;
+    if (reuseFromCode) assertReuseForActiveProject(input.projectDir, currentProjectDir());
+    await writeInitialProjectConfig({
+      projectDir: input.projectDir,
       trackerId: input.trackerId,
       values: input.values,
       overwrite: input.overwrite === true,
+      reuseFromCode,
     });
     const status = await loadProject(input.projectDir);
     await updateSettings({ lastProjectDir: status.projectDir });
@@ -150,7 +162,7 @@ export function registerProjectIpcHandlers(): void {
       if (resolve(projectDir) !== resolve(input.projectDir)) {
         throw new Error("Project directory does not match the active session.");
       }
-      await persistTrackerCredentials(projectDir, input.trackerId, input.values);
+      await updateTrackerCredentials(projectDir, input.trackerId, input.values);
     });
   });
 }

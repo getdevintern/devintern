@@ -307,6 +307,12 @@ export interface InitializeProjectRequest {
   values: Record<string, string>;
   /** Required when config already exists; cancel leaves the file untouched. */
   overwrite?: boolean;
+  /**
+   * The user accepted the reuse offer: the main process looks DevIntern
+   * Code's credentials up again and fills each reused secret left blank in
+   * {@link values}.
+   */
+  reuseFromCode?: boolean;
 }
 
 /**
@@ -317,20 +323,54 @@ export interface InitializeProjectRequest {
 export interface UpdateProjectTrackerRequest {
   projectDir: string;
   trackerId: string;
+  /** Blank values keep the current ones (secrets included). */
   values: Record<string, string>;
+}
+
+/**
+ * Where the main process reads secrets the renderer never received:
+ * DevIntern Code's credentials (`code`) or the project's current
+ * `.devintern-pm/.env` (`project`).
+ */
+export type ReusedSecretSource = "code" | "project";
+
+/** Fill blank secrets of a probe or save from {@link ReusedSecretSource}. */
+export interface ReusedSecretsRequest {
+  projectDir: string;
+  source: ReusedSecretSource;
+}
+
+/**
+ * Reusable tracker credentials as the renderer sees them: non-secret values
+ * (base URL, email, project key) plus the names of the secrets that are
+ * available but kept in the main process.
+ */
+export interface RedactedTrackerConfig {
+  trackerId: string;
+  /** Non-secret values only. */
+  values: Record<string, string>;
+  /** Secret keys (tokens, API keys, PATs) with a value the renderer does not get. */
+  secretKeys: string[];
 }
 
 /** Result of a tracker credential probe (ok envelope wraps this from IPC). */
 export type ProbeConnectionResult = { ok: true } | { ok: false; message: string };
 
-/** Init inspect payload: config snapshot + tracker menu for the wizard. */
-export type ProjectInitInspect = PmInitContext & {
+/**
+ * Init inspect payload: config snapshot + tracker menu for the wizard. No
+ * secret value crosses IPC: secrets are listed by key only.
+ */
+export type ProjectInitInspect = Omit<PmInitContext, "reusableFromCode"> & {
   trackers: PmTrackerInfo[];
+  /** DevIntern Code credentials offered for reuse, without secret values. */
+  reusableFromCode: RedactedTrackerConfig | null;
   /**
-   * Parsed `.devintern-pm/.env` values (including secrets) for update-mode
-   * prefill. Empty when no pm config exists yet (init mode).
+   * Non-secret `.devintern-pm/.env` values (`TASK_TRACKER` and tracker
+   * settings) for update-mode prefill. Empty when no pm config exists yet.
    */
   currentEnv: Record<string, string>;
+  /** Secret keys set in `.devintern-pm/.env`, whose values stay in the main process. */
+  currentSecretKeys: string[];
 };
 
 /** API surface exposed on `window.pm` by the preload script. */
@@ -401,6 +441,8 @@ export interface PmDesktopApi {
   probeTrackerConnection(
     trackerId: string,
     values: Record<string, string>,
+    /** Fill blank secrets from DevIntern Code or the project's current config. */
+    reuse?: ReusedSecretsRequest,
   ): Promise<IpcResult<ProbeConnectionResult>>;
   /** Write `.devintern-pm/.env` + gitignore secrets, then load the project session. */
   initializeProject(input: InitializeProjectRequest): Promise<IpcResult<ProjectStatus>>;

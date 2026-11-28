@@ -95,10 +95,15 @@ export function requireSession(): Session {
   return current;
 }
 
+/** The loaded project's dir, even when its config failed; `null` before any load. */
+export function currentProjectDir(): string | null {
+  return current?.projectDir ?? lastProjectDir;
+}
+
 /** Project dir for switch/reload paths that must work even when config failed. */
 export function requireProjectDir(): string {
-  if (current) return current.projectDir;
-  if (lastProjectDir) return lastProjectDir;
+  const projectDir = currentProjectDir();
+  if (projectDir) return projectDir;
   throw new Error("No project selected. Choose a project directory first.");
 }
 

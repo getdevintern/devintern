@@ -30,9 +30,25 @@ export interface WorkspaceRepo {
   manualOnly: boolean;
 }
 
+/** One `[[teams]]` entry. */
+export interface WorkspaceTeam {
+  name: string;
+  /** The team's tracker; falls back to `[defaults].tracker`. */
+  tracker?: string;
+  /** Whether the team sets its own `tracker` rather than inheriting the default. */
+  declaresTracker: boolean;
+  /** Fixed destination repo (`[[repos]]` name); unset for a multi-repo team. */
+  repo?: string;
+  /** Team env file, absolute or relative to the workspace home. */
+  envFile?: string;
+  /** Inline `[teams.env]` values. */
+  env: Record<string, string>;
+}
+
 /** What other products read from `workspace.toml`. */
 export interface WorkspaceFile {
   repos: WorkspaceRepo[];
+  teams: WorkspaceTeam[];
   /** `[defaults].tracker`, when set. */
   defaultTracker?: string;
 }
@@ -47,16 +63,21 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function readRepo(raw: unknown): WorkspaceRepo | null {
-  if (!isTable(raw)) return null;
-  const name = nonEmptyString(raw.name);
-  if (!name) return null;
+function readEnvTable(raw: Table): Record<string, string> {
   const env: Record<string, string> = {};
   if (isTable(raw.env)) {
     for (const [key, value] of Object.entries(raw.env)) {
       if (typeof value === "string") env[key] = value;
     }
   }
+  return env;
+}
+
+function readRepo(raw: unknown): WorkspaceRepo | null {
+  if (!isTable(raw)) return null;
+  const name = nonEmptyString(raw.name);
+  if (!name) return null;
+  const env = readEnvTable(raw);
   const path = nonEmptyString(raw.path);
   return {
     name,
@@ -65,6 +86,24 @@ function readRepo(raw: unknown): WorkspaceRepo | null {
     envFile: nonEmptyString(raw.env_file),
     env,
     manualOnly: raw.manual_only === true,
+  };
+}
+
+function readTeam(raw: unknown, defaultTracker: string | undefined): WorkspaceTeam | null {
+  if (!isTable(raw)) return null;
+  const name = nonEmptyString(raw.name);
+  if (!name) return null;
+  const ownTracker = nonEmptyString(raw.tracker);
+  const tracker = ownTracker ?? defaultTracker;
+  const repo = nonEmptyString(raw.repo);
+  const envFile = nonEmptyString(raw.env_file);
+  return {
+    name,
+    ...(tracker ? { tracker } : {}),
+    declaresTracker: ownTracker !== undefined,
+    ...(repo ? { repo } : {}),
+    ...(envFile ? { envFile } : {}),
+    env: readEnvTable(raw),
   };
 }
 
@@ -80,7 +119,12 @@ export function parseWorkspaceFile(text: string): WorkspaceFile {
     : [];
   const defaults = isTable(document.defaults) ? document.defaults : {};
   const defaultTracker = nonEmptyString(defaults.tracker);
-  return { repos, ...(defaultTracker ? { defaultTracker } : {}) };
+  const teams = Array.isArray(document.teams)
+    ? document.teams
+        .map((raw) => readTeam(raw, defaultTracker))
+        .filter((team): team is WorkspaceTeam => team !== null)
+    : [];
+  return { repos, teams, ...(defaultTracker ? { defaultTracker } : {}) };
 }
 
 /**
@@ -164,6 +208,72 @@ export function matchWorkspaceRepo(
     if (!best || root.length > best.length) best = { repo, length: root.length };
   }
   return best?.repo ?? null;
+}
+
+/**
+ * The team whose credentials a repo's runs layer when no team is named: the
+ * one `[[teams]]` entry fixed to the repo (`repo = "<name>"`). Zero or several
+ * fixed teams give none, since picking one of several could use the wrong
+ * account. Same rule as DevIntern Code's credential team resolution.
+ */
+export function repoCredentialTeam(
+  teams: readonly WorkspaceTeam[],
+  repoName: string,
+): WorkspaceTeam | null {
+  const fixed = teams.filter((team) => team.repo === repoName);
+  return fixed.length === 1 ? fixed[0]! : null;
+}
+
+function envNamespacePart(value: string): string {
+  return value.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+}
+
+/**
+ * Project `<TRACKER>_<TEAM>_<SETTING>` workspace values onto the plain tracker
+ * names (`JIRA_PLATFORM_API_TOKEN` becomes `JIRA_API_TOKEN` for team
+ * `platform`; `JIRA_<TEAM>_URL` also sets `JIRA_BASE_URL`).
+ */
+export function namespacedTeamEnv(
+  workspaceEnv: Record<string, string>,
+  team: Pick<WorkspaceTeam, "name" | "tracker">,
+): Record<string, string> {
+  if (!team.tracker) return {};
+  const trackerPrefix = envNamespacePart(team.tracker);
+  const namespace = `${trackerPrefix}_${envNamespacePart(team.name)}_`;
+  const projected: Record<string, string> = {};
+  for (const [key, value] of Object.entries(workspaceEnv)) {
+    if (!key.startsWith(namespace)) continue;
+    const suffix = key.slice(namespace.length);
+    projected[`${trackerPrefix}_${suffix}`] = value;
+    if (trackerPrefix === "JIRA" && suffix === "URL") projected.JIRA_BASE_URL = value;
+  }
+  return projected;
+}
+
+/**
+ * The layers a team adds over a repo's credentials, later winning: its
+ * namespaced workspace values, its `env_file`, then its inline `[teams.env]`.
+ * `TASK_TRACKER` is the team's tracker only when the team declares one; a team
+ * that inherits `[defaults].tracker` leaves the repo env's selection alone, as
+ * Code's repo-scoped runs do.
+ *
+ * @param workspaceEnv - The shared workspace `.env`, already read
+ */
+export function teamCredentialEnv(
+  team: WorkspaceTeam,
+  workspaceDir: string,
+  workspaceEnv: Record<string, string>,
+  readEnv: (path: string) => Record<string, string> = readEnvFile,
+): Record<string, string> {
+  const teamFileEnv = team.envFile
+    ? readEnv(isAbsolute(team.envFile) ? team.envFile : join(workspaceDir, team.envFile))
+    : {};
+  return {
+    ...namespacedTeamEnv(workspaceEnv, team),
+    ...teamFileEnv,
+    ...team.env,
+    ...(team.declaresTracker && team.tracker ? { TASK_TRACKER: team.tracker } : {}),
+  };
 }
 
 /**

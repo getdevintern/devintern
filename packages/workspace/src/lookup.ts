@@ -1,16 +1,27 @@
 import { execFile } from "node:child_process";
 
-import { resolveWorkspaceDir } from "./paths.ts";
-import { matchWorkspaceRepo, readWorkspaceFile, repoCredentialEnv } from "./repos.ts";
-import type { WorkspaceRepo } from "./repos.ts";
+import { readEnvFile } from "./env-file.ts";
+import { resolveWorkspaceDir, workspaceEnvPath } from "./paths.ts";
+import {
+  matchWorkspaceRepo,
+  readWorkspaceFile,
+  repoCredentialEnv,
+  repoCredentialTeam,
+  teamCredentialEnv,
+} from "./repos.ts";
+import type { WorkspaceRepo, WorkspaceTeam } from "./repos.ts";
 
 /** A checkout's entry in the DevIntern workspace. */
 export interface WorkspaceRepoMatch {
   workspaceDir: string;
   repo: WorkspaceRepo;
+  /** The one team fixed to the repo, whose credentials {@link env} includes. */
+  team?: WorkspaceTeam;
   /**
-   * The repo's credential env (see {@link repoCredentialEnv}). `TASK_TRACKER`
-   * falls back to `[defaults].tracker` when no env layer sets it.
+   * The repo's credential env (see {@link repoCredentialEnv}), with the
+   * layers of its single fixed team on top (see {@link teamCredentialEnv})
+   * when it has exactly one. `TASK_TRACKER` falls back to `[defaults].tracker`
+   * when no env layer sets it.
    */
   env: Record<string, string>;
 }
@@ -57,6 +68,13 @@ export async function findWorkspaceRepo(options: {
   const repo = matchWorkspaceRepo(file.repos, { origin, dir: options.dir });
   if (!repo) return null;
   const env = repoCredentialEnv(repo, workspaceDir);
+  const team = repoCredentialTeam(file.teams, repo.name);
+  if (team) {
+    Object.assign(
+      env,
+      teamCredentialEnv(team, workspaceDir, readEnvFile(workspaceEnvPath(workspaceDir))),
+    );
+  }
   if (!env.TASK_TRACKER && file.defaultTracker) env.TASK_TRACKER = file.defaultTracker;
-  return { workspaceDir, repo, env };
+  return { workspaceDir, repo, ...(team ? { team } : {}), env };
 }

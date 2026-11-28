@@ -47,6 +47,7 @@ export {
   applyPmTrackerDefaults,
   listPmTrackers,
   missingRequiredPmFields,
+  pmTrackerSecretKeys,
   renderPmEnvFile,
   stepLink,
   type EnvPromptStep,

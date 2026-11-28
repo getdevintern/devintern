@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -90,6 +90,7 @@ name = "local"
 path = "relative/is/ignored"
 `);
     expect(file.defaultTracker).toBe("jira");
+    expect(file.teams).toEqual([]);
     expect(file.repos).toEqual([
       {
         name: "api",
@@ -210,5 +211,97 @@ describe("findWorkspaceRepo", () => {
       `[[repos]]\nname = "x"\nremote = "git@github.com:a/b.git"\n`,
     );
     expect(await findWorkspaceRepo({ dir: root, workspaceDir, origin: null })).toBeNull();
+  });
+});
+
+describe("findWorkspaceRepo team credentials", () => {
+  const dir = () => join(root, "app");
+
+  function writeWorkspace(teams: string): void {
+    mkdirSync(dir(), { recursive: true });
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      `[defaults]\ntracker = "linear"\n\n[[repos]]\nname = "app"\npath = ${JSON.stringify(dir())}\nmanual_only = true\n[repos.env]\nREPO_ONLY = "repo"\nSHARED = "repo"\n\n${teams}`,
+    );
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "LINEAR_API_KEY=workspace\nJIRA_PLATFORM_API_TOKEN=ns-token\nJIRA_PLATFORM_URL=https://ns.atlassian.net\n",
+    );
+    writeFileSync(
+      join(workspaceDir, "env", "platform.env"),
+      "JIRA_EMAIL=file@x.com\nSHARED=file\n",
+    );
+  }
+
+  test("no team leaves the repo-level offer", async () => {
+    writeWorkspace("");
+    const match = await findWorkspaceRepo({ dir: dir(), workspaceDir, origin: null });
+    expect(match?.team).toBeUndefined();
+    expect(match?.env).toEqual({
+      LINEAR_API_KEY: "workspace",
+      JIRA_PLATFORM_API_TOKEN: "ns-token",
+      JIRA_PLATFORM_URL: "https://ns.atlassian.net",
+      REPO_ONLY: "repo",
+      SHARED: "repo",
+      TASK_TRACKER: "linear",
+    });
+  });
+
+  test("the one team fixed to the repo layers namespaced, file and inline values", async () => {
+    writeWorkspace(
+      `[[teams]]\nname = "platform"\ntracker = "jira"\nrepo = "app"\nenv_file = "env/platform.env"\n[teams.env]\nJIRA_DEFAULT_PROJECT_KEY = "PLAT"\n\n[[teams]]\nname = "roaming"\ntracker = "github"\n[teams.env]\nGITHUB_TOKEN = "not-this-one"\n`,
+    );
+    const match = await findWorkspaceRepo({ dir: dir(), workspaceDir, origin: null });
+    expect(match?.team?.name).toBe("platform");
+    expect(match?.env).toMatchObject({
+      TASK_TRACKER: "jira",
+      JIRA_API_TOKEN: "ns-token",
+      JIRA_BASE_URL: "https://ns.atlassian.net",
+      JIRA_URL: "https://ns.atlassian.net",
+      JIRA_EMAIL: "file@x.com",
+      JIRA_DEFAULT_PROJECT_KEY: "PLAT",
+      SHARED: "file",
+      REPO_ONLY: "repo",
+    });
+    expect(match?.env.GITHUB_TOKEN).toBeUndefined();
+  });
+
+  test("a team without its own tracker uses [defaults].tracker", async () => {
+    writeWorkspace(
+      `[[teams]]\nname = "core"\nrepo = "app"\n[teams.env]\nLINEAR_API_KEY = "team"\n`,
+    );
+    const match = await findWorkspaceRepo({ dir: dir(), workspaceDir, origin: null });
+    expect(match?.env.TASK_TRACKER).toBe("linear");
+    expect(match?.env.LINEAR_API_KEY).toBe("team");
+  });
+
+  test("a team without its own tracker keeps the repo env's TASK_TRACKER", async () => {
+    writeWorkspace(`[[teams]]\nname = "core"\nrepo = "app"\n[teams.env]\nFOO = "1"\n`);
+    const toml = join(workspaceDir, "workspace.toml");
+    writeFileSync(
+      toml,
+      readFileSync(toml, "utf8").replace(
+        'REPO_ONLY = "repo"',
+        'REPO_ONLY = "repo"\nTASK_TRACKER = "jira"',
+      ),
+    );
+    const match = await findWorkspaceRepo({ dir: dir(), workspaceDir, origin: null });
+    expect(match?.team?.name).toBe("core");
+    expect(match?.env.TASK_TRACKER).toBe("jira");
+    expect(match?.env.FOO).toBe("1");
+  });
+
+  test("several teams fixed to the repo offer nothing from teams", async () => {
+    writeWorkspace(
+      `[[teams]]\nname = "platform"\ntracker = "jira"\nrepo = "app"\nenv_file = "env/platform.env"\n\n[[teams]]\nname = "mobile"\ntracker = "github"\nrepo = "app"\n[teams.env]\nGITHUB_TOKEN = "team"\n`,
+    );
+    const match = await findWorkspaceRepo({ dir: dir(), workspaceDir, origin: null });
+    expect(match?.team).toBeUndefined();
+    expect(match?.env.TASK_TRACKER).toBe("linear");
+    expect(match?.env.SHARED).toBe("repo");
+    expect(match?.env.GITHUB_TOKEN).toBeUndefined();
+    expect(match?.env.JIRA_API_TOKEN).toBeUndefined();
+    expect(match?.env.JIRA_EMAIL).toBeUndefined();
   });
 });

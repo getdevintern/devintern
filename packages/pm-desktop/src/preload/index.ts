@@ -69,8 +69,8 @@ const api: PmDesktopApi = {
   listIssueTypes: (projectKey) => ipcRenderer.invoke(IPC_CHANNELS.listIssueTypes, projectKey),
   listLabels: (projectKey) => ipcRenderer.invoke(IPC_CHANNELS.listLabels, projectKey),
   inspectProjectInit: (dir) => ipcRenderer.invoke(IPC_CHANNELS.inspectProjectInit, dir),
-  probeTrackerConnection: (trackerId, values) =>
-    ipcRenderer.invoke(IPC_CHANNELS.probeTrackerConnection, trackerId, values),
+  probeTrackerConnection: (trackerId, values, reuse) =>
+    ipcRenderer.invoke(IPC_CHANNELS.probeTrackerConnection, trackerId, values, reuse),
   initializeProject: (input) => ipcRenderer.invoke(IPC_CHANNELS.initializeProject, input),
   updateProjectTracker: (input) => ipcRenderer.invoke(IPC_CHANNELS.updateProjectTracker, input),
   generateStory: (requestId, input) =>
