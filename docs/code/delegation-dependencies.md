@@ -109,10 +109,11 @@ it opened its PR), the run checks its base again before verifying, reviewing,
 pushing, and opening the PR. A merged base: the run opens its PR against the
 branch the base merged into, without the "Stacked on" note. After a squash or
 rebase merge it first rebases so only its own commits remain; after a merge
-commit the base's commits are already there, so it keeps its branch as is and
-any conflict with newer commits goes to
-[conflict resolution](./pr-follow-up.md#merge-conflicts-on-the-agents-prs) once
-the PR is open. A base closed without merging: the run is handed back (`escalated`) with the same
+commit the base's commits are already there, so it keeps its branch as is. If
+that rebase conflicts, or the run's work conflicts with newer commits, the run
+still opens its PR and
+[conflict resolution](./pr-follow-up.md#merge-conflicts-on-the-agents-prs)
+resolves it, the same as for a stacked PR. A base closed without merging: the run is handed back (`escalated`) with the same
 choices as above, and its work is
 [saved to the task branch](./delegation-runs.md#resuming-and-interrupted-tasks---resume).
 

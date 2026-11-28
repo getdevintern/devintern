@@ -20,7 +20,13 @@
  *   the maintainer does for an open stacked PR; without the rebase the PR
  *   would show the base's changes again. When the run's branch is already
  *   on origin (a resumed run), the rebase is pushed right away with a lease
- *   on that commit; a remote branch with commits the run lacks blocks.
+ *   on that commit; a remote branch with commits the run lacks blocks. When
+ *   that rebase conflicts and the base is known to have merged, the run
+ *   keeps its branch and still targets the merge target, as the maintainer
+ *   does for a stacked PR: the open PR conflicts, and the worker's conflict
+ *   resolution merges the target in (with the agent when needed). Merging
+ *   the target also settles the base's original commits against their
+ *   squash, so the PR diff ends up as the run's own work.
  * - **Base closed without merging**: blocked. The caller preserves the work
  *   and escalates with {@link stackBaseRecoveryHint}'s actions.
  */
@@ -251,6 +257,13 @@ export async function reconcileRunStackBase(
     oldBaseCandidates: candidates,
     autostash: true,
   });
+  if (rebase.kind === "conflict" && rebase.intact && basePr?.state === "merged") {
+    const summary =
+      `${why}; rebasing onto ${target} conflicted (${rebase.detail}), so this run keeps its ` +
+      `branch, targets ${target}, and leaves the conflict to the PR's conflict resolution`;
+    warn(`⚠️  ${summary}`);
+    return { kind: "switched", target, summary };
+  }
   if (rebase.kind === "conflict") {
     return {
       kind: "blocked",
