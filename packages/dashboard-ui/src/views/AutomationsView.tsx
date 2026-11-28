@@ -3,7 +3,11 @@ import { consumeSourceHealthFocus, SOURCE_HEALTH_SECTION_ID } from "@/components
 import { formatClock, formatIn } from "@/components/overview/overview-model";
 import { Check, GitPullRequest, Play } from "lucide-react";
 
-import { AutomationNowStatus, hasNowStatus } from "@/components/AutomationActivity";
+import {
+  AutomationActivityStatus,
+  AutomationDeferralStatus,
+  visibleActivity,
+} from "@/components/AutomationActivity";
 import { AutomationGroupHeaderRow } from "@/components/AutomationGroupHeader";
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StatusBadge, StatusPill } from "@/components/shared";
@@ -67,6 +71,52 @@ export function RunFeedback({ kind, message }: { kind: "success" | "error"; mess
   );
 }
 
+/** Last run's status, age, and result, opening the run on click. */
+function LastRunSummary({
+  run,
+  kind,
+  title,
+  onOpenRun,
+}: {
+  run: NonNullable<AutomationSchedule["lastRun"]>;
+  kind: ReturnType<typeof jobKind>;
+  title: string;
+  onOpenRun: (id: number) => void;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        className="inline-flex items-center gap-2 rounded-sm focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none"
+        aria-label={`Open last run for ${title}`}
+        title={`${formatRunOrigin(run.origin)} · ${formatTime(run.startedAt)}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpenRun(run.id);
+        }}
+      >
+        <StatusBadge status={run.status} />
+        <span className="text-xs text-muted-foreground">{formatAge(run.startedAt)} ago</span>
+      </button>
+      {run.ticketKey || run.prNumber !== undefined || run.prUrl ? (
+        <span className="text-xs">
+          <RunResult run={run} />
+        </span>
+      ) : null}
+      {/* Auto-merge checks say why a PR was left open (e.g. no CI checks). */}
+      {kind === "auto_merge" && run.status !== "succeeded" && run.outcomeReason ? (
+        <span
+          data-slot="auto-merge-reason"
+          className="max-w-xs truncate text-xs text-muted-foreground"
+          title={run.outcomeReason}
+        >
+          {run.outcomeReason}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 /** One scheduled automation row with its "Run now" action. */
 function AutomationRow({
   automation,
@@ -88,6 +138,7 @@ function AutomationRow({
   const busy = busyId === automation.id;
   const started = startedId === automation.id;
   const lastRun = automation.lastRun;
+  const activity = visibleActivity(automation);
   // The worker rejects a second trigger while an occurrence holds the lease.
   const inFlight = automation.activity !== undefined;
   const human = automation.schedule ? humanizeSchedule(automation.schedule) : undefined;
@@ -159,39 +210,16 @@ function AutomationRow({
         )}
       </TableCell>
       <TableCell className="auto-cell-last min-w-0 px-4 py-2.5 align-middle">
-        {hasNowStatus(automation) ? (
-          <AutomationNowStatus automation={automation} />
-        ) : lastRun ? (
+        {activity ? (
+          <AutomationActivityStatus activity={activity} />
+        ) : lastRun || automation.deferral ? (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 rounded-sm focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none"
-              aria-label={`Open last run for ${title}`}
-              title={`${formatRunOrigin(lastRun.origin)} · ${formatTime(lastRun.startedAt)}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenRun(lastRun.id);
-              }}
-            >
-              <StatusBadge status={lastRun.status} />
-              <span className="text-xs text-muted-foreground">
-                {formatAge(lastRun.startedAt)} ago
-              </span>
-            </button>
-            {lastRun.ticketKey || lastRun.prNumber !== undefined || lastRun.prUrl ? (
-              <span className="text-xs">
-                <RunResult run={lastRun} />
-              </span>
+            {/* A deferral sits beside the last run so its result stays visible. */}
+            {automation.deferral ? (
+              <AutomationDeferralStatus deferral={automation.deferral} />
             ) : null}
-            {/* Auto-merge checks say why a PR was left open (e.g. no CI checks). */}
-            {kind === "auto_merge" && lastRun.status !== "succeeded" && lastRun.outcomeReason ? (
-              <span
-                data-slot="auto-merge-reason"
-                className="max-w-xs truncate text-xs text-muted-foreground"
-                title={lastRun.outcomeReason}
-              >
-                {lastRun.outcomeReason}
-              </span>
+            {lastRun ? (
+              <LastRunSummary run={lastRun} kind={kind} title={title} onOpenRun={onOpenRun} />
             ) : null}
           </div>
         ) : (

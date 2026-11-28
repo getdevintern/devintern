@@ -127,8 +127,8 @@ export interface AutomationScheduleStatus extends AgentSelection {
   /** Durable next occurrence (epoch ms); absent before first registration. */
   nextDueAt?: number;
   /**
-   * Latest usage-limit deferral not yet followed by a started run: the
-   * reset time and the harness that hit the limit, when known.
+   * Usage-limit deferral not yet followed by a started run, while its reset
+   * time is still ahead: the reset time and the harness, when known.
    */
   deferral?: { until: number; harness?: string };
   /** Estimation sweeps: tracker query selecting the tickets to estimate. */
@@ -393,7 +393,7 @@ export class AutomationAcquirer implements Acquirer {
           skipNow,
         );
         const deferral = { untilMs: blockedUntil, harness: automation.harness };
-        if (this.store.skipDue(stateId, skipNow, next.nextDueAt, deferral)) {
+        if (this.store.skipDue(stateId, skipNow, next.nextDueAt, deferral, next.catchUp)) {
           console.warn(
             next.catchUp
               ? `⏳ [${kind}:${automation.id}] occurrence deferred: ` +
@@ -614,7 +614,16 @@ export class AutomationAcquirer implements Acquirer {
     if (state.leaseOwner && (state.leaseExpiresAt ?? 0) > now) {
       return { ok: false, reason: `automation "${automationId}" is already running` };
     }
-    if (!this.store.acquireManual(stateId, this.owner, this.now(), leaseMs)) {
+    const acquireNow = this.now();
+    if (
+      !this.store.acquireManual(
+        stateId,
+        this.owner,
+        acquireNow,
+        leaseMs,
+        nextAutomationDue(automation, acquireNow),
+      )
+    ) {
       return {
         ok: false,
         reason: `could not acquire the run slot for "${automationId}"; try again`,
@@ -698,6 +707,7 @@ export class AutomationAcquirer implements Acquirer {
 
   /** Dashboard catalog: every configured schedule with its durable next-due state. */
   listSchedules(): AutomationScheduleStatus[] {
+    const now = this.now();
     return this.options.automations.map((automation) => {
       const state = this.store.get(this.stateId(automation));
       const activity = this.activityOf(automation);
@@ -712,7 +722,9 @@ export class AutomationAcquirer implements Acquirer {
         openPr: automation.openPr === true,
         ...pickAgentSelection(automation),
         nextDueAt: state?.nextDueAt,
-        ...(state?.deferredUntil !== undefined
+        // A deferral is only news until its limit resets: past that the row
+        // keeps it (only a started run clears it), but it is no longer true.
+        ...(state?.deferredUntil !== undefined && state.deferredUntil > now
           ? {
               deferral: {
                 until: state.deferredUntil,

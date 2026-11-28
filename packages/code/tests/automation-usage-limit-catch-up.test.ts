@@ -151,6 +151,10 @@ describe("usage-limit catch-up", () => {
       await acquirer.tick();
       expect(nextDue(path, automation.id)?.nextDueAt).toBe(nextAutomationDue(automation, due));
       expect(warn.mock.calls.flat().join("\n")).toContain("occurrence skipped");
+      expect(acquirer.listSchedules()[0]?.deferral?.until).toBe(blockedUntil.value as number);
+      // Past the reset the deferral is stale and no longer shown.
+      now.value = (blockedUntil.value as number) + 1;
+      expect(acquirer.listSchedules()[0]?.deferral).toBeUndefined();
     } finally {
       warn.mockRestore();
       await acquirer.stop();
@@ -190,6 +194,156 @@ describe("usage-limit catch-up", () => {
     }
   });
 
+  test("a manual run after the reset replaces the queued catch-up", async () => {
+    const path = dbPath();
+    const automation = hourly({ interval: "4h", intervalMs: 4 * HOUR });
+    const now = { value: 0 };
+    const blockedUntil = { value: (4 * HOUR) as number | null };
+    const { acquirer, spawned } = build({ automation, path, now, blockedUntil });
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await acquirer.start();
+      now.value = 4 * HOUR;
+      await acquirer.tick();
+      const catchUpAt = 4 * HOUR + catchUpJitterMs(automation.id);
+      expect(nextDue(path, automation.id)?.nextDueAt).toBe(catchUpAt);
+
+      // Run now before the catch-up fires: it stands in for the catch-up.
+      blockedUntil.value = null;
+      now.value = 4 * HOUR + 1;
+      expect(await acquirer.triggerManual(automation.id)).toEqual({ ok: true });
+      await settle();
+      expect(spawned()).toBe(1);
+      const state = nextDue(path, automation.id);
+      expect(state?.deferredUntil).toBeUndefined();
+      expect(state?.nextDueAt).toBe(nextAutomationDue(automation, 4 * HOUR + 1));
+
+      now.value = catchUpAt;
+      await acquirer.tick();
+      await settle();
+      expect(spawned()).toBe(1);
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+      await acquirer.stop();
+    }
+  });
+
+  test("a manual run without a pending deferral keeps the schedule cursor", async () => {
+    const path = dbPath();
+    const automation = hourly();
+    const now = { value: 0 };
+    const { acquirer } = build({ automation, path, now, blockedUntil: { value: null } });
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await acquirer.start();
+      now.value = 0.25 * HOUR;
+      expect(await acquirer.triggerManual(automation.id)).toEqual({ ok: true });
+      await settle();
+      expect(nextDue(path, automation.id)?.nextDueAt).toBe(HOUR);
+    } finally {
+      log.mockRestore();
+      await acquirer.stop();
+    }
+  });
+
+  test("a manual run after a skip-policy deferral keeps the scheduled cursor", async () => {
+    const path = dbPath();
+    const automation = hourly({ onUsageLimit: "skip" });
+    const now = { value: 0 };
+    const blockedUntil = { value: (1.5 * HOUR) as number | null };
+    const { acquirer } = build({ automation, path, now, blockedUntil });
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await acquirer.start();
+      now.value = HOUR;
+      await acquirer.tick();
+      expect(nextDue(path, automation.id)?.nextDueAt).toBe(2 * HOUR);
+
+      blockedUntil.value = null;
+      now.value = 1.75 * HOUR;
+      expect(await acquirer.triggerManual(automation.id)).toEqual({ ok: true });
+      await settle();
+      const state = nextDue(path, automation.id);
+      expect(state?.deferredUntil).toBeUndefined();
+      expect(state?.nextDueAt).toBe(2 * HOUR);
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+      await acquirer.stop();
+    }
+  });
+
+  test("a manual run after a no-catch-up deferral keeps the scheduled cursor", async () => {
+    const path = dbPath();
+    const automation = hourly();
+    const now = { value: 0 };
+    // The reset lands after the next occurrence, so no catch-up is queued.
+    const blockedUntil = { value: (2.5 * HOUR) as number | null };
+    const { acquirer } = build({ automation, path, now, blockedUntil });
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await acquirer.start();
+      now.value = HOUR;
+      await acquirer.tick();
+      expect(nextDue(path, automation.id)?.nextDueAt).toBe(2 * HOUR);
+
+      blockedUntil.value = null;
+      now.value = 1.75 * HOUR;
+      expect(await acquirer.triggerManual(automation.id)).toEqual({ ok: true });
+      await settle();
+      expect(nextDue(path, automation.id)?.nextDueAt).toBe(2 * HOUR);
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+      await acquirer.stop();
+    }
+  });
+
+  test("a manual run after a stale manual-run deferral keeps the scheduled cursor", async () => {
+    const path = dbPath();
+    const automation = hourly();
+    const now = { value: 0 };
+    let deferNext = true;
+    const { acquirer, spawned } = build({
+      automation,
+      path,
+      now,
+      blockedUntil: { value: null },
+      run: () => {
+        const deferred = deferNext;
+        deferNext = false;
+        return {
+          completion: Promise.resolve(!deferred),
+          terminate: () => {},
+          deferral: () => (deferred ? { untilMs: 0.5 * HOUR, harness: "codex" } : undefined),
+        };
+      },
+    });
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await acquirer.start();
+      now.value = 60_000;
+      expect(await acquirer.triggerManual(automation.id)).toEqual({ ok: true });
+      await settle();
+      expect(nextDue(path, automation.id)?.deferredUntil).toBe(0.5 * HOUR);
+
+      now.value = 0.75 * HOUR;
+      expect(await acquirer.triggerManual(automation.id)).toEqual({ ok: true });
+      await settle();
+      expect(spawned()).toBe(2);
+      expect(nextDue(path, automation.id)?.nextDueAt).toBe(HOUR);
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+      await acquirer.stop();
+    }
+  });
+
   test('on_usage_limit = "skip" keeps the next scheduled occurrence', async () => {
     const path = dbPath();
     const automation = onboarding({ onUsageLimit: "skip" });
@@ -204,6 +358,10 @@ describe("usage-limit catch-up", () => {
       await acquirer.tick();
       expect(nextDue(path, automation.id)?.nextDueAt).toBe(nextAutomationDue(automation, due));
       expect(warn.mock.calls.flat().join("\n")).toContain("occurrence skipped");
+      expect(acquirer.listSchedules()[0]?.deferral?.until).toBe(blockedUntil.value as number);
+      // Past the reset the deferral is stale and no longer shown.
+      now.value = (blockedUntil.value as number) + 1;
+      expect(acquirer.listSchedules()[0]?.deferral).toBeUndefined();
     } finally {
       warn.mockRestore();
       await acquirer.stop();
@@ -322,6 +480,10 @@ describe("usage-limit catch-up", () => {
       expect(output).not.toContain("did not complete cleanly");
       expect(nextDue(path, automation.id)?.nextDueAt).toBe(HOUR);
       expect(acquirer.listSchedules()[0]?.deferral?.until).toBe(0.5 * HOUR);
+      // The run is not re-queued, so nothing clears the row: once the reset
+      // passes the deferral stops showing.
+      now.value = 0.5 * HOUR;
+      expect(acquirer.listSchedules()[0]?.deferral).toBeUndefined();
     } finally {
       warn.mockRestore();
       log.mockRestore();

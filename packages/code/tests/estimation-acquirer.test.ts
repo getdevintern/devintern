@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -277,5 +277,77 @@ describe("EstimationAcquirer", () => {
     await acquirer.tick();
     expect(runs).toBe(1);
     await acquirer.stop();
+  });
+  // A reset at 16m comes well before the next 30m occurrence, so an
+  // automation would catch up near 17-21m; a sweep must not.
+  test("a usage-limit gate skips to the next occurrence instead of catching up", async () => {
+    const dbPath = newDb();
+    let now = 0;
+    let runs = 0;
+    let blockedUntil: number | null = 960_000;
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const acquirer = new EstimationAcquirer({
+      estimations: [intervalEntry("groom")],
+      dbPath,
+      now: () => now,
+      ...noopTimers(),
+      harnessBlockedUntil: () => blockedUntil,
+      resolveContext: async () => ({ cwd: "/tmp", env: {}, release() {} }),
+      spawnRun: () => {
+        runs += 1;
+        return { completion: Promise.resolve(true), terminate() {} };
+      },
+    });
+    try {
+      await acquirer.start();
+      now = 900_000;
+      await acquirer.tick();
+      expect(runs).toBe(0);
+      const store = new AutomationStateStore(dbPath);
+      expect(store.get("estimation:groom")?.nextDueAt).toBe(1_800_000);
+      store.close();
+      expect(warn.mock.calls.flat().join("\n")).toContain("occurrence skipped");
+
+      blockedUntil = null;
+      now = 1_500_000;
+      await acquirer.tick();
+      expect(runs).toBe(0);
+    } finally {
+      warn.mockRestore();
+      await acquirer.stop();
+    }
+  });
+
+  test("a sweep that stops on a usage limit keeps the next scheduled occurrence", async () => {
+    const dbPath = newDb();
+    let now = 0;
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const acquirer = new EstimationAcquirer({
+      estimations: [intervalEntry("groom")],
+      dbPath,
+      now: () => now,
+      ...noopTimers(),
+      harnessBlockedUntil: () => null,
+      resolveContext: async () => ({ cwd: "/tmp", env: {}, release() {} }),
+      spawnRun: () => ({
+        completion: Promise.resolve(false),
+        terminate() {},
+        deferral: () => ({ untilMs: 960_000 }),
+      }),
+    });
+    try {
+      await acquirer.start();
+      now = 900_000;
+      await acquirer.tick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const store = new AutomationStateStore(dbPath);
+      const state = store.get("estimation:groom");
+      store.close();
+      expect(state?.nextDueAt).toBe(1_800_000);
+      expect(state?.deferredUntil).toBe(960_000);
+    } finally {
+      warn.mockRestore();
+      await acquirer.stop();
+    }
   });
 });

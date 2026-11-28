@@ -38,6 +38,7 @@ export interface EstimationAcquirerOptions {
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
   setInterval?: (callback: () => void, ms: number) => ReturnType<typeof setInterval>;
   clearInterval?: (timer: ReturnType<typeof setInterval>) => void;
+  harnessBlockedUntil?: (estimation: EstimationConfig) => number | null;
 }
 
 /** CLI arguments for one due estimation sweep (`--estimate` stays the engine). */
@@ -121,6 +122,9 @@ export class EstimationAcquirer extends AutomationAcquirer {
       clearTimer: options.clearTimer,
       setInterval: options.setInterval,
       clearInterval: options.clearInterval,
+      harnessBlockedUntil: options.harnessBlockedUntil
+        ? (schedule) => options.harnessBlockedUntil!(schedule as ScheduledEstimation)
+        : undefined,
     });
     this.estimations = options.estimations;
   }
@@ -157,7 +161,11 @@ export class EstimationAcquirer extends AutomationAcquirer {
 
 type ScheduledEstimation = AutomationConfig & EstimationConfig;
 
-/** Adapt estimation bodies to the shared durable scheduler's config shape. */
+/**
+ * Adapt estimation bodies to the shared durable scheduler's config shape.
+ * Sweeps have no `on_usage_limit` key: a usage limit always waits for the
+ * next scheduled occurrence instead of queueing a catch-up sweep.
+ */
 function estimationSchedules(estimations: EstimationConfig[]): ScheduledEstimation[] {
-  return estimations.map((item) => ({ ...item, openPr: false, prompt: "" }));
+  return estimations.map((item) => ({ ...item, openPr: false, prompt: "", onUsageLimit: "skip" }));
 }

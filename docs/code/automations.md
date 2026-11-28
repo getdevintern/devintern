@@ -48,7 +48,7 @@ under ~/Documents/Tweets/."""
 | `repo`             | Target repository. Required when the workspace has more than one repo.                            |
 | `open_pr`          | Open a pull request for the result. Default `false`.                                              |
 | `allow_no_changes` | Treat a run that changes nothing as a success. Default `false`.                                   |
-| `on_usage_limit`   | `catch_up` (default) runs an occurrence missed on a usage limit once, a few minutes after the limit resets. `skip` waits for the next scheduled occurrence. |
+| `on_usage_limit`   | `catch_up` (default) runs an occurrence missed on a usage limit once, a few minutes after the limit resets, restarting the prompt from the beginning. `skip` waits for the next scheduled occurrence. |
 | `harness`, `model`, `effort` | Agent for this schedule. See [Choosing the agent per schedule](#choosing-the-agent-per-schedule). |
 
 A worker with at least one automation runs even without a task query. Edits to `workspace.toml` apply without a restart; an invalid entry is logged and the last valid config keeps running.
@@ -142,7 +142,7 @@ Changes apply to the next occurrence; a run in progress keeps its agent.
 
 - Missed occurrences (for example while the worker was down) collapse into at most one run after startup.
 - If the previous occurrence of the same automation is still running, or another task holds the repository, the occurrence is skipped, not queued.
-- When every agent harness is usage-limited, or a run stops on a usage limit, the occurrence is deferred: it runs once a few minutes after the limit resets, unless the next scheduled occurrence comes first. Occurrences missed during one limit run only once. Set `on_usage_limit = "skip"` to wait for the next scheduled occurrence instead. The dashboard shows such a job as **Deferred until** the reset time.
+- When every agent harness is usage-limited, or a run stops on a usage limit, the occurrence is deferred: it runs once a few minutes after the limit resets, unless the next scheduled occurrence comes first. Occurrences missed during one limit run only once. Set `on_usage_limit = "skip"` to wait for the next scheduled occurrence instead. A catch-up runs the whole prompt again from the start, so work a stopped run already did (files written outside the repository, commits pushed, a PR opened, a message posted) can happen twice; use `skip` for jobs that are not safe to repeat. The dashboard shows such a job as **Deferred until** the reset time, next to its last run. **Run now** on a deferred job replaces its pending catch-up.
 - An entry with `harness` set is deferred the same way while that agent is usage-limited. A pinned run that hits a limit records the agent's reset time, so later occurrences and dashboard **Run now** wait for it instead of starting into the same limit. The pinned run is not retried on another agent. A **Run now** run that stops on a limit is not re-queued.
 - Changing an entry's schedule resets it: the next run is the next scheduled time.
 - Occurrences skip the clarity (feasibility) check.

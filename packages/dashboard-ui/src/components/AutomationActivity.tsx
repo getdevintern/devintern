@@ -48,7 +48,7 @@ export function AutomationActivityStatus({
 
 /**
  * Pill for a job a harness usage limit deferred: "Deferred until Nov 28, 2:05 PM".
- * Shown until the next run starts, in place of a failure.
+ * Shown until the limit resets or the next run starts, beside the last run.
  */
 export function AutomationDeferralStatus({
   deferral,
@@ -65,20 +65,4 @@ export function AutomationDeferralStatus({
       <StatusPill tone="attention">Deferred until {until}</StatusPill>
     </span>
   );
-}
-
-/**
- * What a job is doing now, if its last run cannot show it: an in-flight
- * occurrence first, else a usage-limit deferral.
- */
-export function AutomationNowStatus({ automation }: { automation: AutomationSchedule }) {
-  const activity = visibleActivity(automation);
-  if (activity) return <AutomationActivityStatus activity={activity} />;
-  if (automation.deferral) return <AutomationDeferralStatus deferral={automation.deferral} />;
-  return null;
-}
-
-/** Whether {@linkcode AutomationNowStatus} renders anything for this job. */
-export function hasNowStatus(automation: AutomationSchedule): boolean {
-  return visibleActivity(automation) !== undefined || automation.deferral !== undefined;
 }
