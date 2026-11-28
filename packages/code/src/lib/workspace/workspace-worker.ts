@@ -24,6 +24,7 @@ import { startNotificationMaintenance } from "../notifications/maintenance";
 import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
+import { settleDeferredRunsOnClosedPrs } from "../state/deferred-pr-runs";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { WorkerState } from "../state/worker-state";
 import { createTaskActionedGate } from "../task/actioned-state";
@@ -411,6 +412,9 @@ export async function recoverOrphanedWorkspaceRuns(options: {
         return true;
       },
     });
+
+    // Deferred PR-driven runs whose PR closed meanwhile never retry.
+    settleDeferredRunsOnClosedPrs(runStore);
 
     // Dashboard-scheduled retries claimed by the previous worker: settle the
     // rows so the dashboard's per-task guard unblocks (the operator can
