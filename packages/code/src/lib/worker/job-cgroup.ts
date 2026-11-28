@@ -66,21 +66,25 @@ export function formatJobMemoryLimit(bytes: number): string {
 
 /**
  * The per-job cap in percent of host RAM: the configured value, or by default
- * an equal share of the service's `MemoryMax` budget per concurrent job.
+ * half of the service's `MemoryMax` budget, kept below `MemoryHigh`.
+ *
+ * Half the budget means one runaway can never starve the other jobs of more
+ * than half. Staying below `MemoryHigh` matters more: `MemoryHigh` throttles
+ * instead of killing, so a runaway that reached it would stall every job in
+ * the service at high memory pressure instead of being OOM-killed in its own
+ * cgroup. The default does not divide by `max_concurrency`: the service budget
+ * already bounds the total, and a fair share fails ordinary heavy jobs.
  *
  * @param execution - `[workspace.execution]` settings.
  * @returns A percentage; 0 means "no per-job cap".
  */
 export function jobMemoryPercent(execution: {
-  maxConcurrency: number;
-  memory: { maxPercent: number };
+  memory: { maxPercent: number; highPercent: number };
   jobMemoryMaxPercent?: number;
 }): number {
   if (execution.jobMemoryMaxPercent !== undefined) return execution.jobMemoryMaxPercent;
-  return Math.max(
-    1,
-    Math.floor(execution.memory.maxPercent / Math.max(1, execution.maxConcurrency)),
-  );
+  const { maxPercent, highPercent } = execution.memory;
+  return Math.max(1, Math.min(Math.floor(maxPercent / 2), highPercent - 1));
 }
 
 /** This process's cgroup v2 path (relative to the mount), if any. */
@@ -158,7 +162,7 @@ export function enableJobCgroups(
  * @param execution - Workspace execution settings (defaults when no workspace).
  */
 export function startJobCgroups(
-  execution: Pick<WorkspaceExecutionSettings, "maxConcurrency" | "memory" | "jobMemoryMaxPercent">,
+  execution: Pick<WorkspaceExecutionSettings, "memory" | "jobMemoryMaxPercent">,
 ): void {
   console.log(
     `   ${enableJobCgroups({ percent: jobMemoryPercent(execution), totalMemoryBytes: hostTotalMemoryBytes() })}`,

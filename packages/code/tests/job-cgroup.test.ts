@@ -73,15 +73,16 @@ afterEach(() => {
 });
 
 describe("jobMemoryPercent", () => {
-  test("defaults to an equal share of the service budget per concurrent job", () => {
-    expect(jobMemoryPercent({ maxConcurrency: 4, memory: { maxPercent: 65 } })).toBe(16);
-    expect(jobMemoryPercent({ maxConcurrency: 1, memory: { maxPercent: 65 } })).toBe(65);
+  test("defaults to half the service budget, below MemoryHigh, at any concurrency", () => {
+    expect(jobMemoryPercent({ memory: { maxPercent: 65, highPercent: 50 } })).toBe(32);
+    // A custom MemoryHigh below half the budget still keeps the job under it.
+    expect(jobMemoryPercent({ memory: { maxPercent: 90, highPercent: 30 } })).toBe(29);
   });
 
   test("an explicit value wins, including 0 (off)", () => {
-    const base = { maxConcurrency: 4, memory: { maxPercent: 65 } };
-    expect(jobMemoryPercent({ ...base, jobMemoryMaxPercent: 40 })).toBe(40);
-    expect(jobMemoryPercent({ ...base, jobMemoryMaxPercent: 0 })).toBe(0);
+    const memory = { maxPercent: 65, highPercent: 50 };
+    expect(jobMemoryPercent({ memory, jobMemoryMaxPercent: 40 })).toBe(40);
+    expect(jobMemoryPercent({ memory, jobMemoryMaxPercent: 0 })).toBe(0);
   });
 });
 

@@ -31,8 +31,8 @@ export interface WorkspaceExecutionSettings {
   memory: MemoryBudgetPercentages;
   /**
    * Per-job memory cap in percent of host RAM (`job_memory_max_percent`);
-   * `0` turns it off. Unset defaults to an equal share of `memory.maxPercent`
-   * per concurrent job (see `worker/job-cgroup.ts`).
+   * `0` turns it off. Unset defaults to half of `memory.maxPercent`, kept
+   * below `memory.highPercent` (see `worker/job-cgroup.ts`).
    */
   jobMemoryMaxPercent?: number;
 }

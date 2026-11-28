@@ -447,7 +447,7 @@ export async function startWebhookServer(
 
   // Per-job memory cgroups for the CI-fix / conflict / auto-merge jobs this
   // server spawns (one at a time) when it runs as the installed service.
-  startJobCgroups({ ...webhookExecutionMemory(), maxConcurrency: 1 });
+  startJobCgroups(webhookExecutionMemory());
 
   // Shared failover controller: same chain, windows, and failback timers the
   // fleet worker uses. Persist through the queue DB so a restart resumes on

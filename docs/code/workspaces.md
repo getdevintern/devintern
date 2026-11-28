@@ -179,7 +179,7 @@ memory_max_percent = 65
 memory_swap_max_percent = 15
 ```
 
-The values are percentages of host RAM, resolved when the systemd unit is written. They cover the worker and every process its runs start in the worker's own cgroup. A run with `AGENT_SANDBOX=docker` is the exception: the agent runs in a guest microVM outside that cgroup, so the hard cap does not bound it, and only the host-level admission check reacts when the host runs low. Changing the percentages takes effect after `devintern worker service install` rewrites and restarts the service. `job_memory_max_percent` caps each job inside that budget (default: `memory_max_percent` divided by `max_concurrency`, `0` turns it off). See [Running as a service](./worker.md#memory-limits) for the behavior at the cap. macOS launchd agents have no equivalent limit.
+The values are percentages of host RAM, resolved when the systemd unit is written. They cover the worker and every process its runs start in the worker's own cgroup. A run with `AGENT_SANDBOX=docker` is the exception: the agent runs in a guest microVM outside that cgroup, so the hard cap does not bound it, and only the host-level admission check reacts when the host runs low. Changing the percentages takes effect after `devintern worker service install` rewrites and restarts the service. `job_memory_max_percent` caps each job inside that budget (default: half of `memory_max_percent`, below `memory_high_percent`; `0` turns it off). See [Running as a service](./worker.md#memory-limits) for the behavior at the cap. macOS launchd agents have no equivalent limit.
 
 ## Environment
 
@@ -212,4 +212,4 @@ Most settings apply on reload, including repos, routing rules, queries, team `re
 
 A reload that changes a restart-only setting is rejected as a whole.
 
-The `memory_high_percent`, `memory_max_percent`, and `memory_swap_max_percent` settings in `[workspace.execution]` are accepted on reload but change nothing yet: only `devintern worker service install` rewrites the systemd unit with the new values (see [Memory limits](./worker.md#memory-limits)). The per-job cap (`job_memory_max_percent`, and its default share of `max_concurrency`) is resolved when the worker starts, so restart the worker to change it.
+The `memory_high_percent`, `memory_max_percent`, and `memory_swap_max_percent` settings in `[workspace.execution]` are accepted on reload but change nothing yet: only `devintern worker service install` rewrites the systemd unit with the new values (see [Memory limits](./worker.md#memory-limits)). The per-job cap (`job_memory_max_percent`) is resolved when the worker starts, so restart the worker to change it.
