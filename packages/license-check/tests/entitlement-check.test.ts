@@ -3,9 +3,11 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  LicenseCheckError,
   WORKER_PILOT_DOCS_URL,
   activateWorkerTrial,
   checkLicense,
+  requireLicense,
   resolveApiBase,
   setReleaseBuildForTests,
   shouldSkipLicenseCheck,
@@ -435,6 +437,60 @@ describe("worker licence messages", () => {
     expect(result.message).toContain("https://devintern.com/pricing");
     expect(result.message).toEndWith(WORKER_PILOT_DOCS_URL);
     expect(result.message).not.toContain("Sign in to start");
+  });
+
+  test("rejected session (HTTP 401): asks to sign in again, does not claim the Pilot ended", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ reason: "invalid token" }), { status: 401 })) as typeof fetch;
+    const result = await checkLicense({ ...worker, supabaseConfig: freshSupabaseConfig() });
+
+    expect(result).toMatchObject({ valid: false, source: "none" });
+    expect(result.message).toStartWith(
+      "The license server rejected your session (HTTP 401: invalid token). Sign in again: `devintern worker login`.",
+    );
+    expect(result.message).toContain("Or set LICENSE_KEY in the workspace .env");
+    expect(result.message).toEndWith(WORKER_PILOT_DOCS_URL);
+    expect(result.message).not.toContain("Pilot is over");
+  });
+
+  test("denial with an unrecognised reason: shows the reason, does not claim the Pilot ended", async () => {
+    globalThis.fetch = (async () =>
+      Response.json({ entitled: false, reason: "account suspended" })) as typeof fetch;
+    const result = await checkLicense({ ...worker, supabaseConfig: freshSupabaseConfig() });
+
+    expect(result).toMatchObject({ valid: false, source: "none" });
+    expect(result.message).toStartWith(
+      "This account has no automation license, and the license server did not grant a Worker Pilot (account suspended).",
+    );
+    expect(result.message).toContain("Set LICENSE_KEY in the workspace .env");
+    expect(result.message).not.toContain("Pilot is over");
+  });
+
+  test("signed-in denials are marked retryable, on the result and the thrown error", async () => {
+    globalThis.fetch = (async () =>
+      Response.json({ entitled: false, reason: "requires an automation license" })) as typeof fetch;
+    const denied = await checkLicense({ ...worker, supabaseConfig: freshSupabaseConfig() });
+    expect(denied.retryable).toBe(true);
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let thrown: unknown;
+    try {
+      requireLicense(denied);
+    } catch (error) {
+      thrown = error;
+    }
+    errorSpy.mockRestore();
+    expect(thrown).toBeInstanceOf(LicenseCheckError);
+    expect((thrown as LicenseCheckError).retryable).toBe(true);
+
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ reason: "user not signed in" }), { status: 401 })) as typeof fetch;
+    const rejected = await checkLicense({ ...worker, supabaseConfig: freshSupabaseConfig() });
+    expect(rejected.retryable).toBe(true);
+
+    // Never signed in stays permanent: not retryable.
+    authenticated = false;
+    const signedOut = await checkLicense({ ...worker, supabaseConfig: freshSupabaseConfig() });
+    expect(signedOut.retryable).toBeUndefined();
   });
 
   test("invalid LICENSE_KEY: says so and offers the Pilot sign-in instead", async () => {

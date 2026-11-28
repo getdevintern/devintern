@@ -697,7 +697,7 @@ async function exitOnStartupError(error: unknown, loginCommand: string): Promise
   await flushAnalytics();
   if (error instanceof LicenseCheckError) {
     // requireLicense already printed the reason.
-    if (isPermanentLicenseDenial({ valid: false, message })) {
+    if (isPermanentLicenseDenial({ valid: false, message, retryable: error.retryable })) {
       exitWorkerStartupPermanently(licenseFixHint({}, loginCommand));
     }
     process.exit(1);

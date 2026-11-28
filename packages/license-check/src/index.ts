@@ -61,8 +61,8 @@ export function workerPilotSignInMessage(loginCommand: string = "devintern worke
 
 /**
  * A signed-in account with no automation license and no Worker Pilot left.
- * Worded so {@link LicenseCheckResult} callers keep treating it as before
- * (a retryable denial for the worker service).
+ * The result is marked `retryable`, so the worker service keeps treating it
+ * as before (a retryable denial).
  */
 function workerPilotOverMessage(): string {
   return (
@@ -70,6 +70,36 @@ function workerPilotOverMessage(): string {
     "Set LICENSE_KEY in the workspace .env to a Supporter, Team, or Business license key from " +
     `https://devintern.com/account (buy one at https://devintern.com/pricing). See ${WORKER_PILOT_DOCS_URL}`
   );
+}
+
+/**
+ * A signed-in session the license server refused (HTTP 401): an expired or
+ * revoked token. Signing in again fixes it, so this does not claim the Pilot
+ * ended. The result is marked `retryable`, so the worker service keeps
+ * retrying, as before, whatever the quoted reason says.
+ */
+function sessionRejectedMessage(loginCommand: string, reason: string | undefined): string {
+  return (
+    `The license server rejected your session${reason ? ` (${reason})` : ""}. ` +
+    `Sign in again: \`${loginCommand}\`. ` +
+    "Or set LICENSE_KEY in the workspace .env to a Supporter, Team, or Business license key. " +
+    `See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
+/** A signed-in account with no automation license and no Pilot granted, for a reason we can't map. */
+function noPilotGrantedMessage(reason: string | undefined): string {
+  return (
+    `This account has no automation license, and the license server did not grant a Worker Pilot${reason ? ` (${reason})` : ""}. ` +
+    "Set LICENSE_KEY in the workspace .env to a Supporter, Team, or Business license key from " +
+    `https://devintern.com/account (buy one at https://devintern.com/pricing). See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
+/** Whether a server `reason` says the Worker Pilot ended or was already used. */
+function isPilotOverReason(reason: string | undefined): boolean {
+  if (!reason) return false;
+  return /\b(trial|pilot)\b/i.test(reason) && /\b(ended|expired|over|used)\b/i.test(reason);
 }
 
 /** How long a cached last-known-good entitlement is honored when the license server is unreachable. */
@@ -98,6 +128,13 @@ export interface LicenseCheckResult {
    * on a non-release build. `source` stays `license-key` for older callers.
    */
   skipped?: boolean;
+  /**
+   * True when a signed-in account was denied (no automation license, no
+   * Pilot granted, or the session was refused) and a later attempt can pass.
+   * Retry decisions read this flag, never the message, because the message
+   * can quote the server's own reason.
+   */
+  retryable?: boolean;
 }
 
 export interface LicenseCheckOptions {
@@ -258,7 +295,7 @@ const ENTITLEMENT_TOTAL_ATTEMPTS = ENTITLEMENT_MAX_RETRIES + 1;
 
 type EntitlementCheckResult =
   | { status: "entitled"; response: EntitlementResponse }
-  | { status: "not_entitled"; reason?: string }
+  | { status: "not_entitled"; reason?: string; sessionRejected?: boolean }
   | { status: "error"; error: string };
 
 function formatEntitlementHttpError(status: number, bodyText: string): string {
@@ -365,7 +402,11 @@ async function checkEntitlementViaWebsite(
     // 401 is a definitive denial of this token, not an infrastructure error.
     if (response.status === 401) {
       const bodyText = await response.text();
-      return { status: "not_entitled", reason: formatEntitlementHttpError(401, bodyText) };
+      return {
+        status: "not_entitled",
+        reason: formatEntitlementHttpError(401, bodyText),
+        sessionRejected: true,
+      };
     }
 
     const bodyText = await response.text();
@@ -514,6 +555,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
   }
 
   let entitlementCheckError: string | undefined;
+  let denial: EntitlementDenial | undefined;
 
   if (user?.accessToken) {
     const entitlementResult = await checkEntitlementViaWebsite(
@@ -556,6 +598,10 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     if (entitlementResult.status === "not_entitled") {
       // Definitive answer from the server: no entitlement (or revoked).
       clearCachedEntitlement(supabaseConfig);
+      denial = {
+        reason: entitlementResult.reason,
+        sessionRejected: entitlementResult.sessionRejected === true,
+      };
     }
 
     if (entitlementResult.status === "error") {
@@ -570,7 +616,14 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     }
   }
 
-  return noLicenseResult(options, user !== null, entitlementCheckError);
+  return noLicenseResult(options, user !== null, entitlementCheckError, denial);
+}
+
+/** The server's definitive "no" for a signed-in user, kept for the denial message. */
+interface EntitlementDenial {
+  reason?: string;
+  /** HTTP 401: the session token itself was refused. */
+  sessionRejected: boolean;
 }
 
 /**
@@ -583,6 +636,7 @@ function noLicenseResult(
   options: LicenseCheckOptions,
   signedIn: boolean,
   entitlementCheckError: string | undefined,
+  denial?: EntitlementDenial,
 ): LicenseCheckResult {
   const { requireAutomation = false, allowTrial = false } = options;
   const messages: string[] = [];
@@ -597,14 +651,19 @@ function noLicenseResult(
         signInRequired: true,
       };
     }
-    return {
-      valid: false,
-      source: "none",
-      message: entitlementCheckError
-        ? `License entitlement check failed: ${entitlementCheckError}. ` +
-          `Set LICENSE_KEY in the workspace .env to skip the account check. See ${WORKER_PILOT_DOCS_URL}`
-        : workerPilotOverMessage(),
-    };
+    let message: string;
+    if (entitlementCheckError) {
+      message =
+        `License entitlement check failed: ${entitlementCheckError}. ` +
+        `Set LICENSE_KEY in the workspace .env to skip the account check. See ${WORKER_PILOT_DOCS_URL}`;
+    } else if (denial?.sessionRejected) {
+      message = sessionRejectedMessage(loginCommand, denial.reason);
+    } else if (isPilotOverReason(denial?.reason)) {
+      message = workerPilotOverMessage();
+    } else {
+      message = noPilotGrantedMessage(denial?.reason);
+    }
+    return { valid: false, source: "none", message, retryable: true };
   }
   if (requireAutomation) {
     messages.push(
@@ -647,9 +706,13 @@ function noLicenseResult(
  * catch this error and exit with code 1.
  */
 export class LicenseCheckError extends Error {
-  constructor(message: string) {
+  /** Copied from {@link LicenseCheckResult.retryable}. */
+  readonly retryable: boolean;
+
+  constructor(message: string, options: { retryable?: boolean } = {}) {
     super(message);
     this.name = "LicenseCheckError";
+    this.retryable = options.retryable === true;
   }
 }
 
@@ -733,7 +796,7 @@ export function requireLicense(result: LicenseCheckResult): void {
   if (!result.valid) {
     console.error("\n❌ License check failed");
     console.error(`   ${result.message}\n`);
-    throw new LicenseCheckError(result.message);
+    throw new LicenseCheckError(result.message, { retryable: result.retryable });
   }
 
   if (result.source === "grace") {
