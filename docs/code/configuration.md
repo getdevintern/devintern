@@ -162,6 +162,8 @@ Run `devintern doctor` first: it checks the runtime, agent CLI, tracker credenti
 - **"Not in a git repository"**: run `git init`, or pass `--no-git`.
 - **`<Harness> CLI not found`**: install the agent CLI and put it on your `PATH`, or set `AGENT_CLI_PATH` / `--agent-path`.
 - **"Unknown agent harness"**: check how `AGENT_HARNESS` is spelled (kebab-case, for example `claude-code`, `deepseek`, `reasonix`). The error message lists every valid name.
+- **"GitHub rejected GITHUB_TOKEN (HTTP 401)"**: the token is mistyped, expired, or revoked. Create a new one (see [GitHub authentication](#github-authentication)) and replace `GITHUB_TOKEN`. In the setup wizard, **edit values** asks for a new token instead of offering to keep the rejected one.
+- **"GITHUB_TOKEN has no access to `owner/repo`"**: the token works but can't see that repository. Check `GITHUB_REPO`, then add the repository under the fine-grained token's **Repository access** (or use a classic token with the `repo` scope). An organization may need to approve the token first.
 - **Push fails with `403`**: your token needs `Contents: Read and write` (see [GitHub authentication](#github-authentication)).
 
 If something looks like a DevIntern bug rather than a configuration problem, file it with `devintern report` ([Reporting bugs](./reporting-bugs.md)).

@@ -453,6 +453,39 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(rendered).not.toContain(JIRA_ENV.JIRA_API_TOKEN);
   });
 
+  test.each([
+    [
+      "an invalid GitHub token",
+      'GitHub API error (401) checking acme/app: {"message":"Bad credentials"}',
+      "the token is invalid, expired, or revoked",
+      "https://github.com/settings/personal-access-tokens/new",
+    ],
+    [
+      "a GitHub token without the repository",
+      "GitHub token cannot access acme/app (HTTP 404): check GITHUB_REPO and that the token is granted this repository",
+      "GITHUB_TOKEN has no access to acme/app",
+      "add it under Repository access",
+    ],
+  ])("%s gets the wizard's wording in the row and fix-credentials", async (_, error, text, fix) => {
+    const report = await run(
+      { tracker: "github", taskQuery: "label:devintern" },
+      {
+        processEnv: { GITHUB_TOKEN: "ghp_bad", GITHUB_REPO: "acme/app" },
+        probe: async () => {
+          throw new Error(error);
+        },
+      },
+    );
+    expect(report.result).toBe("failure");
+    const auth = report.checks.find((check) => check.name === "tracker-auth");
+    expect(auth?.status).toBe("fail");
+    expect(auth?.message).toContain(text);
+    expect(auth?.hint).toContain(fix);
+    const step = report.nextSteps.find((next) => next.id === "fix-credentials");
+    expect(step?.message).toContain(text);
+    expect(step?.message).toContain(fix);
+  });
+
   test("an invalid query fails with the tracker's message", async () => {
     const report = await run(
       { tracker: "jira", taskQuery: "project = = APP" },

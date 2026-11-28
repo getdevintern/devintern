@@ -28,6 +28,7 @@ import {
   condenseMessage,
   createPromptAttempts,
   defaultProbe,
+  describeGitHubTokenProblem,
   extractExistingTrackerConfig,
   isInteractive,
   parseEnvContent,
@@ -360,7 +361,9 @@ export async function offerGitHubCliToken(options: {
   try {
     await withTimeout(probe("github", env), PROBE_TIMEOUT_MS);
   } catch (error) {
-    const reason = condenseMessage(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    const problem = describeGitHubTokenProblem(message, repoSlug);
+    const reason = problem?.text ?? condenseMessage(message);
     log(`⚠️  Not using the GitHub CLI token: ${reason}`);
     return { status: "rejected", reason };
   }

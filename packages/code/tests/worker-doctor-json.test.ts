@@ -122,7 +122,9 @@ describe("buildWorkerDoctorReport", () => {
       },
       {
         id: "fix-repo-access",
-        message: expect.stringContaining("Contents and Pull requests read and write"),
+        message: expect.stringContaining(
+          "Contents, Pull requests, and Issues set to Read and write",
+        ),
         command: "https://github.com/settings/personal-access-tokens",
         url: "https://github.com/settings/personal-access-tokens",
       },

@@ -15,6 +15,8 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
+import { githubTokenWriteHint } from "@devintern/task-trackers";
+
 /** Ref named by the probe; a dry run never creates or deletes it. */
 export const PUSH_PROBE_REF = "refs/heads/__devintern_push_probe__";
 
@@ -84,9 +86,7 @@ export function gitPushDryRun(
 }
 
 /** Fix named when the token can read a GitHub repository but not push to it. */
-export const PUSH_FIX =
-  "Give GITHUB_TOKEN Contents and Pull requests read and write access to the repository " +
-  "(fine-grained token) or the `repo` scope (classic token); for GitHub Issues also Issues read and write";
+export const PUSH_FIX = githubTokenWriteHint();
 
 /** `permissions` from a `GET /repos/{owner}/{repo}` response, when it has them. */
 export async function readRepoPermissions(

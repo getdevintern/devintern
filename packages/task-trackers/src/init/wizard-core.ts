@@ -19,6 +19,7 @@ import {
   LinearClient,
   TrelloClient,
 } from "../clients/index.ts";
+import { describeGitHubTokenProblem } from "./github-token-guidance.ts";
 
 export const PROBE_TIMEOUT_MS = 10_000;
 export const MAX_EDIT_ATTEMPTS = 3;
@@ -100,6 +101,8 @@ export interface EnvPromptStep {
   label: string;
   /** Token-creation deep link, printed before the prompt. May depend on earlier answers. */
   link?: string | ((values: Record<string, string>) => string);
+  /** Extra lines printed under {@link link}: permissions to grant, alternative links. */
+  linkDetails?: string[] | ((values: Record<string, string>) => string[]);
   /** Press Enter to skip; written commented-out in `.env`. */
   optional?: boolean;
   /** Example value shown in the prompt and template. */
@@ -275,8 +278,13 @@ export async function promptSteps(
   for (const step of steps) {
     const link = stepLink(step, values);
     if (link) {
+      const details =
+        typeof step.linkDetails === "function"
+          ? step.linkDetails(values)
+          : (step.linkDetails ?? []);
       log(
-        `\n🔗 Create your ${step.label.toLowerCase().replace(/\bgithub\b/g, "GitHub")} at:\n   ${link}`,
+        `\n🔗 Create your ${step.label.toLowerCase().replace(/\bgithub\b/g, "GitHub")} at:\n   ${link}` +
+          details.map((line) => `\n   ${line}`).join(""),
       );
     }
     const inlineDefault = step.defaultInBrackets ? step.defaultValue : undefined;
@@ -385,6 +393,45 @@ export async function promptReuseExistingConfig(
   return true;
 }
 
+/** A failed connection check, worded for the wizard. */
+export interface ProbeFailure {
+  /** One-line cause. */
+  text: string;
+  /** What to do about it, when the cause is known. */
+  hint?: string;
+  /** The tracker rejected the credential itself (HTTP 401), so secrets must be replaced. */
+  rejectedSecrets: boolean;
+}
+
+/**
+ * Word a credential probe failure: GitHub token problems get the shared
+ * invalid-token / no-access wording with the fix; any tracker's 401 marks
+ * the secrets as rejected so the edit prompt does not offer to keep them.
+ *
+ * @param values - Entered values (`GITHUB_REPO` names the repository)
+ */
+export function describeProbeFailure(
+  trackerId: string,
+  message: string,
+  values: Record<string, string> = {},
+): ProbeFailure {
+  if (trackerId === "github") {
+    const problem = describeGitHubTokenProblem(message, values.GITHUB_REPO);
+    if (problem) {
+      return {
+        text: problem.text,
+        hint: problem.hint,
+        rejectedSecrets: problem.kind === "invalid",
+      };
+    }
+  }
+  return {
+    text: condenseMessage(message),
+    rejectedSecrets:
+      /\b401\b|unauthori[sz]ed|bad credentials/i.test(message) && !/rate limit/i.test(message),
+  };
+}
+
 /**
  * Validate credentials with retry/edit/skip UX.
  *
@@ -417,9 +464,13 @@ export async function validateConnection(
       log("✅ Connection verified.");
       return true;
     } catch (error) {
-      log(
-        `❌ Connection check failed: ${condenseMessage(error instanceof Error ? error.message : String(error))}`,
+      const failure = describeProbeFailure(
+        trackerId,
+        error instanceof Error ? error.message : String(error),
+        values,
       );
+      log(`❌ Connection check failed: ${failure.text}`);
+      if (failure.hint) log(`   ${failure.hint}`);
       const canEdit = edits < MAX_EDIT_ATTEMPTS;
       const choices = canEdit
         ? "[r]etry / [e]dit values / [s]kip validation"
@@ -432,10 +483,12 @@ export async function validateConnection(
       if (answer === "e" && canEdit) {
         edits++;
         // What was entered (or defaulted) stays the Enter default, so fixing
-        // one value does not mean retyping the rest.
-        const editable = steps.map((step) =>
-          values[step.key] ? { ...step, defaultValue: values[step.key] } : step,
-        );
+        // one value does not mean retyping the rest. A credential the tracker
+        // just rejected is not offered again: it must be replaced.
+        const editable = steps.map((step) => {
+          if (failure.rejectedSecrets && step.secret) return { ...step, defaultValue: undefined };
+          return values[step.key] ? { ...step, defaultValue: values[step.key] } : step;
+        });
         await promptSteps(editable, prompt, log, values, promptSecret);
         continue;
       }

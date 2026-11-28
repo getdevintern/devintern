@@ -76,7 +76,7 @@ import { errorMessage } from "./worker-init-fs";
 import { githubTokenStep, originGitHubSlug } from "./worker-init-github-token";
 import { hostStep, withoutRepeatedHostFailures } from "./worker-init-host";
 import { defaultDevinternLabelOps } from "./worker-init-label";
-import { describeQueryFailure } from "./worker-init-query-failure";
+import { describeQueryFailure, githubCredentialRow } from "./worker-init-query-failure";
 import {
   createQueryCorrectionAttempts,
   queryLabelsCheck,
@@ -685,6 +685,10 @@ async function credentialCheck(
     return { ...base, status: "pass", message: `${name} accepted ${verified.join(", ")}` };
   } catch (error) {
     const message = errorMessage(error);
+    // An invalid token or one that cannot see the repository: the wizard's wording.
+    const github = plan.tracker === "github" ? githubCredentialRow(message, env.GITHUB_REPO) : null;
+    if (github)
+      return { ...base, status: "fail", ...github, message: `${name}: ${github.message}` };
     // The HTTP status a tracker error names, for the credential-probe message.
     const status = /\b(401|403)\b/.exec(message)?.[1];
     return {
@@ -762,12 +766,16 @@ async function runFlagsChecks(run: FlagsRun): Promise<InitCheck[]> {
     const prefix = plan.githubTokenAuthRejected
       ? "GitHub CLI token rejected"
       : "GitHub CLI token could not be verified";
+    const failure = plan.githubTokenFailure;
+    const github = failure ? githubCredentialRow(failure, plan.credentialEnv.GITHUB_REPO) : null;
     checks.push({
       name: "github-token",
       label: "GitHub credential probe",
       status: plan.tracker === "github" ? "fail" : "warn",
-      message: plan.githubTokenFailure ? `${prefix}: ${plan.githubTokenFailure}` : prefix,
-      hint: "Use a GITHUB_TOKEN that can open pull requests, or pass one with --env-file",
+      message: failure ? `${prefix}: ${github?.message ?? failure}` : prefix,
+      hint:
+        github?.hint ??
+        "Use a GITHUB_TOKEN that can open pull requests, or pass one with --env-file",
     });
   }
   return checks;

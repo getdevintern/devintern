@@ -34,7 +34,7 @@ import {
   parseEnvFile,
 } from "../workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
-import { defaultProbe } from "@devintern/task-trackers";
+import { defaultProbe, githubTokenGrantHint } from "@devintern/task-trackers";
 import { WORKER_PILOT_OFFER, signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
 import { resolveDashboardPort } from "./dashboard-port";
 import { entitlementCheck } from "./worker-entitlement";
@@ -60,7 +60,8 @@ import type { GitIdentityCheckInput } from "./git-identity-readiness";
 import { workerLivenessCheck } from "./worker-liveness-readiness";
 import { ciPermissionChecks } from "./ci-permission-readiness";
 import type { CiPermissionDoctorDeps } from "./ci-permission-readiness";
-import { PUSH_FIX, gitPushDryRun, readRepoPermissions } from "./repo-push-probe";
+import { gitPushDryRun, readRepoPermissions } from "./repo-push-probe";
+import { credentialFailure, repoFailureHint } from "./github-token-readiness";
 import type { PushProbeOutcome } from "./repo-push-probe";
 
 type Env = Record<string, string | undefined>;
@@ -367,7 +368,7 @@ export function createDefaultRepoAccessCheck(
 function gitRefusedReason(slug: string, gitReason: string, userHelper: boolean): string {
   const fix = userHelper
     ? "A git credential helper configured for github.com takes precedence over GITHUB_TOKEN: sign it in again (for example `gh auth login`), or remove it so DevIntern uses GITHUB_TOKEN"
-    : "Git used GITHUB_TOKEN and was refused: give the token Contents read and write access to the repository (fine-grained token) or the `repo` scope (classic token)";
+    : `Git used GITHUB_TOKEN and was refused. ${githubTokenGrantHint(slug)}`;
   return `GITHUB_TOKEN can read ${slug} through the API, but git cannot clone it (${gitReason}). ${fix}`;
 }
 
@@ -555,6 +556,8 @@ interface PolledSource {
   name: string;
   /** Where credentials should be added for this source. */
   credentialHint: string;
+  /** Where this source's credentials live, for a rejected-credential hint. */
+  credentialLocation: string;
 }
 
 /** Sources the daemon would poll, with credentials layered like the daemon does. */
@@ -564,16 +567,20 @@ function polledSources(
   processEnv: Env,
 ): PolledSource[] {
   if (config.teams.length > 0) {
-    return config.teams.map((team) => ({
-      tracker: team.tracker,
-      team,
-      query: team.taskQuery ?? "",
-      env: buildTeamEnv(team, workspaceDir),
-      name: `${team.tracker} (team "${team.name}")`,
-      credentialHint: team.envFile
-        ? `Add the missing variables to the workspace .env, ${team.envFile}, or [teams.env] for "${team.name}"`
-        : `Add the missing variables to the workspace .env, a team env_file, or [teams.env] for "${team.name}"`,
-    }));
+    return config.teams.map((team) => {
+      const location = team.envFile
+        ? `the workspace .env, ${team.envFile}, or [teams.env] for "${team.name}"`
+        : `the workspace .env, a team env_file, or [teams.env] for "${team.name}"`;
+      return {
+        tracker: team.tracker,
+        team,
+        query: team.taskQuery ?? "",
+        env: buildTeamEnv(team, workspaceDir),
+        name: `${team.tracker} (team "${team.name}")`,
+        credentialHint: `Add the missing variables to ${location}`,
+        credentialLocation: location,
+      };
+    });
   }
   if (!config.defaults.taskQuery || !config.defaults.tracker) return [];
   return [
@@ -585,6 +592,7 @@ function polledSources(
       env: { ...processEnv, ...parseEnvFile(workspaceEnvPath(workspaceDir)) },
       name: `${config.defaults.tracker} ([defaults])`,
       credentialHint: `Add the missing variables to ${workspaceEnvPath(workspaceDir)}`,
+      credentialLocation: workspaceEnvPath(workspaceDir),
     },
   ];
 }
@@ -640,6 +648,8 @@ async function collectConfigScopedChecks(
 
   // 2. Tracker credentials per source
   const credentialed: PolledSource[] = [];
+  // Sources whose credentials are present but were rejected by the probe.
+  const failedProbe = new Set<PolledSource>();
   const probeCredentials =
     deps.probeCredentials ??
     ((tracker: string, env: Env) =>
@@ -671,9 +681,9 @@ async function collectConfigScopedChecks(
           id: "credentials",
           label: "Tracker credentials",
           status: "fail",
-          detail: `${source.name}: ${errorMessage(error)}`,
-          hint: source.credentialHint,
+          ...credentialFailure(source, errorMessage(error)),
         });
+        failedProbe.add(source);
         continue;
       }
     }
@@ -700,12 +710,15 @@ async function collectConfigScopedChecks(
       continue;
     }
     if (!credentialed.includes(source)) {
+      const rejected = failedProbe.has(source);
       checks.push({
         id: "query",
         label: "Task query",
         status: "fail",
-        detail: `${source.name}: not run (missing tracker credentials)`,
-        hint: source.credentialHint,
+        detail: `${source.name}: not run (${rejected ? "tracker credential check failed" : "missing tracker credentials"})`,
+        hint: rejected
+          ? "Fix the Tracker credentials check above, then rerun `devintern worker doctor`"
+          : source.credentialHint,
       });
       continue;
     }
@@ -774,9 +787,7 @@ async function collectConfigScopedChecks(
               label: "Repository access",
               status: "fail",
               detail: `${name}: ${result.reason}`,
-              hint: result.reason.includes("cannot push")
-                ? PUSH_FIX
-                : `Check the remote URL for "${repo.name}" and that GITHUB_TOKEN (or your git credentials) can read it`,
+              hint: repoFailureHint(repo.name, result.reason),
             },
       );
     } catch (error) {

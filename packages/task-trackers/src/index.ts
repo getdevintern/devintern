@@ -25,6 +25,7 @@ export {
 export { fetchWithRetry } from "@devintern/utils";
 
 export * from "./clients/index.ts";
+export * from "./init/github-token-guidance.ts";
 export * from "./init/wizard-core.ts";
 export * from "./jira/index.ts";
 export * from "./markdown/index.ts";

@@ -1,4 +1,4 @@
-import { condenseMessage } from "@devintern/task-trackers";
+import { condenseMessage, describeGitHubTokenProblem } from "@devintern/task-trackers";
 
 /**
  * Turn a ready-tasks dry-run error into one readable line. A GitHub search
@@ -26,8 +26,11 @@ export function describeQueryFailure(
     };
   }
   if (status === "401") {
+    const problem = describeGitHubTokenProblem(message, githubRepo);
     return {
-      text: "GitHub rejected the token (401): it is mistyped, expired, or revoked.",
+      text: problem
+        ? `${problem.text}. ${problem.hint}.`
+        : "GitHub rejected the token (401): it is mistyped, expired, or revoked.",
       access: true,
     };
   }
@@ -46,6 +49,25 @@ export function describeQueryFailure(
     }
   }
   return { text: condenseMessage(message), access: false };
+}
+
+/**
+ * Message and hint for a non-interactive credential row when GitHub rejected
+ * the token or it cannot see the repository, in the wizard's wording.
+ *
+ * @returns null for any other failure (network, rate limit, ...)
+ */
+export function githubCredentialRow(
+  message: string,
+  githubRepo?: string,
+): { message: string; hint: string } | null {
+  const problem = describeGitHubTokenProblem(message, githubRepo);
+  if (!problem) return null;
+  const keys = problem.kind === "invalid" ? "GITHUB_TOKEN" : "GITHUB_TOKEN or GITHUB_REPO";
+  return {
+    message: problem.text,
+    hint: `${problem.hint}; then pass the corrected ${keys} with --env-file`,
+  };
 }
 
 /**

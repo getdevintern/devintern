@@ -585,7 +585,7 @@ describe("worker doctor repository row for a read-only token", () => {
       );
       const repo = checks.find((check) => check.id === "repo");
       expect(repo?.status).toBe("fail");
-      expect(repo?.hint).toContain("Contents and Pull requests read and write");
+      expect(repo?.hint).toContain("Contents, Pull requests, and Issues set to Read and write");
       const report = buildWorkerDoctorReport(checks, {
         workspaceDir: dir,
         offline: false,
@@ -595,7 +595,7 @@ describe("worker doctor repository row for a read-only token", () => {
       expect(report.code).toBe("repo_access_denied");
       const fix = report.nextSteps.find((step) => step.id === "fix-repo-access");
       expect(fix?.url).toBe("https://github.com/settings/personal-access-tokens");
-      expect(fix?.message.split("Contents and Pull requests").length).toBe(2);
+      expect(fix?.message.split("Contents, Pull requests, and Issues").length).toBe(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
