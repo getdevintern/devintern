@@ -20,7 +20,6 @@ import { computeRunActivity, hostTimeZone } from "./run-activity";
 import type { RunActivity } from "./run-activity";
 import { configureSqliteConnection } from "./sqlite";
 import { initRunsSchema } from "./run-schema";
-import { abandonDeferredRunsOnClosedPrs } from "./deferred-pr-runs";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 import { runOutputsDir, runOutputsPath } from "../workspace/paths";
 import {
@@ -661,17 +660,6 @@ export class RunStore {
         return latest.id;
       })
       .immediate();
-  }
-
-  /**
-   * Settle deferred PR-driven runs (no task key) whose PR the registry already
-   * records as closed: no close event will settle them any more, so they would
-   * keep showing as "waiting to retry". Run once at worker startup.
-   *
-   * @returns Ids of the runs settled
-   */
-  abandonDeferredRunsOnClosedPrs(): number[] {
-    return abandonDeferredRunsOnClosedPrs(this.db);
   }
 
   /**

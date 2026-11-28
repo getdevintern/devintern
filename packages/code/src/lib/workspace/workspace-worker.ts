@@ -24,7 +24,7 @@ import { startNotificationMaintenance } from "../notifications/maintenance";
 import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
-import { settleDeferredRunsOnClosedPrs } from "../state/deferred-pr-runs";
+import { cleanUpClosedPrs } from "./closed-pr-cleanup";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { WorkerState } from "../state/worker-state";
 import { createTaskActionedGate } from "../task/actioned-state";
@@ -125,24 +125,6 @@ function pruneInjectedTasks(
   const pruned = store.pruneSettled(retentionMs);
   if (pruned > 0) {
     console.log(`🧹 [fleet] pruned ${pruned} settled injected task row(s)`);
-  }
-}
-
-/**
- * Drop per-PR poll cursors of change requests already closed in the registry
- * (databases from before cursors were pruned on close). Housekeeping only: a
- * failure is logged and never blocks worker startup.
- */
-function pruneClosedChangeRequestCursors(
-  workerState: Pick<WorkerState, "pruneClosedChangeRequestCursors">,
-): void {
-  try {
-    const pruned = workerState.pruneClosedChangeRequestCursors();
-    if (pruned > 0) {
-      console.log(`🧹 [fleet] pruned ${pruned} poll cursor(s) of closed agent PR(s)`);
-    }
-  } catch (error) {
-    console.warn(`⚠️  [fleet] could not prune closed PR cursors: ${(error as Error).message}`);
   }
 }
 
@@ -413,9 +395,6 @@ export async function recoverOrphanedWorkspaceRuns(options: {
         return true;
       },
     });
-
-    // Deferred PR-driven runs whose PR closed meanwhile never retry.
-    settleDeferredRunsOnClosedPrs(runStore);
 
     // Dashboard-scheduled retries claimed by the previous worker: settle the
     // rows so the dashboard's per-task guard unblocks (the operator can
@@ -965,7 +944,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     workspaceDir,
     dbPath: state.dbPath,
   });
-  pruneClosedChangeRequestCursors(state.workerState);
+  cleanUpClosedPrs(state.workerState);
   const injectedStartup = createInjectedStartupRecovery(
     injectedTasks,
     workspaceDir,

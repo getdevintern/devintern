@@ -83,7 +83,7 @@ describe("deferred PR-driven runs", () => {
     const stale = deferredRun("ci_fix", 7);
     const open = deferredRun("ci_fix", 8);
 
-    expect(runs.abandonDeferredRunsOnClosedPrs()).toEqual([stale]);
+    expect(state.settleDeferredRunsOnClosedPrs()).toEqual([stale]);
     expect(outcome(stale)).toMatchObject({
       status: "abandoned",
       reason: "superseded: the PR closed before this deferred run retried",

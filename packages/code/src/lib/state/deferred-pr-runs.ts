@@ -127,24 +127,3 @@ export function abandonDeferredRunsOnClosedPrs(db: Database): number[] {
     })
     .immediate();
 }
-
-/**
- * Startup sweep, best-effort: settle deferred runs on PRs already closed
- * ({@link abandonDeferredRunsOnClosedPrs}) and log how many, never throwing.
- *
- * @param store - Run store whose database holds the runs and PR registry
- */
-export function settleDeferredRunsOnClosedPrs(store: {
-  abandonDeferredRunsOnClosedPrs(): number[];
-}): void {
-  try {
-    const settled = store.abandonDeferredRunsOnClosedPrs();
-    if (settled.length > 0) {
-      console.log(`🧹 [fleet] settled ${settled.length} deferred run(s) on closed PRs`);
-    }
-  } catch (error) {
-    console.warn(
-      `⚠️  [fleet] could not settle deferred runs on closed PRs: ${(error as Error).message}`,
-    );
-  }
-}

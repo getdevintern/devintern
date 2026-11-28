@@ -25,7 +25,11 @@ import { buildTicketUrl } from "../task/ticket-url";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 import { notifyPrClosed, notifyPrOpened } from "../notifications/event-rules";
 import { parseRunId, RUN_ID_ENV } from "./run-outputs";
-import { abandonDeferredPrRuns, closedPrReason } from "./deferred-pr-runs";
+import {
+  abandonDeferredPrRuns,
+  abandonDeferredRunsOnClosedPrs,
+  closedPrReason,
+} from "./deferred-pr-runs";
 import {
   optionalEnum,
   optionalNumber,
@@ -985,6 +989,17 @@ export class WorkerState {
       "superseded: CI passed before this deferred CI fix retried",
       ["ci_fix"],
     );
+  }
+
+  /**
+   * Settle deferred PR-driven runs (no task key) whose PR the registry already
+   * records as closed: no close event will settle them any more, so they would
+   * keep showing as "waiting to retry". Run once at worker startup.
+   *
+   * @returns Ids of the runs settled
+   */
+  settleDeferredRunsOnClosedPrs(): number[] {
+    return abandonDeferredRunsOnClosedPrs(this.db);
   }
 
   /**
