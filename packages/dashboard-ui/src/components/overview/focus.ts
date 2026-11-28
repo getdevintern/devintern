@@ -52,3 +52,44 @@ export function consumeSourceHealthFocus(): void {
   pendingSourceHealthFocus = false;
   revealElement(SOURCE_HEALTH_SECTION_ID);
 }
+
+/** DOM id of one row in the Overview's Queued list. */
+export function queuedItemDomId(itemId: string): string {
+  return `aq-item-${itemId}`;
+}
+
+/** A request the list never fulfils (the item was claimed meanwhile) lapses after this. */
+const QUEUED_FOCUS_TTL_MS = 30_000;
+
+let pendingQueuedFocus: { itemId: string; at: number } | null = null;
+
+/** Open the Queued disclosure and the row, then reveal it; false when it is not rendered. */
+function revealQueuedItem(itemId: string): boolean {
+  const id = queuedItemDomId(itemId);
+  const row = document.getElementById(id);
+  if (!row) return false;
+  row.querySelector("details")?.setAttribute("open", "");
+  for (
+    let parent = row.closest("details");
+    parent;
+    parent = parent.parentElement?.closest("details") ?? null
+  ) {
+    parent.setAttribute("open", "");
+  }
+  return revealElement(id);
+}
+
+/** Reveal a queued item now, or once the Overview's Queued list renders it. */
+export function requestQueuedFocus(itemId: string): void {
+  pendingQueuedFocus = revealQueuedItem(itemId) ? null : { itemId, at: Date.now() };
+}
+
+/** Called by the Queued list after it renders; reveals a pending item once it is listed. */
+export function consumeQueuedFocus(): void {
+  if (pendingQueuedFocus === null) return;
+  if (Date.now() - pendingQueuedFocus.at > QUEUED_FOCUS_TTL_MS) {
+    pendingQueuedFocus = null;
+    return;
+  }
+  if (revealQueuedItem(pendingQueuedFocus.itemId)) pendingQueuedFocus = null;
+}

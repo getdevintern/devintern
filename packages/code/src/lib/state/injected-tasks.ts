@@ -144,6 +144,8 @@ export interface InjectedTask {
   dependencyState?: InjectedDependencyState;
   /** Human reason for {@link dependencyState}, naming the dependency. */
   dependencyReason?: string;
+  /** Dependency the latest claim stacked this row's branch on, when stacked. */
+  stackedOn?: string;
   createdAt: number;
   startedAt?: number;
   /** When the row settled; for a `cancelled` row, the cancel time. */
@@ -177,6 +179,7 @@ interface InjectedTaskRow {
   dependency_mode?: string | null;
   dependency_state?: string | null;
   dependency_reason?: string | null;
+  stacked_on?: string | null;
   cancelled_by?: string | null;
   cancel_reason?: string | null;
   parent_run_id?: number | null;
@@ -223,6 +226,7 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
         ? row.dependency_state
         : undefined,
     dependencyReason: row.dependency_reason ?? undefined,
+    ...(row.stacked_on ? { stackedOn: row.stacked_on } : {}),
     createdAt: row.created_at,
     startedAt: row.started_at ?? undefined,
     finishedAt: row.finished_at ?? undefined,

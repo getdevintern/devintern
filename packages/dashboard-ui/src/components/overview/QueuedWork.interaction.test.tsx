@@ -207,3 +207,37 @@ test("a poll with refreshOn re-fetches at once when the queue changes", async ()
   expect(workerFetches).toBe(2);
   expect(container.querySelector("#probe")?.textContent).toBe("2");
 });
+
+test("re-queueing a failed dependency posts the run retry and refreshes the queue", async () => {
+  stubFetch(202, { status: "requeued" });
+  const dependent: QueuedWorkItem = {
+    ...item(3, "local-dependent", "Dependent task"),
+    dependsOn: ["local-first"],
+    dependencyState: "blocked",
+    dependencyReason: "local-first failed",
+    dependencyLinks: [
+      {
+        key: "local-first",
+        status: "failed",
+        latestRunId: 12,
+        latestRunStatus: "abandoned",
+        retryKind: "injected",
+      },
+    ],
+  };
+  await renderQueue([dependent]);
+
+  await click(container.querySelector('[data-dependency-retry="local-first"]'));
+  expect(fetchCalls).toEqual([]);
+  const confirm = [...container.querySelectorAll("button")].find(
+    (el) => el.textContent === "Re-queue task",
+  );
+  await click(confirm);
+
+  expect(fetchCalls).toEqual([{ url: "/api/runs/12/retry", method: "POST" }]);
+  expect(container.querySelector('[role="status"]')?.textContent).toContain(
+    "Re-queued. The worker will resume local-first",
+  );
+  expect(container.querySelector("[data-dependency-retry]")).toBeNull();
+  expect(queueChangedEvents).toBe(1);
+});

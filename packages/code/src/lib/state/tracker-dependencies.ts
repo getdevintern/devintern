@@ -38,6 +38,8 @@ export interface TrackerDependencyWait {
   dependencyMode: DependencyMode;
   state: "waiting" | "blocked";
   reason: string;
+  /** Blocker ticket a stacked run branched from, once recorded. */
+  stackedOn?: string;
   /** When the ticket entered its current state (epoch ms). */
   since: number;
 }
@@ -99,6 +101,9 @@ function toWait(row: Record<string, unknown>): TrackerDependencyWait | null {
     dependencyMode: row.dependency_mode === "stacked" ? "stacked" : "merged",
     state,
     reason: typeof row.reason === "string" ? row.reason : "",
+    ...(typeof row.stacked_on === "string" && row.stacked_on !== ""
+      ? { stackedOn: row.stacked_on }
+      : {}),
     since: row.since,
   };
 }

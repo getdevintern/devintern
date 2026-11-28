@@ -138,3 +138,62 @@ test("cancelTask posts same-origin JSON and maps outcomes", async () => {
     error: "local-a already started; it was not cancelled",
   });
 });
+
+const blocked: QueuedWorkItem = {
+  id: "ad-hoc:9",
+  kind: "ad-hoc",
+  title: "Recover from a tracker repo mismatch",
+  taskKey: "local-onboarding-recover",
+  repo: "backend",
+  createdAt: NOW - 60_000,
+  dependsOn: ["local-github-token-errors", "local-docs", "local-pruned"],
+  dependencyMode: "stacked",
+  dependencyState: "blocked",
+  dependencyReason: "local-github-token-errors failed",
+  stackedOn: "local-docs",
+  dependencyLinks: [
+    {
+      key: "local-github-token-errors",
+      status: "failed",
+      latestRunId: 41,
+      latestRunStatus: "abandoned",
+      retryKind: "injected",
+    },
+    { key: "local-docs", status: "pending", queuedItemId: "ad-hoc:7" },
+    { key: "local-pruned", status: "unknown" },
+  ],
+};
+
+test("links each dependency to its latest run or queued row, with its status", () => {
+  const html = render({ items: [blocked] });
+  expect(html).toContain('href="#/runs/41"');
+  expect(html).toMatch(/href="#\/runs\/41"[^>]*><code[^>]*>local-github-token-errors<\/code>/);
+  expect(html).toMatch(
+    />local-github-token-errors<\/code><\/a><span class="[^"]*text-danger">failed</,
+  );
+  expect(html).toMatch(/title="Show local-docs in the queue"><code[^>]*>local-docs</);
+  expect(html).toContain(">stack base<");
+  expect(html).toContain('id="aq-item-ad-hoc:9"');
+  // The reason text stays for screen readers and older layouts.
+  expect(html).toContain("Blocked: local-github-token-errors failed");
+});
+
+test("an unresolved dependency key shows as plain text marked unknown", () => {
+  const html = render({ items: [blocked] });
+  expect(html).toMatch(/<span><code[^>]*>local-pruned<\/code><\/span><span[^>]*>unknown</);
+  expect(html).not.toMatch(/<a[^>]*><code[^>]*>local-pruned</);
+});
+
+test("offers the inline retry only for a dependency whose run can be retried", () => {
+  const html = render({ items: [blocked] });
+  expect(html.match(/data-dependency-retry=/g)).toHaveLength(1);
+  expect(html).toContain('data-dependency-retry="local-github-token-errors"');
+  expect(html).toContain(">Re-queue<");
+});
+
+test("falls back to plain dependency keys when the server sends no links", () => {
+  const { dependencyLinks: _links, ...older } = blocked;
+  const html = render({ items: [older] });
+  expect(html).toContain("local-github-token-errors, local-docs, local-pruned (stacked)");
+  expect(html).not.toContain("data-dependency-retry");
+});
