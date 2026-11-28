@@ -284,8 +284,15 @@ a required step was refused (a push, a merge, a permission), or a dependency or 
 source you needed was unavailable, so the goal was not met.
 Use status=partial when you met only part of the goal, and say what is missing.
 A gate failure that is pre-existing on the base commit is not blocked. Confirm it by re-running
-the failing gate on the base revision (for example in a temporary git worktree) and checking
-that it fails with the same errors. Seeing the same error in a file you did not modify is
+the failing gate on the base revision and checking that it fails with the same errors.
+Export the base into a new, empty scratch directory, install dependencies there, and run the gate in it:
+d=$(mktemp -d "\${TMPDIR:-/tmp}/base-check.XXXXXX") && git -C "$(git rev-parse --show-toplevel)" archive <base-sha> | tar -x -C "$d"
+(use git merge-base HEAD with the base branch for the SHA; install with scripts disabled, such as bun install --ignore-scripts).
+The -C form exports the whole repository even when you run it from a subdirectory. Install from the root of "$d",
+then run the gate from the same relative subdirectory inside "$d" that you ran it from in your checkout.
+Create a fresh directory for every check and never reuse one: other tasks share $TMPDIR. Delete it with rm -rf "$d" when done.
+Never use git stash, git checkout, git reset or git worktree add for this: the stash is shared
+with the user and other tasks, and the sandbox blocks new worktrees. Seeing the same error in a file you did not modify is
 enough only for a per-file rule such as a lint max-lines limit; type errors, import cycles,
 build and test failures can come from your change in files you never touched, so re-run those.
 If every failure reproduces unchanged on the base and making that gate pass is not the task's

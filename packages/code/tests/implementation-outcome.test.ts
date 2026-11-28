@@ -277,6 +277,26 @@ describe("prompt instruction", () => {
     );
   });
 
+  test("the base check uses an exported tree and never touches shared git state", () => {
+    const prompt = withImplementationSummary("Do the task.");
+    expect(prompt).toContain(
+      'd=$(mktemp -d "${TMPDIR:-/tmp}/base-check.XXXXXX") && git -C "$(git rev-parse --show-toplevel)" archive <base-sha> | tar -x -C "$d"',
+    );
+    // A bare `git archive` from a package subdirectory exports only that subtree.
+    expect(prompt).not.toMatch(/&& git archive /);
+    expect(prompt).toContain('same relative subdirectory inside "$d"');
+    expect(prompt).toContain("never reuse one");
+    expect(prompt).toContain('rm -rf "$d"');
+    expect(prompt).not.toContain('"$TMPDIR/base-check"');
+    expect(prompt).toContain("git merge-base HEAD");
+    expect(prompt).toContain(
+      "Never use git stash, git checkout, git reset or git worktree add for this",
+    );
+    expect(prompt).not.toContain("temporary git worktree");
+    // The only mention of stash is the prohibition.
+    expect(prompt.match(/git stash/g)).toHaveLength(1);
+  });
+
   test("the example marker in the prompt parses as blocked", () => {
     const prompt = withImplementationSummary("Do the task.");
     const example = prompt.split("\n").find((line) => line.startsWith("<!-- devintern:outcome"));
