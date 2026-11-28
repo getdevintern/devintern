@@ -3,7 +3,7 @@ import { consumeSourceHealthFocus, SOURCE_HEALTH_SECTION_ID } from "@/components
 import { formatClock, formatIn } from "@/components/overview/overview-model";
 import { Check, GitPullRequest, Play } from "lucide-react";
 
-import { AutomationActivityStatus, visibleActivity } from "@/components/AutomationActivity";
+import { AutomationNowStatus, hasNowStatus } from "@/components/AutomationActivity";
 import { AutomationGroupHeaderRow } from "@/components/AutomationGroupHeader";
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StatusBadge, StatusPill } from "@/components/shared";
@@ -88,7 +88,6 @@ function AutomationRow({
   const busy = busyId === automation.id;
   const started = startedId === automation.id;
   const lastRun = automation.lastRun;
-  const activity = visibleActivity(automation);
   // The worker rejects a second trigger while an occurrence holds the lease.
   const inFlight = automation.activity !== undefined;
   const human = automation.schedule ? humanizeSchedule(automation.schedule) : undefined;
@@ -160,8 +159,8 @@ function AutomationRow({
         )}
       </TableCell>
       <TableCell className="auto-cell-last min-w-0 px-4 py-2.5 align-middle">
-        {activity ? (
-          <AutomationActivityStatus activity={activity} />
+        {hasNowStatus(automation) ? (
+          <AutomationNowStatus automation={automation} />
         ) : lastRun ? (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <button

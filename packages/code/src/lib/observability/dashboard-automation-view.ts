@@ -40,6 +40,8 @@ export interface DashboardAutomationView extends AgentSelection {
   lastRun?: RunRecord;
   /** Occurrence in flight on this worker, including one still waiting for a slot. */
   activity?: AutomationActivity;
+  /** Latest usage-limit deferral not yet followed by a started run. */
+  deferral?: { until: number; harness?: string };
 }
 
 /** Runs attributed to a scheduled job; prompt automations match by id. */
@@ -73,5 +75,6 @@ export function toAutomationView(
     runFilter: scheduledJobRunFilter(status),
     lastRun: lastRun ? { ...lastRun, taskDescription: undefined } : undefined,
     ...(status.activity ? { activity: status.activity } : {}),
+    ...(status.deferral ? { deferral: status.deferral } : {}),
   };
 }

@@ -27,7 +27,19 @@ export interface AutomationConfig extends AgentSelection {
    * prompt explicitly allows "make no changes and report".
    */
   allowNoChanges?: boolean;
+  /**
+   * What happens to an occurrence that cannot run because its agent harness
+   * is usage-limited: `catch_up` (the default) runs it once shortly after the
+   * limit resets, when that is before the next scheduled occurrence; `skip`
+   * drops it until the next scheduled occurrence.
+   */
+  onUsageLimit?: AutomationUsageLimitPolicy;
 }
+
+/** `[[automations]] on_usage_limit` values. */
+export type AutomationUsageLimitPolicy = "catch_up" | "skip";
+
+const USAGE_LIMIT_POLICIES: readonly AutomationUsageLimitPolicy[] = ["catch_up", "skip"];
 
 /** A cron-or-interval schedule using the `[[automations]]` format. */
 export interface CronOrIntervalSchedule {
@@ -127,6 +139,21 @@ export function nextScheduleOccurrence(schedule: CronOrIntervalSchedule, afterMs
     .getTime();
 }
 
+/** Validate an optional `on_usage_limit` value; unknown values are config errors. */
+function parseUsageLimitPolicy(
+  value: unknown,
+  label: string,
+  errors: string[],
+): AutomationUsageLimitPolicy | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string" && (USAGE_LIMIT_POLICIES as readonly string[]).includes(value)) {
+    return value as AutomationUsageLimitPolicy;
+  }
+  const allowed = USAGE_LIMIT_POLICIES.map((policy) => `"${policy}"`).join(", ");
+  errors.push(`${label}.on_usage_limit must be one of ${allowed}; got ${JSON.stringify(value)}.`);
+  return undefined;
+}
+
 /** Validate and normalize `[[automations]]` tables, collecting every error. */
 export function parseAutomationEntries(
   value: unknown,
@@ -201,6 +228,8 @@ export function parseAutomationEntries(
       errors.push(`${label}.allow_no_changes must be a boolean.`);
     }
 
+    const onUsageLimit = parseUsageLimitPolicy(table.on_usage_limit, label, errors);
+
     if (id && typeof enabledValue === "boolean" && prompt && schedule) {
       automations.push({
         id,
@@ -212,6 +241,7 @@ export function parseAutomationEntries(
         repo,
         openPr,
         allowNoChanges,
+        ...(onUsageLimit ? { onUsageLimit } : {}),
         ...selection,
       });
     }

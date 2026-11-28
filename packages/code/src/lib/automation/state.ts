@@ -17,6 +17,18 @@ export interface AutomationScheduleState {
   leaseOwner?: string;
   leaseExpiresAt?: number;
   heartbeatAt?: number;
+  /**
+   * Latest usage-limit deferral not yet followed by a started run: when the
+   * harness limit resets (epoch ms) and which harness hit it, when known.
+   */
+  deferredUntil?: number;
+  deferredHarness?: string;
+}
+
+/** A usage-limit deferral recorded on a schedule row. */
+export interface AutomationDeferral {
+  untilMs: number;
+  harness?: string;
 }
 
 /** Durable schedule cursors and overlap leases stored beside the worker queue. */
@@ -52,6 +64,16 @@ export class AutomationStateStore {
         PRIMARY KEY (provider, source_id)
       )
     `);
+    // Additive migration: existing databases predate usage-limit deferrals.
+    const scheduleColumns = this.db
+      .query("PRAGMA table_info(automation_schedules)")
+      .all() as Array<{ name: string }>;
+    if (!scheduleColumns.some((column) => column.name === "deferred_until")) {
+      this.db.run("ALTER TABLE automation_schedules ADD COLUMN deferred_until INTEGER");
+    }
+    if (!scheduleColumns.some((column) => column.name === "deferred_harness")) {
+      this.db.run("ALTER TABLE automation_schedules ADD COLUMN deferred_harness TEXT");
+    }
     // Additive migration: existing databases predate the unreadable-only streak.
     const columns = this.db.query("PRAGMA table_info(source_status)").all() as Array<{
       name: string;
@@ -106,6 +128,8 @@ export class AutomationStateStore {
       leaseOwner: (row.lease_owner as string | null) ?? undefined,
       leaseExpiresAt: (row.lease_expires_at as number | null) ?? undefined,
       heartbeatAt: (row.heartbeat_at as number | null) ?? undefined,
+      deferredUntil: (row.deferred_until as number | null) ?? undefined,
+      deferredHarness: (row.deferred_harness as string | null) ?? undefined,
     };
   }
 
@@ -120,7 +144,8 @@ export class AutomationStateStore {
     const result = this.db.run(
       `UPDATE automation_schedules
        SET last_scheduled_at = next_due_at, next_due_at = ?, lease_owner = ?,
-           lease_expires_at = ?, heartbeat_at = ?
+           lease_expires_at = ?, heartbeat_at = ?, deferred_until = NULL,
+           deferred_harness = NULL
        WHERE automation_id = ? AND next_due_at <= ?
          AND (lease_owner IS NULL OR lease_expires_at <= ?)`,
       [nextDueAt, owner, now + leaseMs, now, automationId, now, now],
@@ -130,15 +155,59 @@ export class AutomationStateStore {
 
   /**
    * Skip a due occurrence without running it (no lease taken), advancing the
-   * cursor. Used when no agent harness can start a run right now.
+   * cursor. Used when no agent harness can start a run right now; `deferral`
+   * records the usage limit that blocked it so the dashboard can show it.
    */
-  skipDue(automationId: string, now: number, nextDueAt: number): boolean {
+  skipDue(
+    automationId: string,
+    now: number,
+    nextDueAt: number,
+    deferral?: AutomationDeferral,
+  ): boolean {
     const result = this.db.run(
-      `UPDATE automation_schedules SET last_scheduled_at = next_due_at, next_due_at = ?
+      `UPDATE automation_schedules SET last_scheduled_at = next_due_at, next_due_at = ?,
+         deferred_until = COALESCE(?, deferred_until),
+         deferred_harness = CASE WHEN ? IS NULL THEN deferred_harness ELSE ? END
        WHERE automation_id = ? AND next_due_at <= ?`,
-      [nextDueAt, automationId, now],
+      [
+        nextDueAt,
+        deferral?.untilMs ?? null,
+        deferral?.untilMs ?? null,
+        deferral?.harness ?? null,
+        automationId,
+        now,
+      ],
     );
     return result.changes === 1;
+  }
+
+  /**
+   * Record a run that ended deferred on a usage limit. With `catchUpAt`, the
+   * next due time moves up to it when that is earlier than the current one,
+   * so the missed occurrence runs once after the reset instead of waiting
+   * for the next scheduled occurrence.
+   *
+   * @returns The resulting next due time, or null when the row is gone
+   */
+  recordDeferral(
+    automationId: string,
+    deferral: AutomationDeferral,
+    catchUpAt?: number,
+  ): number | null {
+    this.db.run(
+      `UPDATE automation_schedules SET deferred_until = ?, deferred_harness = ?,
+         next_due_at = CASE WHEN ? IS NOT NULL AND ? < next_due_at THEN ? ELSE next_due_at END
+       WHERE automation_id = ?`,
+      [
+        deferral.untilMs,
+        deferral.harness ?? null,
+        catchUpAt ?? null,
+        catchUpAt ?? null,
+        catchUpAt ?? null,
+        automationId,
+      ],
+    );
+    return this.get(automationId)?.nextDueAt ?? null;
   }
 
   /** Coalesce a due occurrence skipped because the previous run is still active. */
@@ -159,7 +228,8 @@ export class AutomationStateStore {
    */
   acquireManual(automationId: string, owner: string, now: number, leaseMs: number): boolean {
     const result = this.db.run(
-      `UPDATE automation_schedules SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?
+      `UPDATE automation_schedules SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?,
+         deferred_until = NULL, deferred_harness = NULL
        WHERE automation_id = ? AND (lease_owner IS NULL OR lease_expires_at <= ?)`,
       [owner, now + leaseMs, now, automationId, now],
     );

@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { ArrowLeft, Check, Copy, GitPullRequest, Play, RefreshCcw } from "lucide-react";
 
-import { AutomationActivityStatus, visibleActivity } from "@/components/AutomationActivity";
+import {
+  AutomationActivityStatus,
+  AutomationDeferralStatus,
+  visibleActivity,
+} from "@/components/AutomationActivity";
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StatusBadge, StatusPill } from "@/components/shared";
 import { Button } from "@/components/ui/button";
@@ -211,6 +215,10 @@ function JobFacts({ automation }: { automation: AutomationSchedule }) {
               {activity.reason.charAt(0).toUpperCase() + activity.reason.slice(1)}
             </span>
           ) : null}
+        </Fact>
+      ) : automation.deferral ? (
+        <Fact label="Now">
+          <AutomationDeferralStatus deferral={automation.deferral} />
         </Fact>
       ) : null}
       <Fact label="Last run">

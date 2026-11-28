@@ -1,8 +1,5 @@
 import { randomUUID } from "crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
-import { spawn } from "child_process";
-import type { ChildProcess } from "child_process";
-import { tmpdir } from "os";
+import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 
 import type { Acquirer } from "../../worker";
@@ -10,28 +7,25 @@ import type { AutomationConfig } from "./config";
 import type { AgentSelection } from "../agent/selection";
 import { automationTaskArgs, nextScheduleOccurrence } from "./config";
 import { AutomationStateStore } from "./state";
+import type { AutomationDeferral } from "./state";
+import { spawnAutomationProcess } from "./automation-process";
+import type { SpawnedAutomationRun } from "./automation-process";
+import { automationDeferralMessage, usageLimitNextDue } from "./usage-limit-catch-up";
 import { workerTaskArgs } from "../acquirers/task-polling";
-import {
-  applyAgentSelectionEnv,
-  pickAgentSelection,
-  pinnedHarnessChildEnv,
-} from "../agent/selection";
+import { applyAgentSelectionEnv, pickAgentSelection } from "../agent/selection";
 import { automationsDir } from "../workspace/paths";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import type { RunOrigin } from "../state/run-recorder";
-import { readRunOutcomeHint, RUN_OUTCOME_FILE_ENV } from "../worker/run-outcome-protocol";
 import type { RunOutcomeHint } from "../worker/run-outcome-protocol";
-import {
-  getWorkerFailover,
-  harnessBlockedReason,
-  pinnedChildEnvWithHint,
-} from "../worker/failover";
-import {
-  HARNESS_UNAVAILABLE_EXIT_CODE,
-  readUsageLimitHint,
-  USAGE_LIMIT_EXIT_CODE,
-  USAGE_LIMIT_FILE_ENV,
-} from "../worker/usage-limit-protocol";
+import { getWorkerFailover, harnessBlockedReason } from "../worker/failover";
+
+export { spawnAutomationProcess } from "./automation-process";
+export type { SpawnedAutomationRun } from "./automation-process";
+export {
+  automationDeferralMessage,
+  catchUpJitterMs,
+  usageLimitNextDue,
+} from "./usage-limit-catch-up";
 
 /** Environment markers the task pipeline reads to attribute scheduled runs. */
 export const AUTOMATION_ORIGIN_ENV = RUN_ORIGIN_ENV;
@@ -41,7 +35,6 @@ export const MANUAL_ORIGIN_ENV_VALUE = "manual";
 
 const LEASE_MS = 2 * 60_000;
 const HEARTBEAT_MS = 30_000;
-const TERMINATION_GRACE_MS = 5_000;
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 export interface AutomationRunContext {
@@ -54,16 +47,6 @@ export interface AutomationRunContext {
    */
   taskFileDir?: string;
   release(): void | Promise<void>;
-}
-
-export interface SpawnedAutomationRun {
-  completion: Promise<boolean>;
-  terminate(): void;
-  /**
-   * Terminal status the child recorded, read after a clean exit. A clean exit
-   * can still be an escalated run (the agent reported its goal as blocked).
-   */
-  outcome?(): RunOutcomeHint | undefined;
 }
 
 /**
@@ -143,6 +126,11 @@ export interface AutomationScheduleStatus extends AgentSelection {
   openPr?: boolean;
   /** Durable next occurrence (epoch ms); absent before first registration. */
   nextDueAt?: number;
+  /**
+   * Latest usage-limit deferral not yet followed by a started run: the
+   * reset time and the harness that hit the limit, when known.
+   */
+  deferral?: { until: number; harness?: string };
   /** Estimation sweeps: tracker query selecting the tickets to estimate. */
   query?: string;
   /** Estimation sweeps: `[[teams]]` name whose tracker the sweep uses. */
@@ -395,9 +383,25 @@ export class AutomationAcquirer implements Acquirer {
       const blockedUntil = this.harnessBlockedUntil(automation);
       if (blockedUntil !== null) {
         const skipNow = this.now();
-        if (this.store.skipDue(stateId, skipNow, nextAutomationDue(automation, skipNow))) {
+        // Missed occurrences collapse: each skip replaces the cursor, so at
+        // most one catch-up run follows the reset.
+        const next = usageLimitNextDue(
+          automation,
+          stateId,
+          nextAutomationDue(automation, skipNow),
+          blockedUntil,
+          skipNow,
+        );
+        const deferral = { untilMs: blockedUntil, harness: automation.harness };
+        if (this.store.skipDue(stateId, skipNow, next.nextDueAt, deferral)) {
           console.warn(
-            `⏭️  [${kind}:${automation.id}] occurrence skipped: ${harnessBlockedReason(blockedUntil)}`,
+            next.catchUp
+              ? `⏳ [${kind}:${automation.id}] occurrence deferred: ` +
+                  `${harnessBlockedReason(blockedUntil)}; catching up at ` +
+                  new Date(next.nextDueAt).toISOString()
+              : `⏭️  [${kind}:${automation.id}] occurrence skipped: ` +
+                  `${harnessBlockedReason(blockedUntil)}; next occurrence ` +
+                  new Date(next.nextDueAt).toISOString(),
           );
         }
         continue;
@@ -500,15 +504,21 @@ export class AutomationAcquirer implements Acquirer {
       trigger,
     };
     active.lifecycle = run.completion
-      .then((ok) =>
+      .then((ok) => {
+        const deferral = ok ? undefined : run.deferral?.();
+        if (deferral) {
+          this.settleDeferral(automation, stateId, deferral, trigger);
+          return;
+        }
         console.log(
           automationCompletionMessage(
             `${kind}:${automation.id}`,
             ok,
             ok ? run.outcome?.() : undefined,
+            trigger === "manual" ? "manual run " : "",
           ),
-        ),
-      )
+        );
+      })
       .catch((error) => console.error(`❌ [${kind}:${automation.id}] ${(error as Error).message}`))
       .finally(async () => {
         try {
@@ -520,6 +530,39 @@ export class AutomationAcquirer implements Acquirer {
         }
       });
     this.active.set(automation.id, active);
+  }
+
+  /**
+   * Record a run that ended deferred on a usage limit. A scheduled run moves
+   * the cursor up to one catch-up run after the reset (unless the job opted
+   * out); a manual run is never re-queued.
+   */
+  private settleDeferral(
+    automation: AutomationConfig,
+    stateId: string,
+    deferral: AutomationDeferral,
+    trigger: AutomationActivity["trigger"],
+  ): void {
+    const label = `${this.jobKind()}:${automation.id}`;
+    const subject = trigger === "manual" ? "manual run " : "";
+    const current = this.store.get(stateId)?.nextDueAt;
+    let next: { nextDueAt?: number; catchUp: boolean } = { nextDueAt: current, catchUp: false };
+    if (trigger === "scheduled" && current !== undefined) {
+      next = usageLimitNextDue(automation, stateId, current, deferral.untilMs, this.now());
+    }
+    const nextDueAt = this.store.recordDeferral(
+      stateId,
+      deferral,
+      next.catchUp ? next.nextDueAt : undefined,
+    );
+    console.warn(
+      automationDeferralMessage(
+        label,
+        deferral,
+        { catchUp: next.catchUp, nextDueAt: nextDueAt ?? undefined },
+        subject,
+      ),
+    );
   }
 
   /**
@@ -669,6 +712,14 @@ export class AutomationAcquirer implements Acquirer {
         openPr: automation.openPr === true,
         ...pickAgentSelection(automation),
         nextDueAt: state?.nextDueAt,
+        ...(state?.deferredUntil !== undefined
+          ? {
+              deferral: {
+                until: state.deferredUntil,
+                ...(state.deferredHarness ? { harness: state.deferredHarness } : {}),
+              },
+            }
+          : {}),
       };
     });
   }
@@ -823,175 +874,4 @@ export function spawnManualAutomationRun(
     MANUAL_ORIGIN_ENV_VALUE,
     terminationGraceMs,
   );
-}
-
-/**
- * Spawn one isolated automation subprocess (the normal CLI pipeline for the
- * materialized task file) and terminate its process tree within a bound.
- */
-export function spawnAutomationProcess(
-  executable: string,
-  args: string[],
-  options: {
-    cwd: string;
-    env: Record<string, string | undefined>;
-    /**
-     * Explicit harness pinned by the scheduled entry (`harness` field). When
-     * set, the child is pinned to it and the workspace failover overlay is
-     * skipped so the entry always uses the agent it named. Entries without a
-     * `harness` keep normal workspace failover.
-     */
-    harnessPin?: string;
-    terminationGraceMs?: number;
-  },
-): SpawnedAutomationRun {
-  const detached = process.platform !== "win32";
-  let child: ChildProcess | null = null;
-  let terminating = false;
-  let exitResult: boolean | undefined;
-  let terminationTimer: ReturnType<typeof setTimeout> | undefined;
-  let hintDir: string | undefined;
-  let outcomeHint: RunOutcomeHint | undefined;
-  const outcomeDir = mkdtempSync(join(tmpdir(), "devintern-run-outcome-"));
-  const outcomePath = join(outcomeDir, "outcome.json");
-  let settle!: (ok: boolean) => void;
-  const completion = new Promise<boolean>((resolve) => {
-    settle = (ok) => {
-      if (ok) outcomeHint = readRunOutcomeHint(outcomePath);
-      rmSync(outcomeDir, { recursive: true, force: true });
-      resolve(ok);
-    };
-  });
-  const cleanupHint = () => {
-    if (!hintDir) return;
-    rmSync(hintDir, { recursive: true, force: true });
-    hintDir = undefined;
-  };
-  const kill = (signal: NodeJS.Signals) => {
-    if (child?.pid && detached) {
-      try {
-        process.kill(-child.pid, signal);
-        return;
-      } catch {
-        // Fall through to the direct child.
-      }
-    }
-    try {
-      child?.kill(signal);
-    } catch {
-      // The child may already have exited.
-    }
-  };
-  const processGroupAlive = () => {
-    if (!child?.pid || !detached) return false;
-    try {
-      process.kill(-child.pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  const beginTermination = () => {
-    if (terminating || exitResult !== undefined) return;
-    terminating = true;
-    kill("SIGTERM");
-    terminationTimer = setTimeout(() => {
-      kill("SIGKILL");
-      cleanupHint();
-      settle(false);
-    }, options.terminationGraceMs ?? TERMINATION_GRACE_MS);
-  };
-
-  const start = (env: Record<string, string | undefined>): void => {
-    // A failover re-spawn must not inherit the previous attempt's status.
-    rmSync(outcomePath, { force: true });
-    const spawned = spawn(executable, args, {
-      cwd: options.cwd,
-      env: { ...env, [RUN_OUTCOME_FILE_ENV]: outcomePath },
-      stdio: "inherit",
-      detached,
-    });
-    child = spawned;
-    spawned.once("close", (code) => {
-      if (terminating) {
-        if (!processGroupAlive()) {
-          if (terminationTimer) clearTimeout(terminationTimer);
-          cleanupHint();
-          settle(false);
-        }
-        return;
-      }
-      if (code === USAGE_LIMIT_EXIT_CODE || code === HARNESS_UNAVAILABLE_EXIT_CODE) {
-        const failover = getWorkerFailover();
-        if (options.harnessPin && failover && code === USAGE_LIMIT_EXIT_CODE) {
-          // Record the pinned harness's window so the scheduler and "Run
-          // now" stop launching runs into the same limit.
-          failover.recordLimit(options.harnessPin, readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]));
-        }
-        // A harness pinned by the entry opts out of workspace failover, so an
-        // explicit selection never silently runs a different agent.
-        if (!options.harnessPin && failover) {
-          const outcome =
-            code === USAGE_LIMIT_EXIT_CODE
-              ? failover.reportFromHint(
-                  readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]),
-                  env.AGENT_HARNESS ?? failover.activeName,
-                )
-              : failover.reportStartFailure(env.AGENT_HARNESS ?? failover.activeName);
-          if (outcome.kind !== "exhausted") {
-            cleanupHint();
-            const nextEnv = pinAutomationEnv(options.env, options.harnessPin);
-            hintDir = nextEnv.hintDir;
-            start(nextEnv.env);
-            return;
-          }
-        }
-        exitResult = false;
-        cleanupHint();
-        settle(false);
-        return;
-      }
-      exitResult = code === 0;
-      if (exitResult) getWorkerFailover()?.recordSuccess(env.AGENT_HARNESS);
-      cleanupHint();
-      settle(exitResult);
-    });
-    spawned.once("error", () => {
-      exitResult = false;
-      if (terminationTimer) clearTimeout(terminationTimer);
-      cleanupHint();
-      settle(false);
-    });
-  };
-
-  const initial = pinAutomationEnv(options.env, options.harnessPin);
-  hintDir = initial.hintDir;
-  start(initial.env);
-
-  return {
-    completion,
-    terminate: beginTermination,
-    outcome: () => outcomeHint,
-  };
-}
-
-function pinAutomationEnv(
-  base: Record<string, string | undefined>,
-  harnessPin?: string,
-): {
-  env: Record<string, string | undefined>;
-  hintDir?: string;
-} {
-  const failover = getWorkerFailover();
-  if (!failover) {
-    return { env: harnessPin ? pinnedHarnessChildEnv(base, harnessPin) : base };
-  }
-  const hintDir = mkdtempSync(join(tmpdir(), "devintern-usage-limit-"));
-  const hintPath = join(hintDir, "hint.json");
-  // A pinned entry keeps the agent it named (no failover overlay); its
-  // usage-limit exit is recorded but never re-spawned on another harness.
-  const env = harnessPin
-    ? pinnedChildEnvWithHint(base, harnessPin, hintPath)
-    : failover.childEnv(base, hintPath);
-  return { env, hintDir };
 }
