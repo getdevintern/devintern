@@ -150,3 +150,6 @@ mode the dependent task starts.
 `devintern worker queue` (and `--json`, `GET /api/queue`, and the dashboard's
 Queued list) shows each dependent task's dependencies, mode, and reason, for
 example `waiting: local-foo PR #12 not merged` or `blocked: local-foo escalated`.
+In the dashboard, each dependency links to its latest run with its current
+status, a failed one has an inline **Re-queue** button, and a run's page lists
+the queued tasks it **Blocks**.

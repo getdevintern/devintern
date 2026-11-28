@@ -134,6 +134,8 @@ export interface RunDetailResponse {
   artifacts: TaskArtifactFile[];
   /** Where this run came from and what it spawned (absent from older servers). */
   lineage?: RunLineage;
+  /** Queued tasks waiting on this run's task (absent from older servers). */
+  blocks?: TaskDependent[];
 }
 
 /** How a run relates to the run it was sourced from. */
@@ -755,6 +757,29 @@ export interface SourcesResponse {
 /** Where a queued item came from. */
 export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job" | "tracker";
 
+/** Where a dependency stands; `unknown` when nothing is recorded for its key (e.g. pruned). */
+export type TaskLinkStatus = "pending" | "running" | "done" | "failed" | "cancelled" | "unknown";
+
+/** A dependency key resolved to where it can be opened and retried. */
+export interface TaskLink {
+  key: string;
+  status: TaskLinkStatus;
+  latestRunId?: number;
+  latestRunStatus?: RunStatus;
+  /** Queued-work item id while the dependency itself waits in the queue. */
+  queuedItemId?: string;
+  /** Set when `POST /api/runs/<latestRunId>/retry` would re-run it: how it dispatches. */
+  retryKind?: NonNullable<RetryInfo["kind"]>;
+}
+
+/** A queued task waiting on a run's task (`blocks` of `GET /api/runs/:id`). */
+export type TaskDependent = {
+  key: string;
+  title: string;
+  queuedItemId: string;
+  latestRunId?: number;
+} & Pick<QueuedWorkItem, "dependencyState" | "dependencyReason">;
+
 /** One pending item from `GET /api/queue`; running rows are active work instead. */
 export interface QueuedWorkItem {
   /** Stable across polls: `<kind>:<row id>`. */
@@ -795,6 +820,10 @@ export interface QueuedWorkItem {
   dependencyState?: "waiting" | "blocked";
   /** Ad-hoc / tracker: why, naming the dependency. */
   dependencyReason?: string;
+  /** Ad-hoc / tracker: the dependency a stacked claim branched from. */
+  stackedOn?: string;
+  /** `dependsOn` (then `stackedOn`) resolved server-side; absent on older servers. */
+  dependencyLinks?: TaskLink[];
   /** Tracker: the tracker the ticket was polled from. */
   tracker?: string;
   /** Tracker: the team that polled it. */

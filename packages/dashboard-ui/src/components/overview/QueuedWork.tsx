@@ -8,9 +8,11 @@
  */
 
 import { ArrowRight, ChevronRight } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
+import { DependencyList } from "@/components/overview/DependencyLinks";
+import { consumeQueuedFocus, queuedItemDomId } from "@/components/overview/focus";
 import { formatIn } from "@/components/overview/overview-model";
 import { TaskDescription } from "@/components/TaskDescription";
 import { TicketKey } from "@/components/TicketKey";
@@ -178,7 +180,11 @@ function QueuedDetails({
             {formatTime(held)} ({formatIn(held, now)})
           </Fact>
         ) : null}
-        {item.dependsOn?.length ? (
+        {item.dependencyLinks?.length ? (
+          <Fact label={`Depends on (${item.dependencyMode ?? "merged"})`}>
+            <DependencyList links={item.dependencyLinks} stackedOn={item.stackedOn} />
+          </Fact>
+        ) : item.dependsOn?.length ? (
           <Fact label="Depends on">
             {item.dependsOn.join(", ")} ({item.dependencyMode ?? "merged"})
           </Fact>
@@ -248,7 +254,7 @@ function QueuedRow({
   const detail = statusDetail(item, now);
   const repo = item.repo?.split("/").pop();
   return (
-    <li className="aq-item">
+    <li className="aq-item" id={queuedItemDomId(item.id)} tabIndex={-1}>
       <details>
         <summary className="aw-row" data-kind="queued">
           <div className="aw-main">
@@ -358,6 +364,10 @@ export function QueuedWork({
   const visible = items.filter((item) => !withdrawn.has(item.id));
   const shownTotal = Math.max(visible.length, total - (items.length - visible.length));
   const onCancelled = (id: string) => setWithdrawn((current) => new Set(current).add(id));
+  // A dependency link elsewhere may have asked to reveal one of these rows.
+  useEffect(() => {
+    consumeQueuedFocus();
+  }, [items]);
   if (visible.length === 0 && cancelled.length === 0 && withdrawn.size === 0) return null;
   const hidden = Math.max(0, shownTotal - visible.length);
   const next = visible[0];

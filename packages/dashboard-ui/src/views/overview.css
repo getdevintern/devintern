@@ -400,6 +400,33 @@
   overflow-wrap: anywhere;
 }
 
+/* Linked dependencies: key, status, and an inline retry for a failed one. */
+.aq-deps {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.aq-dep {
+  display: grid;
+  gap: 6px;
+}
+
+.aq-dep-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.aq-dep-retry {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
 .aq-link {
   display: inline-flex;
   width: fit-content;

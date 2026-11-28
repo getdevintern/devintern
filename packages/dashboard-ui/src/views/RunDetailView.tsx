@@ -31,6 +31,7 @@ import { isUnsuccessfulRun, runCause } from "@/lib/run-outcome";
 import { runPrHref, runWorkLink } from "@/lib/run-work";
 import { cn, formatDuration, formatTime } from "@/lib/utils";
 import { attemptInfo, runTitle, statusTone } from "./run-detail/helpers";
+import { BlocksSection } from "./run-detail/Blocks";
 import { FailureBanner } from "./run-detail/FailureBanner";
 import { SourcedFrom, SpawnedWorkSection } from "./run-detail/Lineage";
 import { Reference } from "./run-detail/Reference";
@@ -563,6 +564,7 @@ export function RunDetailView({ runId }: { runId: number; onBack?: () => void })
             </div>
             <aside aria-label="Run facts" className="rd-rail space-y-6">
               <Facts run={run} attempt={attempt} total={total} parent={data.lineage?.parent} />
+              <BlocksSection blocks={data.blocks} />
               <RetryAuditList entries={data.retry.audit} />
             </aside>
             <div className="rd-reference-area min-w-0">

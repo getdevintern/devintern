@@ -30,6 +30,8 @@ import type { JobKind, QueuedJobSnapshot, QueuedJobWaitReason } from "../worker/
 import { deriveTaskTitle } from "./task-title";
 import { readAgentStartFailures } from "./agent-start-health";
 import type { AgentStartFailureView } from "./agent-start-health";
+import { resolveTaskLinks, withTaskLinkDatabases } from "./task-links";
+import type { TaskLink } from "./task-links";
 
 /** Where a queued item came from. */
 export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job" | "tracker";
@@ -86,6 +88,13 @@ export interface QueuedWorkItem {
   dependencyState?: "waiting" | "blocked";
   /** Ad-hoc / tracker: why, naming the dependency (`local-foo PR #12 not merged`). */
   dependencyReason?: string;
+  /** Ad-hoc / tracker: the dependency whose branch a stacked claim branched from. */
+  stackedOn?: string;
+  /**
+   * Ad-hoc / tracker: each of {@link dependsOn} (then {@link stackedOn}, when
+   * not among them) resolved to its status, newest run, and retry action.
+   */
+  dependencyLinks?: TaskLink[];
   /** Tracker: the tracker the ticket was polled from (`jira`). */
   tracker?: string;
   /** Tracker: the team that polled it (multi-team workspaces). */
@@ -169,6 +178,7 @@ export function injectedTaskToQueuedItem(task: InjectedTask): QueuedWorkItem {
           dependencyReason: task.dependencyReason,
         }
       : {}),
+    ...(task.stackedOn ? { stackedOn: task.stackedOn } : {}),
   };
 }
 
@@ -188,6 +198,7 @@ export function trackerWaitToQueuedItem(wait: TrackerDependencyWait): QueuedWork
     dependencyMode: wait.dependencyMode,
     dependencyState: wait.state,
     dependencyReason: wait.reason,
+    ...(wait.stackedOn ? { stackedOn: wait.stackedOn } : {}),
   };
 }
 
@@ -399,6 +410,43 @@ export interface QueuedWorkSources {
   listCancelled?: (limit: number) => InjectedTask[];
   /** Jobs waiting in the worker's in-process supervisor (embedded dashboard only). */
   listSupervisorJobs?: () => QueuedJobSnapshot[];
+  /** Resolve every listed item's dependency keys at once; unset serves keys unresolved. */
+  resolveLinks?: (keys: readonly string[]) => Map<string, TaskLink>;
+}
+
+/** Dependency keys of an item in display order: its dependencies, then its stack base. */
+function dependencyKeys(item: QueuedWorkItem): string[] {
+  const keys = [...(item.dependsOn ?? [])];
+  if (item.stackedOn && !keys.includes(item.stackedOn)) keys.push(item.stackedOn);
+  return keys;
+}
+
+/**
+ * Attach resolved dependency links to every item with dependencies, from one
+ * batched lookup for the whole list. A key the lookup does not know is
+ * served as `unknown`; a failed lookup leaves the items as they were.
+ */
+export function attachDependencyLinks(
+  items: QueuedWorkItem[],
+  resolveLinks: QueuedWorkSources["resolveLinks"],
+): QueuedWorkItem[] {
+  if (!resolveLinks) return items;
+  const keys = [...new Set(items.flatMap(dependencyKeys))];
+  if (keys.length === 0) return items;
+  let links: Map<string, TaskLink>;
+  try {
+    links = resolveLinks(keys);
+  } catch {
+    return items;
+  }
+  return items.map((item) => {
+    const own = dependencyKeys(item);
+    if (own.length === 0) return item;
+    return {
+      ...item,
+      dependencyLinks: own.map((key) => links.get(key) ?? { key, status: "unknown" }),
+    };
+  });
 }
 
 const PR_JOB_TITLES: Partial<Record<JobKind, string>> = {
@@ -532,8 +580,11 @@ export function collectQueuedWork(sources: QueuedWorkSources): QueuedWorkRespons
   const tracker = readTrackerDependencyWaits(sources.queueDbPath, QUEUED_SOURCE_LIMIT).map(
     trackerWaitToQueuedItem,
   );
-  const items = [...adHoc, ...retries, ...webhooks, ...automations, ...prJobs, ...tracker].sort(
-    (a, b) => queuedEligibleAt(a) - queuedEligibleAt(b),
+  const items = attachDependencyLinks(
+    [...adHoc, ...retries, ...webhooks, ...automations, ...prJobs, ...tracker].sort(
+      (a, b) => queuedEligibleAt(a) - queuedEligibleAt(b),
+    ),
+    sources.resolveLinks,
   );
   let cancelled: CancelledTaskItem[] = [];
   try {
@@ -574,6 +625,8 @@ export function handleQueuedWork(data: DashboardData): ApiResponse {
     listAutomations: () => data.getAutomations(),
     listCancelled: (limit) => data.getInjectedTaskReadStore().listRecentlyCancelled(limit),
     listSupervisorJobs: () => data.getSupervisorQueuedJobs(),
+    resolveLinks: (keys) =>
+      withTaskLinkDatabases(data.dbPath, data.queueDbPath, (dbs) => resolveTaskLinks(dbs, keys)),
   });
   return { status: 200, body };
 }
