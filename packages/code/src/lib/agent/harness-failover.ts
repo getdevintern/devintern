@@ -377,6 +377,29 @@ export class HarnessFailover {
     return this.entries.find((e) => !this.isLimited(e.name) && !this.isUnavailable(e.name)) ?? null;
   }
 
+  /**
+   * Record a usage-limit window for `harness` without failing over or
+   * changing the active entry. For runs pinned to a harness outside the
+   * failover decision (an automation's `harness`), so other jobs and later
+   * pinned runs can see the limit.
+   *
+   * Windows for chain entries are persisted like {@link reportUsageLimit}'s.
+   * A harness outside the chain is tracked in memory only: {@link restore}
+   * drops windows for harnesses that are not in the chain.
+   *
+   * @param harness - Harness the limited child ran on.
+   * @param untilMs - Epoch ms when its window ends.
+   * @returns The window now stored for `harness` (the furthest reset).
+   */
+  recordWindow(harness: string, untilMs: number): number {
+    if (this.entries.some((entry) => entry.name === harness)) {
+      this.setWindow(harness, untilMs);
+    } else {
+      this.limited.set(harness, Math.max(this.limited.get(harness) ?? 0, untilMs));
+    }
+    return this.limited.get(harness) as number;
+  }
+
   /** Store a window, keeping the furthest reset when one is already open. */
   private setWindow(harness: string, untilMs: number): void {
     const existing = this.limited.get(harness) ?? 0;

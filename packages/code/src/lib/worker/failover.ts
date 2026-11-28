@@ -239,16 +239,7 @@ export class WorkerFailover {
     hint?: UsageLimitHint,
     harness: string = this.manager.activeName,
   ): FailoverOutcome {
-    const now = this.now();
-    const known =
-      hint?.untilMs && hint.untilMs > now ? hint.untilMs : resetHintToMs(hint?.resetsAt, now);
-    let until: number;
-    if (known !== null) {
-      this.unknownResetStreak.delete(harness);
-      until = known;
-    } else {
-      until = now + this.unknownResetCooldownMs(harness, hint?.period);
-    }
+    const until = this.limitUntilFromHint(hint, harness);
     const outcome = this.manager.reportUsageLimit(until, harness);
     if (outcome.kind === "exhausted") {
       this.paused = true;
@@ -256,6 +247,64 @@ export class WorkerFailover {
     }
     this.armTimers();
     return outcome;
+  }
+
+  /**
+   * Record a usage limit reported by a run pinned to `harness` (an automation
+   * or estimation `harness`, a pinned fleet job). The caller never re-spawns
+   * on another harness.
+   *
+   * When `harness` is the active chain entry this is a normal
+   * {@link reportFromHint}: other jobs must stop using a limited harness.
+   * Otherwise only the window is recorded, so the active harness does not
+   * change. Either way the unknown-reset escalation applies.
+   *
+   * @param harness - Harness the pinned child ran on
+   * @param hint - Reset hint the child wrote, if any
+   * @returns Epoch ms when `harness` is usable again
+   */
+  recordLimit(harness: string, hint?: UsageLimitHint): number {
+    if (harness === this.manager.activeName) {
+      this.reportFromHint(hint, harness);
+    } else {
+      this.manager.recordWindow(harness, this.limitUntilFromHint(hint, harness));
+      this.armTimers();
+    }
+    return this.limitedUntil(harness) ?? this.now();
+  }
+
+  /**
+   * Epoch ms until which `harness` is usage-limited, or `null` when it has no
+   * open window. Covers chain entries and harnesses only pinned runs use.
+   */
+  limitedUntil(harness: string): number | null {
+    const until = this.manager.windows()[harness];
+    return until !== undefined && until > this.now() ? until : null;
+  }
+
+  /**
+   * Earliest open window end among chain entries (`undefined` when none).
+   * Windows recorded for harnesses outside the chain are ignored: they say
+   * nothing about when the chain can run again.
+   */
+  earliestChainResetMs(now: number = this.now()): number | undefined {
+    const windows = this.manager.windows();
+    const open = this.chain.entries
+      .map((entry) => windows[entry.name])
+      .filter((until): until is number => until !== undefined && until > now);
+    return open.length > 0 ? Math.min(...open) : undefined;
+  }
+
+  /** Window end for a limit from its hint, or the escalating fallback. */
+  private limitUntilFromHint(hint: UsageLimitHint | undefined, harness: string): number {
+    const now = this.now();
+    const known =
+      hint?.untilMs && hint.untilMs > now ? hint.untilMs : resetHintToMs(hint?.resetsAt, now);
+    if (known !== null) {
+      this.unknownResetStreak.delete(harness);
+      return known;
+    }
+    return now + this.unknownResetCooldownMs(harness, hint?.period);
   }
 
   /**
@@ -451,8 +500,7 @@ export function harnessChainBlockedUntil(
   now: number = Date.now(),
 ): number | undefined {
   if (!failover?.allLimited()) return undefined;
-  const until = Math.min(...Object.values(failover.windows()).filter((value) => value > now));
-  return Number.isFinite(until) ? until : undefined;
+  return failover.earliestChainResetMs(now);
 }
 
 /** Human-readable reason for a harness-chain pause, shared by pickup loops. */
@@ -488,6 +536,8 @@ export function resetWorkerFailover(): void {
  * With `options.harnessPin` the job named its own agent: the child runs once
  * pinned to that harness, outside the failover chain, and a usage-limit or
  * harness-startup exit is reported as `"deferred"` instead of failing over.
+ * A usage limit is still recorded for the pinned harness
+ * ({@link WorkerFailover.recordLimit}) so later runs see its reset time.
  *
  * @param spawnOnce - Spawn the child with the given env; return its exit code
  * @param baseEnv - Environment to pin the active harness onto
@@ -500,13 +550,24 @@ export async function runWithFailover(
 ): Promise<CliFailoverResult> {
   const failover = getWorkerFailover();
   if (options.harnessPin) {
-    const code = await spawnOnce(pinnedHarnessChildEnv(baseEnv, options.harnessPin));
-    if (code === USAGE_LIMIT_EXIT_CODE) return "deferred";
-    if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
-    if (code === HARNESS_UNAVAILABLE_EXIT_CODE) return "deferred";
-    if (code === WORKTREE_BUSY_EXIT_CODE) return "deferred";
-    if (code === TASK_SKIP_EXIT_CODE) return "skipped";
-    return code === 0 ? "ok" : "failed";
+    const hintDir = mkdtempSync(join(tmpdir(), "devintern-usage-limit-"));
+    const hintPath = join(hintDir, "hint.json");
+    try {
+      const code = await spawnOnce(pinnedChildEnvWithHint(baseEnv, options.harnessPin, hintPath));
+      if (code === USAGE_LIMIT_EXIT_CODE) {
+        // Never re-spawn elsewhere, but record the window so later runs
+        // pinned to (or failing over onto) this harness wait for its reset.
+        failover?.recordLimit(options.harnessPin, readUsageLimitHint(hintPath));
+        return "deferred";
+      }
+      if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
+      if (code === HARNESS_UNAVAILABLE_EXIT_CODE) return "deferred";
+      if (code === WORKTREE_BUSY_EXIT_CODE) return "deferred";
+      if (code === TASK_SKIP_EXIT_CODE) return "skipped";
+      return code === 0 ? "ok" : "failed";
+    } finally {
+      rmSync(hintDir, { recursive: true, force: true });
+    }
   }
   if (!failover) {
     const code = await spawnOnce(baseEnv);
@@ -558,6 +619,24 @@ export async function runWithFailover(
     }
   }
   return "deferred";
+}
+
+/**
+ * Child env for a run pinned to `harnessPin` that still reports its usage
+ * limit: {@link pinnedHarnessChildEnv} (pinned `AGENT_HARNESS`, worker-child
+ * marker so a limit exits 75) plus a hint file for the reset time. The
+ * failover child-env overlay is deliberately not applied.
+ *
+ * @param base - Composed environment
+ * @param harnessPin - Harness the job pinned
+ * @param hintPath - File the child writes its usage-limit hint into
+ */
+export function pinnedChildEnvWithHint(
+  base: Record<string, string | undefined>,
+  harnessPin: string,
+  hintPath: string,
+): Record<string, string | undefined> {
+  return { ...pinnedHarnessChildEnv(base, harnessPin), [USAGE_LIMIT_FILE_ENV]: hintPath };
 }
 
 /**

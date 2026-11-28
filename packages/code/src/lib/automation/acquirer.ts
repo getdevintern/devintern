@@ -21,7 +21,11 @@ import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import type { RunOrigin } from "../state/run-recorder";
 import { readRunOutcomeHint, RUN_OUTCOME_FILE_ENV } from "../worker/run-outcome-protocol";
 import type { RunOutcomeHint } from "../worker/run-outcome-protocol";
-import { getWorkerFailover, harnessBlockedReason } from "../worker/failover";
+import {
+  getWorkerFailover,
+  harnessBlockedReason,
+  pinnedChildEnvWithHint,
+} from "../worker/failover";
 import {
   HARNESS_UNAVAILABLE_EXIT_CODE,
   readUsageLimitHint,
@@ -215,15 +219,13 @@ interface ActiveAutomationRun {
 export function defaultHarnessBlockedUntil(automation: AutomationConfig): number | null {
   const failover = getWorkerFailover();
   if (!failover) return null;
-  const windows = failover.windows();
   if (automation.harness) {
-    const until = windows[automation.harness];
-    return until !== undefined && until > Date.now() ? until : null;
+    // Includes windows recorded by earlier runs pinned to this harness.
+    return failover.limitedUntil(automation.harness);
   }
   if (!failover.allExhausted()) return null;
   const now = Date.now();
-  const until = Math.min(...Object.values(windows).filter((value) => value > now));
-  return Number.isFinite(until) ? until : now;
+  return failover.earliestChainResetMs(now) ?? now;
 }
 
 /** Calculate the first future occurrence after `afterMs` (cron uses host timezone). */
@@ -921,6 +923,11 @@ export function spawnAutomationProcess(
       }
       if (code === USAGE_LIMIT_EXIT_CODE || code === HARNESS_UNAVAILABLE_EXIT_CODE) {
         const failover = getWorkerFailover();
+        if (options.harnessPin && failover && code === USAGE_LIMIT_EXIT_CODE) {
+          // Record the pinned harness's window so the scheduler and "Run
+          // now" stop launching runs into the same limit.
+          failover.recordLimit(options.harnessPin, readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]));
+        }
         // A harness pinned by the entry opts out of workspace failover, so an
         // explicit selection never silently runs a different agent.
         if (!options.harnessPin && failover) {
@@ -975,16 +982,16 @@ function pinAutomationEnv(
   env: Record<string, string | undefined>;
   hintDir?: string;
 } {
-  if (harnessPin) {
-    // The entry named its agent: pin it and skip the workspace failover
-    // overlay. `spawnAutomationProcess`'s `!options.harnessPin` guard ignores
-    // a usage-limit exit rather than re-spawning on another harness.
-    return { env: pinnedHarnessChildEnv(base, harnessPin) };
-  }
   const failover = getWorkerFailover();
   if (!failover) {
-    return { env: base };
+    return { env: harnessPin ? pinnedHarnessChildEnv(base, harnessPin) : base };
   }
   const hintDir = mkdtempSync(join(tmpdir(), "devintern-usage-limit-"));
-  return { env: failover.childEnv(base, join(hintDir, "hint.json")), hintDir };
+  const hintPath = join(hintDir, "hint.json");
+  // A pinned entry keeps the agent it named (no failover overlay); its
+  // usage-limit exit is recorded but never re-spawned on another harness.
+  const env = harnessPin
+    ? pinnedChildEnvWithHint(base, harnessPin, hintPath)
+    : failover.childEnv(base, hintPath);
+  return { env, hintDir };
 }

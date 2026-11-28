@@ -142,6 +142,7 @@ Changes apply to the next occurrence; a run in progress keeps its agent.
 - Missed occurrences (for example while the worker was down) collapse into at most one run after startup.
 - If the previous occurrence of the same automation is still running, or another task holds the repository, the occurrence is skipped, not queued.
 - When every agent harness is usage-limited, the occurrence is skipped and the schedule moves on.
+- An entry with `harness` set is skipped while that agent is usage-limited. A pinned run that hits a limit records the agent's reset time, so later occurrences and dashboard **Run now** wait for it instead of starting into the same limit. The pinned run is not retried on another agent.
 - Changing an entry's schedule resets it: the next run is the next scheduled time.
 - Occurrences skip the clarity (feasibility) check.
 

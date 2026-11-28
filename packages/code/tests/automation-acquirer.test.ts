@@ -11,6 +11,7 @@ import {
   MAX_TIMER_DELAY_MS,
   automationCompletionMessage,
   automationRunEnv,
+  defaultHarnessBlockedUntil,
   nextAutomationDue,
   resolveAutomationRunArgs,
   spawnAutomationProcess,
@@ -20,7 +21,11 @@ import { automationTaskArgs } from "../src/lib/automation/config";
 import { spawnEstimationSweep } from "../src/lib/automation/estimation-acquirer";
 import { AutomationStateStore } from "../src/lib/automation/state";
 import type { AutomationConfig } from "../src/lib/automation/config";
-import { resetWorkerFailover, startWorkerFailover } from "../src/lib/worker/failover";
+import {
+  harnessBlockedReason,
+  resetWorkerFailover,
+  startWorkerFailover,
+} from "../src/lib/worker/failover";
 import { RUN_OUTCOME_FILE_ENV } from "../src/lib/worker/run-outcome-protocol";
 import {
   HARNESS_UNAVAILABLE_EXIT_CODE,
@@ -1264,6 +1269,8 @@ fs.appendFileSync(
     argv: process.argv.slice(2),
   }) + "\\n",
 );
+const hintFile = process.env[${JSON.stringify(USAGE_LIMIT_FILE_ENV)}];
+if (process.env.PROBE_HINT && hintFile) fs.writeFileSync(hintFile, process.env.PROBE_HINT);
 process.exit(75);
 `;
 
@@ -1304,11 +1311,153 @@ process.exit(75);
 
     const records = readSpawns(probeLog);
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({
-      harness: "codex",
-      workerChild: "1",
-      usageLimitFile: null,
+    expect(records[0]).toMatchObject({ harness: "codex", workerChild: "1" });
+    // The pinned child reports its reset time through its own hint file.
+    expect(records[0]?.usageLimitFile).toEqual(expect.any(String));
+    expect(records[0]?.usageLimitFile).not.toBe(inheritedHint);
+  });
+
+  test("a pinned usage limit records the pinned harness's window without failing over", async () => {
+    const { probePath, probeLog } = fixture();
+    const failover = await startWorkerFailover({
+      raw: "codex,grok",
+      checkInstalled: false,
+      log: () => {},
     });
+    const untilMs = Date.now() + 2 * 3_600_000;
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({
+        PROBE_LOG: probeLog,
+        PROBE_HINT: JSON.stringify({ resetsAt: "2am (Asia/Ho_Chi_Minh)", untilMs }),
+      }),
+      harnessPin: "claude-code",
+    });
+    expect(await run.completion).toBe(false);
+
+    // One spawn only: no re-spawn on another harness.
+    expect(readSpawns(probeLog)).toHaveLength(1);
+    expect(failover.limitedUntil("claude-code")).toBe(untilMs);
+    expect(failover.activeName).toBe("codex");
+    expect(failover.limitedUntil("codex")).toBeNull();
+
+    const pinned: AutomationConfig = {
+      id: "product-improvements",
+      enabled: true,
+      prompt: "p",
+      interval: "1h",
+      intervalMs: 3_600_000,
+      harness: "claude-code",
+    };
+    expect(defaultHarnessBlockedUntil(pinned)).toBe(untilMs);
+    expect(defaultHarnessBlockedUntil({ ...pinned, harness: "codex" })).toBeNull();
+    // An unpinned entry still runs on the chain.
+    expect(defaultHarnessBlockedUntil({ ...pinned, harness: undefined })).toBeNull();
+
+    // The scheduler skips the due occurrence and "Run now" is refused.
+    const dbPath = join(tmpdir(), `acquirer-pinned-limit-${Date.now()}-${Math.random()}.db`);
+    let now = 0;
+    let spawned = 0;
+    const acquirer = new AutomationAcquirer({
+      automations: [pinned],
+      dbPath,
+      now: () => now,
+      setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+      clearTimer: () => {},
+      resolveContext: async () => ({ cwd: tmpdir(), env: {}, release: () => {} }),
+      spawnRun: () => {
+        spawned++;
+        return { completion: Promise.resolve(true), terminate: () => {} };
+      },
+      spawnManualRun: () => {
+        spawned++;
+        return { completion: Promise.resolve(true), terminate: () => {} };
+      },
+    });
+    try {
+      await acquirer.start();
+      now = 3_600_000;
+      await acquirer.tick();
+      expect(spawned).toBe(0);
+      const store = new AutomationStateStore(dbPath);
+      expect(store.get(pinned.id)?.nextDueAt).toBe(2 * 3_600_000);
+      store.close();
+
+      expect(await acquirer.triggerManual(pinned.id)).toEqual({
+        ok: false,
+        reason: harnessBlockedReason(untilMs),
+      });
+      expect(spawned).toBe(0);
+    } finally {
+      await acquirer.stop();
+      rmSync(dbPath, { force: true });
+    }
+  });
+
+  test("a pinned limit on a non-active chain entry keeps the active harness", async () => {
+    const { probePath, probeLog } = fixture();
+    const failover = await startWorkerFailover({
+      raw: "codex,claude-code",
+      checkInstalled: false,
+      log: () => {},
+    });
+    const untilMs = Date.now() + 3_600_000;
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({ PROBE_LOG: probeLog, PROBE_HINT: JSON.stringify({ untilMs }) }),
+      harnessPin: "claude-code",
+    });
+    expect(await run.completion).toBe(false);
+
+    expect(readSpawns(probeLog)).toHaveLength(1);
+    expect(failover.activeName).toBe("codex");
+    expect(failover.limitedUntil("claude-code")).toBe(untilMs);
+  });
+
+  test("a pinned limit on the active harness fails the chain over for other jobs", async () => {
+    const { probePath, probeLog } = fixture();
+    const failover = await startWorkerFailover({
+      raw: "claude-code,codex",
+      checkInstalled: false,
+      log: () => {},
+    });
+    const untilMs = Date.now() + 3_600_000;
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({ PROBE_LOG: probeLog, PROBE_HINT: JSON.stringify({ untilMs }) }),
+      harnessPin: "claude-code",
+    });
+    expect(await run.completion).toBe(false);
+
+    // The pinned run itself is never re-spawned on codex.
+    expect(readSpawns(probeLog)).toHaveLength(1);
+    expect(failover.limitedUntil("claude-code")).toBe(untilMs);
+    expect(failover.activeName).toBe("codex");
+  });
+
+  test("a pinned limit without a reset time uses the fallback cooldown", async () => {
+    const { probePath, probeLog } = fixture();
+    const failover = await startWorkerFailover({
+      raw: "codex,grok",
+      checkInstalled: false,
+      log: () => {},
+    });
+
+    const before = Date.now();
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({ PROBE_LOG: probeLog }),
+      harnessPin: "claude-code",
+    });
+    expect(await run.completion).toBe(false);
+
+    const until = failover.limitedUntil("claude-code");
+    expect(until).toBeGreaterThanOrEqual(before + 3_600_000);
+    expect(until).toBeLessThanOrEqual(Date.now() + 3_600_000);
+    expect(failover.activeName).toBe("codex");
   });
 
   test("fails over to the next harness when the entry did not pin one", async () => {
@@ -1353,11 +1502,8 @@ process.exit(75);
 
     const records = readSpawns(probeLog);
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({
-      harness: "claude-code",
-      workerChild: "1",
-      usageLimitFile: null,
-    });
+    expect(records[0]).toMatchObject({ harness: "claude-code", workerChild: "1" });
+    expect(records[0]?.usageLimitFile).toEqual(expect.any(String));
     expect(records[0]?.argv).toContain("--estimate");
   });
 

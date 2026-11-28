@@ -372,10 +372,12 @@ function unescapeStructuredValue(value: string): string {
  * Convert a human-readable reset hint into an absolute epoch (ms).
  *
  * Handles relative durations ("2h 15m", "in 30 minutes") and clock times
- * ("7:20pm", "9am", with an optional trailing timezone label which is ignored —
- * the clock reading is interpreted in the host's local time). Returns `null`
- * when the hint can't be parsed or resolves to a time already in the past, so
- * the caller can apply its own fallback cooldown.
+ * ("7:20pm", "9am"). A clock time is read in the IANA zone named by a label in
+ * the hint (`2am (Asia/Ho_Chi_Minh)`, `(UTC)`) and in host local time when the
+ * label is missing or not a zone the runtime knows. A clock time at or before
+ * `nowMs` means its next occurrence (tomorrow), so the result is always within
+ * (now, now + 24h]. Returns `null` when the hint can't be parsed, so the caller
+ * can apply its own fallback cooldown.
  *
  * @param hint - Reset hint from {@link UsageLimitResult.resetsAt}
  * @param nowMs - Current time in epoch ms (injected for testability)
@@ -402,7 +404,7 @@ export function resetHintToMs(hint: string | undefined, nowMs: number): number |
     }
   }
 
-  // Clock time: "7:20pm", "9am" (timezone label, if any, is ignored).
+  // Clock time: "7:20pm", "9am", optionally labelled with an IANA zone.
   const clock = text.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
   if (clock) {
     let hour = Number(clock[1]) % 12;
@@ -410,15 +412,144 @@ export function resetHintToMs(hint: string | undefined, nowMs: number): number |
       hour += 12;
     }
     const minute = clock[2] ? Number(clock[2]) : 0;
-    const target = new Date(nowMs);
-    target.setHours(hour, minute, 0, 0);
-    const resetAt = target.getTime();
-    // A clock time already past today likely reflects timezone skew; let the
-    // caller fall back rather than wait ~a day.
-    return resetAt > nowMs ? resetAt : null;
+    const timeZone = hintTimeZone(hint);
+    return timeZone
+      ? nextZonedClockTime(hour, minute, timeZone, nowMs)
+      : nextLocalClockTime(hour, minute, nowMs);
   }
 
   return null;
+}
+
+/**
+ * Return the IANA zone named by a parenthesized label in a reset hint
+ * (`7:20pm (Asia/Ho_Chi_Minh)`), or `undefined` when there is none or the
+ * runtime does not recognize it.
+ *
+ * @param hint - Reset hint in its original case.
+ */
+function hintTimeZone(hint: string): string | undefined {
+  const label = hint.match(/\(\s*([A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*)\s*\)/)?.[1];
+  if (!label) {
+    return undefined;
+  }
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: label }).resolvedOptions().timeZone;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Next occurrence after `nowMs` of a wall-clock time in host local time.
+ *
+ * @param hour - Hour of day, 0-23.
+ * @param minute - Minute, 0-59.
+ * @param nowMs - Current time in epoch ms.
+ */
+function nextLocalClockTime(hour: number, minute: number, nowMs: number): number {
+  const target = new Date(nowMs);
+  target.setHours(hour, minute, 0, 0);
+  if (target.getTime() <= nowMs) {
+    // Recompute on the next calendar day instead of adding 24h, so a DST
+    // change overnight still lands on the stated wall-clock time.
+    target.setDate(target.getDate() + 1);
+    target.setHours(hour, minute, 0, 0);
+  }
+  return target.getTime();
+}
+
+/**
+ * Next occurrence after `nowMs` of a wall-clock time in `timeZone`.
+ *
+ * @param hour - Hour of day, 0-23.
+ * @param minute - Minute, 0-59.
+ * @param timeZone - A valid IANA zone name.
+ * @param nowMs - Current time in epoch ms.
+ */
+function nextZonedClockTime(hour: number, minute: number, timeZone: string, nowMs: number): number {
+  const today = zonedParts(nowMs, timeZone);
+  const resetAt = zonedWallTimeToMs(today.year, today.month, today.day, hour, minute, timeZone);
+  if (resetAt > nowMs) {
+    return resetAt;
+  }
+  return zonedWallTimeToMs(today.year, today.month, today.day + 1, hour, minute, timeZone);
+}
+
+interface ZonedParts {
+  year: number;
+  /** 0-based month, as `Date.UTC` expects. */
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+/**
+ * Calendar fields of an instant as read on a wall clock in `timeZone`.
+ *
+ * @param ms - Epoch ms.
+ * @param timeZone - A valid IANA zone name.
+ */
+function zonedParts(ms: number, timeZone: string): ZonedParts {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+  }).formatToParts(new Date(ms));
+  const field = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find((part) => part.type === type)?.value ?? 0);
+  return {
+    year: field("year"),
+    month: field("month") - 1,
+    day: field("day"),
+    hour: field("hour") % 24,
+    minute: field("minute"),
+    second: field("second"),
+  };
+}
+
+/**
+ * UTC offset (ms) of `timeZone` at instant `ms`.
+ *
+ * @param ms - Epoch ms.
+ * @param timeZone - A valid IANA zone name.
+ */
+function zoneOffsetMs(ms: number, timeZone: string): number {
+  const p = zonedParts(ms, timeZone);
+  const asUtc = Date.UTC(p.year, p.month, p.day, p.hour, p.minute, p.second);
+  return asUtc - Math.floor(ms / 1000) * 1000;
+}
+
+/**
+ * Epoch ms of a wall-clock time in `timeZone`. Day overflow (`day + 1`)
+ * normalizes like `Date.UTC`.
+ *
+ * @param year - Full year.
+ * @param month - 0-based month.
+ * @param day - Day of month (may overflow).
+ * @param hour - Hour, 0-23.
+ * @param minute - Minute, 0-59.
+ * @param timeZone - A valid IANA zone name.
+ */
+function zonedWallTimeToMs(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  timeZone: string,
+): number {
+  const wallAsUtc = Date.UTC(year, month, day, hour, minute, 0, 0);
+  // Two passes settle the offset when the first guess straddles a DST change.
+  const firstGuess = wallAsUtc - zoneOffsetMs(wallAsUtc, timeZone);
+  return wallAsUtc - zoneOffsetMs(firstGuess, timeZone);
 }
 
 /**
