@@ -318,8 +318,11 @@ ptyTest(
       );
       expect(run.output).not.toContain("not ready yet");
       expect(run.output).toMatch(
-        /1\. Automation entitlement: Run `devintern worker login( --workspace \S+)? github`/,
+        /1\. Automation entitlement: Sign in to start your free 14-day Worker Pilot: `devintern worker login( --workspace \S+)?` \(no card required\)\./,
       );
+      // Text output is for a person: the interactive sign-in, without agent flags.
+      expect(run.output).not.toContain("worker login github");
+      expect(run.output).not.toContain("--no-wait");
       expect(run.output).not.toContain("🎉 Worker setup complete");
       // Setup is saved and only signing in is left: exit 2, like non-interactive init.
       expect(run.exitCode, run.output).toBe(2);

@@ -329,8 +329,10 @@ cliTest(
       expect(refused.stdout).toBe("");
       expect(outputLines(refused.stderr)).toEqual([
         `❌ ${fixture.configPath} already exists with other settings; nothing was changed. Pass --yes to update its tracker, task_query, and repository entries (all other settings are kept).`,
-        expect.stringContaining("--task-query 'status=ready' --repo-from-cwd --yes --json"),
+        expect.stringContaining("--task-query 'status=ready' --repo-from-cwd --yes"),
       ]);
+      // Text output is for a person: the rerun hint leaves out the agent's --json.
+      expect(refused.stderr).not.toContain("--json");
       expect(readFileSync(fixture.configPath, "utf8")).toBe(configBefore);
       expect(fixture.hash(fixture.envPath)).toBe(envBefore);
 
