@@ -6,7 +6,7 @@
 
 import { StatusPill } from "@/components/shared";
 import type { AutomationSchedule } from "@/lib/api";
-import { formatAge } from "@/lib/utils";
+import { formatAge, formatTime } from "@/lib/utils";
 
 /**
  * The activity worth showing beside the last run, if any. A running
@@ -42,6 +42,27 @@ export function AutomationActivityStatus({
         {waiting ? "Waiting for a slot" : "Starting"}
       </StatusPill>
       <span className="text-xs text-muted-foreground">{formatAge(activity.since, now)}</span>
+    </span>
+  );
+}
+
+/**
+ * Pill for a job a harness usage limit deferred: "Deferred until Nov 28, 2:05 PM".
+ * Shown until the limit resets or the next run starts, beside the last run.
+ */
+export function AutomationDeferralStatus({
+  deferral,
+}: {
+  deferral: NonNullable<AutomationSchedule["deferral"]>;
+}) {
+  const harness = deferral.harness ? `${deferral.harness} ` : "";
+  const until = formatTime(deferral.until);
+  return (
+    <span
+      className="inline-flex items-center gap-2"
+      title={`Deferred: ${harness}usage limit until ${until}`}
+    >
+      <StatusPill tone="attention">Deferred until {until}</StatusPill>
     </span>
   );
 }

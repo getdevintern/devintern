@@ -457,6 +457,17 @@ export interface AutomationSchedule {
   lastRun?: RunRecord;
   /** Occurrence in flight on this worker, including one still waiting for a slot. */
   activity?: AutomationActivity;
+  /**
+   * Latest usage-limit deferral not yet followed by a started run: when the
+   * harness limit resets (epoch ms) and which harness hit it.
+   */
+  deferral?: AutomationDeferral;
+}
+
+/** An occurrence or run that a harness usage limit deferred. */
+export interface AutomationDeferral {
+  until: number;
+  harness?: string;
 }
 
 /**

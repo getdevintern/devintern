@@ -17,6 +17,18 @@ export interface AutomationScheduleState {
   leaseOwner?: string;
   leaseExpiresAt?: number;
   heartbeatAt?: number;
+  /**
+   * Latest usage-limit deferral not yet followed by a started run: when the
+   * harness limit resets (epoch ms) and which harness hit it, when known.
+   */
+  deferredUntil?: number;
+  deferredHarness?: string;
+}
+
+/** A usage-limit deferral recorded on a schedule row. */
+export interface AutomationDeferral {
+  untilMs: number;
+  harness?: string;
 }
 
 /** Durable schedule cursors and overlap leases stored beside the worker queue. */
@@ -52,6 +64,23 @@ export class AutomationStateStore {
         PRIMARY KEY (provider, source_id)
       )
     `);
+    // Additive migration: existing databases predate usage-limit deferrals.
+    const scheduleColumns = this.db
+      .query("PRAGMA table_info(automation_schedules)")
+      .all() as Array<{ name: string }>;
+    if (!scheduleColumns.some((column) => column.name === "deferred_until")) {
+      this.db.run("ALTER TABLE automation_schedules ADD COLUMN deferred_until INTEGER");
+    }
+    if (!scheduleColumns.some((column) => column.name === "deferred_harness")) {
+      this.db.run("ALTER TABLE automation_schedules ADD COLUMN deferred_harness TEXT");
+    }
+    // Set only while next_due_at points at a queued usage-limit catch-up
+    // (moved earlier than the scheduled occurrence), not on every deferral.
+    if (!scheduleColumns.some((column) => column.name === "catch_up_pending")) {
+      this.db.run(
+        "ALTER TABLE automation_schedules ADD COLUMN catch_up_pending INTEGER NOT NULL DEFAULT 0",
+      );
+    }
     // Additive migration: existing databases predate the unreadable-only streak.
     const columns = this.db.query("PRAGMA table_info(source_status)").all() as Array<{
       name: string;
@@ -78,7 +107,7 @@ export class AutomationStateStore {
     } else if (existing.schedule_spec !== spec) {
       this.db.run(
         `UPDATE automation_schedules SET schedule_spec = ?, next_due_at = ?,
-         last_scheduled_at = NULL WHERE automation_id = ?`,
+         last_scheduled_at = NULL, catch_up_pending = 0 WHERE automation_id = ?`,
         [spec, nextDueAt, stateId],
       );
     }
@@ -106,6 +135,8 @@ export class AutomationStateStore {
       leaseOwner: (row.lease_owner as string | null) ?? undefined,
       leaseExpiresAt: (row.lease_expires_at as number | null) ?? undefined,
       heartbeatAt: (row.heartbeat_at as number | null) ?? undefined,
+      deferredUntil: (row.deferred_until as number | null) ?? undefined,
+      deferredHarness: (row.deferred_harness as string | null) ?? undefined,
     };
   }
 
@@ -120,7 +151,8 @@ export class AutomationStateStore {
     const result = this.db.run(
       `UPDATE automation_schedules
        SET last_scheduled_at = next_due_at, next_due_at = ?, lease_owner = ?,
-           lease_expires_at = ?, heartbeat_at = ?
+           lease_expires_at = ?, heartbeat_at = ?, deferred_until = NULL,
+           deferred_harness = NULL, catch_up_pending = 0
        WHERE automation_id = ? AND next_due_at <= ?
          AND (lease_owner IS NULL OR lease_expires_at <= ?)`,
       [nextDueAt, owner, now + leaseMs, now, automationId, now, now],
@@ -130,21 +162,77 @@ export class AutomationStateStore {
 
   /**
    * Skip a due occurrence without running it (no lease taken), advancing the
-   * cursor. Used when no agent harness can start a run right now.
+   * cursor. Used when no agent harness can start a run right now; `deferral`
+   * records the usage limit that blocked it so the dashboard can show it.
+   * `catchUp` marks `nextDueAt` as a queued catch-up rather than the next
+   * scheduled occurrence; the cursor is replaced either way, so the flag is too.
    */
-  skipDue(automationId: string, now: number, nextDueAt: number): boolean {
+  skipDue(
+    automationId: string,
+    now: number,
+    nextDueAt: number,
+    deferral?: AutomationDeferral,
+    catchUp = false,
+  ): boolean {
     const result = this.db.run(
-      `UPDATE automation_schedules SET last_scheduled_at = next_due_at, next_due_at = ?
+      `UPDATE automation_schedules SET last_scheduled_at = next_due_at, next_due_at = ?,
+         deferred_until = COALESCE(?, deferred_until),
+         deferred_harness = CASE WHEN ? IS NULL THEN deferred_harness ELSE ? END,
+         catch_up_pending = ?
        WHERE automation_id = ? AND next_due_at <= ?`,
-      [nextDueAt, automationId, now],
+      [
+        nextDueAt,
+        deferral?.untilMs ?? null,
+        deferral?.untilMs ?? null,
+        deferral?.harness ?? null,
+        catchUp ? 1 : 0,
+        automationId,
+        now,
+      ],
     );
     return result.changes === 1;
+  }
+
+  /**
+   * Record a run that ended deferred on a usage limit. With `catchUpAt`, the
+   * next due time moves up to it when that is earlier than the current one,
+   * so the missed occurrence runs once after the reset instead of waiting
+   * for the next scheduled occurrence.
+   *
+   * @returns The resulting next due time, or null when the row is gone
+   */
+  recordDeferral(
+    automationId: string,
+    deferral: AutomationDeferral,
+    catchUpAt?: number,
+  ): number | null {
+    // SQLite evaluates every SET expression against the pre-update row, so
+    // catch_up_pending compares with the old next_due_at, like the CASE beside it.
+    this.db.run(
+      `UPDATE automation_schedules SET deferred_until = ?, deferred_harness = ?,
+         catch_up_pending = CASE WHEN ? IS NOT NULL AND ? < next_due_at THEN 1
+           ELSE catch_up_pending END,
+         next_due_at = CASE WHEN ? IS NOT NULL AND ? < next_due_at THEN ? ELSE next_due_at END
+       WHERE automation_id = ?`,
+      [
+        deferral.untilMs,
+        deferral.harness ?? null,
+        catchUpAt ?? null,
+        catchUpAt ?? null,
+        catchUpAt ?? null,
+        catchUpAt ?? null,
+        catchUpAt ?? null,
+        automationId,
+      ],
+    );
+    return this.get(automationId)?.nextDueAt ?? null;
   }
 
   /** Coalesce a due occurrence skipped because the previous run is still active. */
   skipOverlap(automationId: string, now: number, nextDueAt: number): boolean {
     const result = this.db.run(
-      `UPDATE automation_schedules SET last_scheduled_at = next_due_at, next_due_at = ?
+      `UPDATE automation_schedules SET last_scheduled_at = next_due_at, next_due_at = ?,
+         catch_up_pending = 0
        WHERE automation_id = ? AND next_due_at <= ?
          AND lease_owner IS NOT NULL AND lease_expires_at > ?`,
       [nextDueAt, automationId, now, now],
@@ -156,12 +244,27 @@ export class AutomationStateStore {
    * Take the overlap lease for a manual ("Run now") run without touching the
    * schedule cursor: while held, `claim` and `skipOverlap` see the lease and
    * treat the manual run exactly like an active scheduled run.
+   *
+   * A pending usage-limit deferral is cleared. When a catch-up is queued
+   * (`catch_up_pending`), the manual run stands in for it: `next_due_at` moves
+   * out to `nextScheduledAt` (never earlier) so the catch-up does not run the
+   * job a second time. Any other deferral leaves the cursor on the real
+   * scheduled occurrence untouched.
    */
-  acquireManual(automationId: string, owner: string, now: number, leaseMs: number): boolean {
+  acquireManual(
+    automationId: string,
+    owner: string,
+    now: number,
+    leaseMs: number,
+    nextScheduledAt: number,
+  ): boolean {
     const result = this.db.run(
-      `UPDATE automation_schedules SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?
+      `UPDATE automation_schedules SET lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?,
+         next_due_at = CASE WHEN catch_up_pending = 1 THEN MAX(next_due_at, ?)
+           ELSE next_due_at END,
+         deferred_until = NULL, deferred_harness = NULL, catch_up_pending = 0
        WHERE automation_id = ? AND (lease_owner IS NULL OR lease_expires_at <= ?)`,
-      [owner, now + leaseMs, now, automationId, now],
+      [owner, now + leaseMs, now, nextScheduledAt, automationId, now],
     );
     return result.changes === 1;
   }

@@ -78,7 +78,7 @@ Notes:
 - Without `[[estimations]]`, estimation is off. `[defaults].task_query` is never estimated on its own. `worker init` does not set up estimations.
 - Entries can be added, changed, or removed while the worker runs. A sweep in progress is not interrupted.
 - While estimations are configured, the worker runs one agent at a time, so sweeps do not compete with other work for usage limits.
-- A usage limit ends the sweep cleanly; the next occurrence continues. Missed and overlapping occurrences follow the same rules as [automations](./automations.md#how-occurrences-run).
+- A usage limit ends the sweep cleanly, and the next scheduled occurrence picks up where it stopped. Unlike automations, a sweep missed on a usage limit is never caught up after the reset, and `on_usage_limit` does not apply. Overlapping occurrences follow the same rules as [automations](./automations.md#how-occurrences-run).
 - A task where only the field or only the comment was written is reported as failed and retried on the next sweep.
 - Each sweep appears in the [dashboard](./dashboard.md) with the `estimate` origin.
 
