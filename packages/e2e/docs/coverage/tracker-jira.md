@@ -43,8 +43,19 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: `devintern worker` surface
 - Status: `default`
 - Evidence: `tests/local/worker-jira-polling.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: PR-created actioned marker and post-PR transition on a real code host (bare remote exposes no platform); live Jira `updated` semantics.
-- Last reviewed: 2026-11-17
+- Missing: Live Jira `updated` semantics. The PR-created actioned marker and post-PR transition are covered by the next row.
+- Last reviewed: 2026-11-28
+
+### Jira worker: polled ticket opens an MR, moves to the review status, and is skipped as PR-actioned
+
+- Gap id: `e2e-tracker-jira-post-pr-actioned`
+- Surface: `devintern worker` surface; external dependencies: Jira transitions/comments and GitLab MR creation
+- Status: `default`
+- Evidence: `tests/local/worker-jira-gitlab-pr.test.ts` (`bun run --filter @devintern/e2e test`), against `providers/fake-jira.ts` and `helpers/fake-gitlab-forge.ts` (`mergeRequestCreation`)
+- Missing: Live Jira and a live GitLab instance. The existing-MR fallback (409, then the open-MR lookup and the label update) is served by the fake but not reached by the worker flow, because the re-run pushes a fresh branch. GitHub and Bitbucket hosts are not exercised for this workflow.
+- Observed (unconfirmed intent): The Jira implementation comment is posted before the MR is created, so no Jira comment carries the MR URL. The URL is only on the run record and `agent_prs`. Not asserted.
+- Observed (unconfirmed intent): After a description edit re-arms the PR'd ticket, the re-run creates `feature/<key>-attempt-2` and opens a second MR, and the first MR stays open. This matches the fresh-attempt rule in `docs/code/delegation-runs.md` (the open-PR check works only on GitHub), but the tracker docs say only that an edit re-arms the ticket. The test asserts the re-run, that no two MRs share a source branch, and that the first MR is unchanged. It does not assert the MR count after the re-run.
+- Last reviewed: 2026-11-28
 
 ### Jira worker dependency gate: "is blocked by" links hold a polled ticket until the blocker is done
 
@@ -161,8 +172,9 @@ single pickup of the matching issue (branch, run record, comment, transition),
 a decoy that is never run, no re-run while the issue is unchanged (the no-PR
 actioned marker), exactly one re-run after a description edit, the retry gate
 after an incomplete run (unlocked by exactly one human comment), and cursor
-resume after a graceful restart. The PR-created actioned marker on a real code
-host remains live-only.
+resume after a graceful restart. The PR-created actioned marker and post-PR
+transition are covered offline by `tests/local/worker-jira-gitlab-pr.test.ts`
+through the fake GitLab forge.
 
 Endpoints covered:
 
@@ -248,6 +260,46 @@ In one workflow it proves:
 5. Cursor persistence. After a graceful stop and restart on the same
    workspace, the first search is the detector window from the persisted
    cursor, and nothing already processed runs again.
+
+```bash
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Worker Jira polling through a GitLab forge (PR path)
+
+`tests/local/worker-jira-gitlab-pr.test.ts` runs the same polling loop as above,
+but the repo remote is a loopback GitLab project. `FakeGitlabForge` with
+`mergeRequestCreation` serves what `GitLabMRClient.createPullRequest` calls:
+`GET /version`, the project with its default branch, branch reads from the bare
+repository, `GET labels`, the open-MR lookup, `POST merge_requests` (409 while
+an open MR uses the same source branch), and the label update on an existing MR.
+A git `insteadOf` rewrite (`installForgeGitRewrite`) maps the forge URL onto the
+bare repository. The Jira fake keeps distinct In Progress and In Review statuses,
+so the post-PR transition is a separate step. Jira and GitLab tokens are random
+per-test values, and a refusing recording proxy is set as `HTTP(S)_PROXY`.
+
+It proves:
+
+1. PR path. The polled ticket gets exactly one MR from `feature/<key>` to the
+   default branch, carrying only the project label that exists (the missing
+   `pr_labels` entry is skipped with a warning). The branch tip has the agent's
+   change. Jira sees the transitions In Progress, then In Review, and one
+   implementation comment. The run record's `pr_url` and the `agent_prs` row are
+   the MR URL. The actioned marker is the PR-created one (`transitioned = 1`,
+   `transition_status = In Review`), not the no-PR one.
+2. PR-actioned dedupe. Later ticks log
+   `skipping <key> (already actioned; no change since the PR)`. There is no
+   second run, MR request, or comment.
+3. Re-arm. A description edit runs the ticket exactly once more, with no MR
+   opened twice from one source branch. The first MR is unchanged, the re-run's
+   `pr_url` is a forge MR, and the ticket ends PR-actioned in In Review again.
+4. Hygiene. The forge has no unexpected requests or auth failures, the Jira fake
+   has no unexpected requests, and the proxy saw nothing. Neither token, raw or
+   URL-encoded, appears in worker output, posted bodies, or files under the
+   fixture root.
+
+Prerequisites: none beyond the built CLI.
 
 ```bash
 bun run --filter @getdevintern/code build
