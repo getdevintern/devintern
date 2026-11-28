@@ -168,7 +168,8 @@ describe("devintern init wizard", () => {
       ]),
       probe: (_, env) => {
         seen.push({ ...env });
-        return seen.length === 1 ? Promise.reject(new Error("401")) : Promise.resolve();
+        // A transient failure, not a rejection: a rejected token is not kept.
+        return seen.length === 1 ? Promise.reject(new Error("fetch failed")) : Promise.resolve();
       },
       getUser: () => Promise.resolve(null),
       signIn: () => Promise.reject(new LoginSkippedError()),

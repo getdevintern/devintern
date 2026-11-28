@@ -9,7 +9,11 @@
  * the background service comes before the foreground worker.
  */
 
-import { condenseMessage } from "@devintern/task-trackers";
+import {
+  GITHUB_FINE_GRAINED_PERMISSIONS,
+  condenseMessage,
+  githubTokenWriteHint,
+} from "@devintern/task-trackers";
 
 import {
   OTHER_LOGIN_METHODS,
@@ -318,8 +322,8 @@ function fixStep(
       return {
         id: "fix-repo-access",
         message:
-          github && !summary.includes("Contents and Pull requests")
-            ? `${summary}. Give GITHUB_TOKEN Contents and Pull requests read and write access to the repository (fine-grained token) or the \`repo\` scope (classic token), then run \`${fixes.recheck}\``
+          github && !summary.includes(GITHUB_FINE_GRAINED_PERMISSIONS)
+            ? `${summary}. ${githubTokenWriteHint()}, then run \`${fixes.recheck}\``
             : `${summary}. Then run \`${fixes.recheck}\``,
         command: github ? GITHUB_TOKEN_SETTINGS_URL : fixes.recheck,
         ...(github ? { url: GITHUB_TOKEN_SETTINGS_URL } : {}),

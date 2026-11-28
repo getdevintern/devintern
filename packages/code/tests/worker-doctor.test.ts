@@ -15,6 +15,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import type { ReadinessCheck } from "../src/lib/observability/readiness";
+import { buildWorkerDoctorReport } from "../src/lib/observability/readiness-json";
 import { renderReadinessReport } from "../src/lib/observability/readiness";
 import {
   collectWorkerDoctorChecks,
@@ -296,6 +297,102 @@ repo = "backend"
     expect(credentials?.detail).toContain("401");
     expect(byId(checks, "query")[0]?.status).toBe("fail");
     expect(queried).toBe(false);
+  });
+
+  describe("GitHub token problems name the cause, not missing variables", () => {
+    const GITHUB_DEFAULTS = '[defaults]\ntracker = "github"\ntask_query = "label:devintern"\n';
+    const GITHUB_ENV = "GITHUB_TOKEN=ghp_bad\nGITHUB_REPO=acme/app\n";
+
+    async function credentialRow(message: string) {
+      const workspacePath = writeWorkspace(GITHUB_DEFAULTS, GITHUB_ENV);
+      const checks = await collectWorkerDoctorChecks(
+        { workspacePath },
+        passingDeps({
+          probeCredentials: async () => {
+            throw new Error(message);
+          },
+        }),
+      );
+      return { checks, credentials: byId(checks, "credentials")[0] };
+    }
+
+    test("an invalid token says so and how to create a new one", async () => {
+      const { checks, credentials } = await credentialRow(
+        'GitHub API error (401) checking acme/app: {"message":"Bad credentials"}',
+      );
+      expect(credentials?.detail).toContain("the token is invalid, expired, or revoked");
+      expect(credentials?.hint).not.toContain("missing variables");
+      expect(credentials?.hint).toContain("https://github.com/settings/personal-access-tokens/new");
+      expect(credentials?.hint).toContain("https://github.com/settings/tokens/new?scopes=repo");
+      expect(credentials?.hint).toContain(`replace GITHUB_TOKEN in ${join(workspaceDir, ".env")}`);
+      const query = byId(checks, "query")[0];
+      expect(query?.detail).toContain("tracker credential check failed");
+      expect(query?.hint).not.toContain("missing variables");
+    });
+
+    test("a token without the repository names the repository and the fix", async () => {
+      const { checks, credentials } = await credentialRow(
+        "GitHub token cannot access acme/app (HTTP 404): check GITHUB_REPO and that the token is granted this repository",
+      );
+      expect(credentials?.detail).toContain("GITHUB_TOKEN has no access to acme/app");
+      expect(credentials?.hint).not.toContain("missing variables");
+      expect(credentials?.hint).toContain("add it under Repository access");
+      // The non-interactive fix step carries the same wording.
+      const report = buildWorkerDoctorReport(checks, {
+        workspaceDir,
+        offline: false,
+        env: {},
+        home: workspaceDir,
+      });
+      const fix = report.nextSteps.find((step) => step.id === "fix-credentials");
+      expect(fix?.message).toContain("GITHUB_TOKEN has no access to acme/app");
+      expect(fix?.message).toContain("add it under Repository access");
+    });
+
+    test("a missing token still says to add the missing variable", async () => {
+      const workspacePath = writeWorkspace(GITHUB_DEFAULTS, "GITHUB_REPO=acme/app\n");
+      const checks = await collectWorkerDoctorChecks({ workspacePath }, passingDeps());
+      const credentials = byId(checks, "credentials")[0];
+      expect(credentials?.detail).toContain("missing GITHUB_TOKEN");
+      expect(credentials?.hint).toContain("Add the missing variables");
+    });
+  });
+
+  test("a repository the token cannot see hints the grant, and fix-repo-access repeats it once", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, `${JIRA_ENV}\nGITHUB_TOKEN=ghp_test\n`);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        checkRepoAccess: async () => ({
+          ok: false,
+          reason: "GitHub API 404 for acme/backend (missing or not visible to GITHUB_TOKEN)",
+        }),
+      }),
+    );
+    const repo = byId(checks, "repo")[0];
+    expect(repo?.hint).toContain('Check the remote URL for "backend"');
+    expect(repo?.hint).toContain("Give GITHUB_TOKEN access to acme/backend");
+    const report = buildWorkerDoctorReport(checks, {
+      workspaceDir,
+      offline: false,
+      env: {},
+      home: workspaceDir,
+    });
+    const fix = report.nextSteps.find((step) => step.id === "fix-repo-access");
+    expect(fix?.message.split("Contents, Pull requests, and Issues").length).toBe(2);
+  });
+
+  test("an invalid token in the repository check says how to create a new one", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, `${JIRA_ENV}\nGITHUB_TOKEN=ghp_bad\n`);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        checkRepoAccess: async () => ({ ok: false, reason: "GitHub API 401 for acme/backend" }),
+      }),
+    );
+    const repo = byId(checks, "repo")[0];
+    expect(repo?.hint).toContain("Create a new token");
+    expect(repo?.hint).toContain("replace GITHUB_TOKEN");
   });
 
   test("--offline skips the credential probe", async () => {

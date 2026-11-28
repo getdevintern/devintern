@@ -3,7 +3,12 @@
  * file rendering, shared by the interactive wizard and `init --yes`.
  */
 
-import { BUNDLED_TRELLO_API_KEY, stepLink } from "@devintern/task-trackers";
+import {
+  BUNDLED_TRELLO_API_KEY,
+  GITHUB_FINE_GRAINED_TOKEN_URL,
+  githubTokenLinkDetails,
+  stepLink,
+} from "@devintern/task-trackers";
 import type { EnvPromptStep } from "@devintern/task-trackers";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 
@@ -24,8 +29,8 @@ export const TRACKER_DOCS: Record<string, string> = {
 /** Guide for the optional PR-integration GitHub token. */
 export const GITHUB_PR_DOCS = "https://devintern.com/docs/code/github-integration";
 
-export const GITHUB_TOKEN_LINK =
-  "https://github.com/settings/tokens/new?scopes=repo&description=devintern";
+/** Fine-grained token link; {@link githubTokenLinkDetails} adds permissions and the classic link. */
+export const GITHUB_TOKEN_LINK = GITHUB_FINE_GRAINED_TOKEN_URL;
 
 export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
   jira: [
@@ -66,8 +71,9 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     {
       key: "GITHUB_TOKEN",
       secret: true,
-      label: "GitHub personal access token ('repo' scope)",
+      label: "GitHub personal access token",
       link: GITHUB_TOKEN_LINK,
+      linkDetails: (values) => githubTokenLinkDetails(values.GITHUB_REPO),
     },
     {
       key: "GITHUB_REPO",
@@ -171,6 +177,7 @@ export const GITHUB_PR_TOKEN_STEP: EnvPromptStep = {
   label: "GitHub token for creating pull requests",
   secret: true,
   link: GITHUB_TOKEN_LINK,
+  linkDetails: () => githubTokenLinkDetails(),
   optional: true,
 };
 

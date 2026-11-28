@@ -975,11 +975,9 @@ describe("runInitUpgrade", () => {
       expect(env).toContain("GITHUB_TOKEN=gho_cli_tracker");
       expect(env).toContain("GITHUB_REPO=acme/app");
       expect(asked.some((question) => question.startsWith("Use your GitHub CLI token"))).toBe(true);
-      expect(
-        asked.some((question) =>
-          question.startsWith("GitHub personal access token ('repo' scope)"),
-        ),
-      ).toBe(false);
+      expect(asked.some((question) => question.startsWith("GitHub personal access token"))).toBe(
+        false,
+      );
     } finally {
       if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = savedToken;

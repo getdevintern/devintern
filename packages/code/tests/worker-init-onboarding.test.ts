@@ -24,6 +24,7 @@ import {
   reportWorkerInitAbort,
   runWorkerInit,
 } from "../src/lib/init/worker-init";
+import { GITHUB_PR_TOKEN_STEP, TRACKER_SETUP } from "../src/lib/init/scaffold";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
 
 const RECOMMENDED = "Use the recommended worker settings";
@@ -368,6 +369,13 @@ describe("describeQueryFailure", () => {
     expect(describeQueryFailure("GitHub API error (401): Bad credentials").access).toBe(true);
   });
 
+  test("a rejected token says it is invalid and how to create a new one", () => {
+    const { text } = describeQueryFailure("GitHub API error (401): Bad credentials", "acme/app");
+    expect(text).toContain("the token is invalid, expired, or revoked");
+    expect(text).toContain("https://github.com/settings/personal-access-tokens/new");
+    expect(text).toContain("https://github.com/settings/tokens/new?scopes=repo");
+  });
+
   test("other JSON errors keep only their messages", () => {
     const failure = describeQueryFailure(
       'GitHub API error (422): {"message":"Validation Failed","errors":[{"message":"Invalid search query"}]}',
@@ -378,5 +386,21 @@ describe("describeQueryFailure", () => {
 
   test("a plain message passes through", () => {
     expect(describeQueryFailure("syntax error")).toEqual({ text: "syntax error", access: false });
+  });
+});
+
+describe("GitHub token prompt", () => {
+  test("offers the fine-grained link with its permissions and the classic link", () => {
+    for (const step of [
+      TRACKER_SETUP.github?.find((entry) => entry.key === "GITHUB_TOKEN"),
+      GITHUB_PR_TOKEN_STEP,
+    ]) {
+      expect(step?.link).toBe("https://github.com/settings/personal-access-tokens/new");
+      const details =
+        typeof step?.linkDetails === "function" ? step.linkDetails({}) : (step?.linkDetails ?? []);
+      const text = details.join("\n");
+      expect(text).toContain("Contents, Pull requests, and Issues set to Read and write");
+      expect(text).toContain("https://github.com/settings/tokens/new?scopes=repo");
+    }
   });
 });
