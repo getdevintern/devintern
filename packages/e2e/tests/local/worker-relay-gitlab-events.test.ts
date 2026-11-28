@@ -30,16 +30,8 @@ import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { delimiter, join, relative } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { FakeGitlabForge } from "../../helpers/fake-gitlab-forge";
 import type {
   FakeGitlabCiFailure,
@@ -48,6 +40,10 @@ import type {
 import { FakeRelay } from "../../helpers/fake-relay";
 import type { FakeRelayCodeHostIdentity, FakeRelayEnvelope } from "../../helpers/fake-relay";
 import { GitlabForgeProxy } from "../../helpers/gitlab-forge-proxy";
+import {
+  installGitlabGitRewrite,
+  registerGitlabMergeRequest,
+} from "../../helpers/gitlab-worker-follow-up";
 import { checkedCommand } from "../../helpers/process";
 import { relayStatePath, writeRelayState } from "../../helpers/relay-state";
 import { cliPath, WorkerFixture } from "../../helpers/worker";
@@ -95,11 +91,6 @@ interface Owned {
   forge?: FakeGitlabForge;
   proxy?: GitlabForgeProxy;
   relay?: FakeRelay;
-}
-
-/** Quote a string for a POSIX single-quoted shell literal. */
-function shQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function redact(text: string, secrets: readonly string[]): string {
@@ -153,54 +144,6 @@ function pushLines(logPath: string): string[] {
 }
 
 /**
- * Put a logging `git` wrapper first on PATH and rewrite the forge URL onto the
- * bare repo. `git remote get-url` would apply `insteadOf` and show the bare
- * path, which the GitLab paths compare to the MR project, so the wrapper drops
- * the rewrite for that call only (same technique as the conflict failover test).
- */
-function installGitRewrite(worker: WorkerFixture, gitBin: string, httpUrl: string): string {
-  const dir = join(worker.root, "git-bin");
-  mkdirSync(dir, { recursive: true });
-  const logPath = join(dir, "git-argv.log");
-  const wrapper = join(dir, "git");
-  writeFileSync(
-    wrapper,
-    [
-      "#!/bin/sh",
-      `printf '%s\\n' "$*" >> ${shQuote(logPath)}`,
-      "prev=",
-      "strip=0",
-      'for arg in "$@"; do',
-      '  if [ "$prev" = "remote" ] && [ "$arg" = "get-url" ]; then strip=1; fi',
-      "  prev=$arg",
-      "done",
-      'if [ "$strip" = 1 ]; then',
-      "  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 \\",
-      "    GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2 \\",
-      "    GIT_CONFIG_KEY_3 GIT_CONFIG_VALUE_3",
-      "fi",
-      `exec ${shQuote(gitBin)} "$@"`,
-      "",
-    ].join("\n"),
-    { mode: 0o700 },
-  );
-  chmodSync(wrapper, 0o700);
-  worker.env.PATH = `${dir}${delimiter}${worker.env.PATH ?? ""}`;
-  Object.assign(worker.env, {
-    GIT_CONFIG_COUNT: "4",
-    GIT_CONFIG_KEY_0: "credential.helper",
-    GIT_CONFIG_VALUE_0: "",
-    GIT_CONFIG_KEY_1: "commit.gpgsign",
-    GIT_CONFIG_VALUE_1: "false",
-    GIT_CONFIG_KEY_2: "core.hooksPath",
-    GIT_CONFIG_VALUE_2: "/dev/null",
-    GIT_CONFIG_KEY_3: `url.${worker.remote}.insteadOf`,
-    GIT_CONFIG_VALUE_3: httpUrl,
-  });
-  return logPath;
-}
-
-/**
  * Point the repo at the forge URL and enable automatic conflict resolution.
  * CI repair is on only when the forge serves a pipeline (`ciRepair`).
  */
@@ -244,27 +187,12 @@ async function seedConflictBranches(worker: WorkerFixture, gitBin: string): Prom
 
 /** Record MR !1 the way the worker pipeline registers an MR it opened. */
 function registerMergeRequest(harness: Harness): void {
-  const db = new Database(harness.worker.dbPath);
-  try {
-    db.run("PRAGMA busy_timeout = 5000");
-    db.run(
-      `INSERT INTO agent_prs (
-         provider, instance_url, project_id, project_path, change_number, web_url,
-         repo, pr_number, branch, state, created_at, updated_at
-       ) VALUES ('gitlab', ?, '1', ?, 1, ?, ?, 1, ?, 'open', ?, ?)`,
-      [
-        harness.codeHost.instanceUrl,
-        PROJECT_PATH,
-        `${harness.codeHost.instanceUrl}/${PROJECT_PATH}/-/merge_requests/1`,
-        PROJECT_PATH,
-        AGENT_BRANCH,
-        REGISTERED_AT,
-        REGISTERED_AT,
-      ],
-    );
-  } finally {
-    db.close();
-  }
+  registerGitlabMergeRequest(harness.worker, {
+    instanceUrl: harness.codeHost.instanceUrl,
+    projectPath: PROJECT_PATH,
+    branch: AGENT_BRANCH,
+    createdAt: REGISTERED_AT,
+  });
 }
 
 function processedEvents(dbPath: string, source: string): string[] {
@@ -352,7 +280,7 @@ async function openHarness(
     GITLAB_CODE_HOST_TOKEN: forgeToken,
     DEVINTERN_REVIEW_WORKTREE_PATH: join(worker.root, "review-worktree"),
   });
-  const gitLog = installGitRewrite(worker, gitBin, remoteUrl);
+  const gitLog = installGitlabGitRewrite(worker, gitBin, remoteUrl);
   patchWorkspace(worker, remoteUrl, Boolean(scenario.ci));
   writeRelayState(worker.workspaceDir, relay.url, relayToken);
 

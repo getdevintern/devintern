@@ -66,9 +66,25 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern worker` surface
 - Status: `live`
-- Evidence: GitLab worker suite
-- Missing: GitHub parity and scheduled/manual modes.
-- Last reviewed: 2026-11-17
+- Evidence: GitLab worker suite; offline GitLab enabled paths in `tests/local/worker-conflict-failover.test.ts` and `tests/local/worker-relay-gitlab-events.test.ts`; opt-outs in the two rows below.
+- Missing: GitHub parity (`code-host/github/reviews.ts` hardcodes `https://api.github.com`, so it cannot be faked offline) and `conflict_resolution = "scheduled"` (scheduled windows do not process GitLab MRs yet).
+- Last reviewed: 2026-11-28
+
+### GitLab `conflict_resolution = "disabled"` leaves a conflicting agent MR alone
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-gitlab-follow-up-opt-outs.test.ts` (`bun run --filter @devintern/e2e test`). A registered MR whose branch conflicts with its target (proved with `git merge-tree`) is polled every second. Over four registered-MR poll ticks (counted from the forge's request log), and after a relay `change.changed` hint for the MR, the worker runs no agent, pushes nothing, writes nothing to the forge (no note, no merge), leaves both branch tips unchanged, marks no conflict sync processed, and `worker runs --json` lists no run. Positive control in the same harness: a live switch to `"auto"` in `workspace.toml` resolves the MR once (one conflict agent run, a merge commit of the old head and the target, a plain `git push origin <branch>`), from the next poll tick or the next `change.changed`.
+- Missing: The webhook (`devintern webhook serve`) conflict path with `"disabled"`; `"scheduled"` on GitLab (not implemented).
+- Last reviewed: 2026-11-28
+
+### GitLab `ci_failure_fix = false` runs no CI repair
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-gitlab-follow-up-opt-outs.test.ts`. The forge serves a failed pipeline and job for the registered MR's current head. With `ci_failure_fix = false` the worker logs `CI failure fixes disabled` at startup and, over four poll ticks and after a relay `ci.changed` hint, reads no pipeline, job, trace, or commit status, runs no agent, pushes no commit, writes nothing to the forge, and records no `ci_fix` run. Positive control in the same harness: a live switch to `true` runs exactly one CI repair (the failed job name and trace reach the prompt, one fast-forward commit, one `ci_fix` run). A live switch back to `false`, followed by a failed pipeline on the repair commit, reads no CI and runs nothing. The live reload is covered because `docs/code/pr-follow-up.md` documents these settings as applying without a restart.
+- Missing: The webhook (`devintern webhook serve`) Pipeline/Job path with `ci_failure_fix = false`. The default is `false` (`DEFAULT_CI_FAILURE_FIX`), so the positive control sets `true` explicitly. The relay `ci.changed` positive control is in `worker-relay-gitlab-events.test.ts`, not repeated here.
+- Last reviewed: 2026-11-28
 
 ### Native service install/uninstall
 
@@ -225,3 +241,10 @@ bun run --filter @devintern/e2e test
 - How: `WorkerFixture` (gaps 1 and 3) and `MultiRepoWorkerFixture` (precedence) with local bare remotes, ad-hoc tasks via `worker add`, and the deterministic fake agent in its normal implement mode. `helpers/pipeline-file.ts` writes `<workspace>/pipelines/*.json` and dependency-free plugin modules under `pipelines/steps/`. Each plugin writes a JSON marker (step, pinned repo, task key, `create(config)` options, `committed`) to a test-owned directory, and the task prompt selects `halt` or `warn`. Assertions read the queue and run rows, `worker runs show --json`, `git ls-remote --heads` on the bare remotes, the markers, and the worker log.
 - Run: `bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test` (or `bun test tests/local/worker-pipeline-file.test.ts` from `packages/e2e`).
 - Prerequisites: the built CLI only. No network or credentials. About 10 s for the three tests.
+
+### tests/local/worker-gitlab-follow-up-opt-outs.test.ts
+
+- Proves: the GitLab follow-up kill switches on a running `devintern worker`. `[workspace].conflict_resolution = "disabled"` leaves a conflicting registered MR alone, and `[workspace].ci_failure_fix = false` runs no CI repair for a failed pipeline on the MR's head. Both hold on poll ticks and for relay hints (`change.changed`, `ci.changed`). Each case then edits `workspace.toml` live as a positive control: `"auto"` resolves the conflict once, and `true` runs one CI repair. Switching CI fix back to `false` stops it again.
+- How: `WorkerFixture` with the deterministic fake agent, a loopback `FakeGitlabForge` (optional `ci` failure), and git fetch/push rewritten onto the local bare repository by `helpers/gitlab-worker-follow-up.ts` (shared with `worker-conflict-failover.test.ts` and `worker-relay-gitlab-events.test.ts`), which also registers MR !1 in `agent_prs`. The poll cases use `poll_interval = 1` and count `merge_requests/1/discussions` reads as completed ticks, not sleeps. The relay case uses `FakeRelay` with `poll_interval = 3600` and waits for the cursor to move past each envelope. The forge and relay tokens are random per test. A refusing recording proxy is set as `HTTP(S)_PROXY`, and the test asserts it saw no request, and that no token (raw or URL-encoded) appears in worker output, `worker runs --json`, forge notes, or files under the fixture root. Assertions read the forge request and mutation logs, the git argv log, the bare repository, `processed_events`, the run table, and `worker runs --json`.
+- Run: `bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test` (or `bun test tests/local/worker-gitlab-follow-up-opt-outs.test.ts` from `packages/e2e`).
+- Prerequisites: the built CLI and `git`. No network or credentials. About 20 s for the three tests.

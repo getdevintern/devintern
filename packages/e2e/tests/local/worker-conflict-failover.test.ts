@@ -17,9 +17,13 @@ import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { command, checkedCommand } from "../../helpers/process";
 import { FAKE_GITLAB_TOKEN, FakeGitlabForge } from "../../helpers/fake-gitlab-forge";
+import {
+  installGitlabGitRewrite,
+  registerGitlabMergeRequest,
+} from "../../helpers/gitlab-worker-follow-up";
 import { cliPath, WorkerFixture } from "../../helpers/worker";
 
 const cliTest = test.skipIf(!existsSync(cliPath));
@@ -382,64 +386,12 @@ function patchWorkspace(worker: WorkerFixture, remoteUrl: string): void {
   writeFileSync(path, text);
 }
 
-/**
- * Log git argv and rewrite the forge URL onto the local bare repository.
- *
- * `git remote get-url` applies `insteadOf` and would show the bare path.
- * The conflict resolver compares that output to the GitLab project, so the
- * wrapper drops the rewrite only for `get-url`. Fetch and push still use it.
- */
-function installGitRewrite(worker: WorkerFixture, realGit: string, httpUrl: string): string {
-  const dir = join(worker.root, "git-bin");
-  mkdirSync(dir, { recursive: true });
-  const logPath = join(dir, "git-argv.log");
-  const wrapper = join(dir, "git");
-  writeStub(wrapper, [
-    "#!/bin/sh",
-    `printf '%s\\n' "$*" >> ${shQuote(logPath)}`,
-    "prev=",
-    "strip=0",
-    'for arg in "$@"; do',
-    '  if [ "$prev" = "remote" ] && [ "$arg" = "get-url" ]; then strip=1; fi',
-    "  prev=$arg",
-    "done",
-    'if [ "$strip" = 1 ]; then',
-    "  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 \\",
-    "    GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1 GIT_CONFIG_KEY_2 GIT_CONFIG_VALUE_2 \\",
-    "    GIT_CONFIG_KEY_3 GIT_CONFIG_VALUE_3",
-    "fi",
-    `exec ${shQuote(realGit)} "$@"`,
-  ]);
-  worker.env.PATH = `${dir}${delimiter}${worker.env.PATH ?? ""}`;
-  Object.assign(worker.env, {
-    GIT_CONFIG_COUNT: "4",
-    GIT_CONFIG_KEY_0: "credential.helper",
-    GIT_CONFIG_VALUE_0: "",
-    GIT_CONFIG_KEY_1: "commit.gpgsign",
-    GIT_CONFIG_VALUE_1: "false",
-    GIT_CONFIG_KEY_2: "core.hooksPath",
-    GIT_CONFIG_VALUE_2: "/dev/null",
-    GIT_CONFIG_KEY_3: `url.${worker.remote}.insteadOf`,
-    GIT_CONFIG_VALUE_3: httpUrl,
-  });
-  return logPath;
-}
-
 function registerMergeRequest(worker: WorkerFixture, forge: FakeGitlabForge): void {
-  const db = new Database(worker.dbPath);
-  try {
-    db.run("PRAGMA busy_timeout = 5000");
-    const now = Date.now();
-    db.run(
-      `INSERT INTO agent_prs (
-         provider, instance_url, project_id, project_path, change_number, web_url,
-         repo, pr_number, branch, state, created_at, updated_at
-       ) VALUES ('gitlab', ?, '1', ?, 1, ?, ?, 1, ?, 'open', ?, ?)`,
-      [forge.baseUrl, PROJECT_PATH, forge.mergeRequestUrl, PROJECT_PATH, FEATURE_BRANCH, now, now],
-    );
-  } finally {
-    db.close();
-  }
+  registerGitlabMergeRequest(worker, {
+    instanceUrl: forge.baseUrl,
+    projectPath: PROJECT_PATH,
+    branch: FEATURE_BRANCH,
+  });
 }
 
 /**
@@ -480,7 +432,7 @@ async function openConflictHarness(
     worker.env.GITLAB_CODE_HOST_URL = forge.baseUrl;
     worker.env.GITLAB_CODE_HOST_TOKEN = FAKE_GITLAB_TOKEN;
     worker.env.DEVINTERN_REVIEW_WORKTREE_PATH = join(worker.root, "review-worktree");
-    const gitLog = installGitRewrite(worker, gitBin, remoteUrl);
+    const gitLog = installGitlabGitRewrite(worker, gitBin, remoteUrl);
     patchWorkspace(worker, remoteUrl);
 
     const heads = await checkedCommand(
