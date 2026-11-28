@@ -18,50 +18,18 @@ import { join } from "node:path";
 import { FakeAzureDevOpsTracker } from "../../providers/fake-azure-devops";
 import { FakeLinearTracker } from "../../providers/fake-linear";
 import { FakeTrelloTracker } from "../../providers/fake-trello";
-import { proxyEnvironment, startRecordingProxy } from "../../helpers/recording-proxy";
-import type { RecordingProxy } from "../../helpers/recording-proxy";
-import { cliPath, WorkerFixture } from "../../helpers/worker";
-import { doctorWithout, dotenv, expectLines, randomToken } from "../../helpers/worker-doctor";
+import { cliPath } from "../../helpers/worker";
+import {
+  DEFAULTS_HINT,
+  NOT_READY,
+  doctorWithout,
+  dotenv,
+  expectLines,
+  randomToken,
+  withDoctorWorker,
+} from "../../helpers/worker-doctor";
 
 const builtCli = existsSync(cliPath);
-const NOT_READY = "❌ Not ready — the worker would sit idle or fail. Fix the checks above.";
-const DEFAULTS_HINT =
-  "💡 Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)";
-
-/** Start a recording proxy and a worker fixture, run `body`, always clean up. */
-async function withDoctorWorker(
-  options: { prefix: string; tracker: string; taskQuery?: string },
-  fakes: Array<{ cleanup(): Promise<void> }>,
-  body: (worker: WorkerFixture, proxy: RecordingProxy) => Promise<void>,
-): Promise<void> {
-  let proxy: RecordingProxy | undefined;
-  const worker = new WorkerFixture({
-    rootPrefix: options.prefix,
-    tracker: options.tracker,
-    ...(options.taskQuery
-      ? { workspaceTomlExtra: `task_query = ${JSON.stringify(options.taskQuery)}` }
-      : {}),
-  });
-  try {
-    proxy = await startRecordingProxy();
-    Object.assign(worker.env, proxyEnvironment(proxy.url));
-    await worker.prepare();
-    await body(worker, proxy);
-    expect(existsSync(worker.dbPath)).toBe(false);
-    expect(existsSync(worker.lockFile)).toBe(false);
-    expect(proxy.requests()).toEqual([]);
-  } finally {
-    try {
-      await worker.dispose();
-    } finally {
-      try {
-        await Promise.allSettled(fakes.map((fake) => fake.cleanup()));
-      } finally {
-        await proxy?.close();
-      }
-    }
-  }
-}
 
 test.skipIf(!builtCli)(
   "worker doctor dry-runs a Linear [defaults].task_query and fails on a rejected filter, a wrong key, or a missing key",
