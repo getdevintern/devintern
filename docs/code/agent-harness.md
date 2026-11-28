@@ -98,7 +98,7 @@ GROK_MODEL=grok-4.7
 ```
 
 - At startup the worker checks each entry and skips any that are unknown, not installed, or unable to start under the configured sandbox. It then logs the resulting chain and each entry's model.
-- When an agent reports a usage limit, the worker waits until the reset time in the limit message. If the message has none, it waits 1 hour, doubling up to 24 hours on repeated limits. Meanwhile it retries the work on the next agent that has capacity, and returns to the first agent once that agent's limit resets.
+- When an agent reports a usage limit, the worker waits until the reset time in the limit message. A clock time such as `resets 2am (Asia/Ho_Chi_Minh)` is read in the named timezone (or the worker's local time without one), and a time already past today means tomorrow. If the message has none, it waits 1 hour, doubling up to 24 hours on repeated limits. Meanwhile it retries the work on the next agent that has capacity, and returns to the first agent once that agent's limit resets.
 - If every agent is limited, new work waits until the first limit resets. Failover state survives worker restarts.
 - Failover applies to every worker job: tracker tasks, PR reviews, `@mentions`, conflict resolution, automations, estimations, retries, and `devintern webhook serve`. Interactive `devintern TASK-123` runs always use the first entry.
 - Run records show which harness ran each job. The webhook server's `/health` endpoint shows the active harness and any open limits.

@@ -18,14 +18,54 @@ describe("resetHintToMs", () => {
     expect(resetHintToMs("30s", now)).toBe(now + 30_000);
   });
 
-  test("parses a later-today clock time", () => {
+  test("parses a later-today clock time without a label in host local time", () => {
     // 7:20pm today is ~55m after 6:25pm.
     const expected = new Date(2026, 5, 2, 19, 20, 0, 0).getTime();
-    expect(resetHintToMs("7:20pm (Asia/Ho_Chi_Minh)", now)).toBe(expected);
+    expect(resetHintToMs("7:20pm", now)).toBe(expected);
   });
 
-  test("returns null for a clock time already past today (caller falls back)", () => {
-    expect(resetHintToMs("9am", now)).toBeNull();
+  test("rolls a past-today clock time without a label to tomorrow", () => {
+    const expected = new Date(2026, 5, 3, 9, 0, 0, 0).getTime();
+    expect(resetHintToMs("9am", now)).toBe(expected);
+  });
+
+  test("falls back to host local time for an unknown zone label", () => {
+    const expected = new Date(2026, 5, 2, 19, 20, 0, 0).getTime();
+    expect(resetHintToMs("7:20pm (Not/AZone)", now)).toBe(expected);
+    expect(resetHintToMs("7:20pm (approx)", now)).toBe(expected);
+  });
+
+  test("rolls a labelled clock time already past today in that zone to tomorrow", () => {
+    // 23:38 in Ho Chi Minh (UTC+7); "2am" is 02:00 the next local day.
+    const incident = Date.parse("2026-11-27T16:38:50Z");
+    expect(resetHintToMs("2am (Asia/Ho_Chi_Minh)", incident)).toBe(
+      Date.parse("2026-11-27T19:00:00Z"),
+    );
+    expect(resetHintToMs("2am (Asia/Ho_Chi_Minh) · out of usage credits", incident)).toBe(
+      Date.parse("2026-11-27T19:00:00Z"),
+    );
+  });
+
+  test("reads a later-today labelled clock time in that zone", () => {
+    const at = Date.parse("2026-11-27T13:39:00Z");
+    expect(resetHintToMs("9pm (Asia/Ho_Chi_Minh)", at)).toBe(Date.parse("2026-11-27T14:00:00Z"));
+  });
+
+  test("uses the labelled zone rather than the host zone", () => {
+    // Whatever the process TZ, the instants below are fixed by the label.
+    const at = Date.parse("2026-11-27T20:00:00Z"); // 15:00 in New York (EST)
+    expect(resetHintToMs("7:20pm (America/New_York)", at)).toBe(
+      Date.parse("2026-11-28T00:20:00Z"),
+    );
+    expect(resetHintToMs("7:20pm (UTC)", at)).toBe(Date.parse("2026-11-28T19:20:00Z"));
+    expect(resetHintToMs("9pm (Europe/London)", at)).toBe(Date.parse("2026-11-27T21:00:00Z"));
+  });
+
+  test("lands on the stated wall time across a DST change in the labelled zone", () => {
+    // 2026-03-08 is the US spring-forward day; at 23:00 EST on the 7th,
+    // "9am" is 09:00 EDT (UTC-4) on the 8th.
+    const at = Date.parse("2026-03-08T04:00:00Z");
+    expect(resetHintToMs("9am (America/New_York)", at)).toBe(Date.parse("2026-03-08T13:00:00Z"));
   });
 
   test("returns null for an unparseable or empty hint", () => {

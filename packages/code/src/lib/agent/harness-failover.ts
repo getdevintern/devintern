@@ -356,12 +356,28 @@ export class HarnessFailover {
   }
 
   /**
-   * Epoch ms when the earliest open window ends (null when none open).
+   * Epoch ms when the earliest open window of a chain entry ends (null when
+   * none open): when the chain can run again, so the exhausted pause reports
+   * it. Windows {@link recordWindow} keeps for harnesses outside the chain are
+   * ignored; they say nothing about when the chain resumes.
    *
    * Always in the future when non-null; expired-but-uncleaned windows are
-   * ignored. The host arms its resume/failback timer at this instant.
+   * ignored.
    */
   earliestResetMs(): number | null {
+    const nowMs = this.now();
+    const open = this.entries
+      .map((entry) => this.limited.get(entry.name))
+      .filter((until): until is number => until !== undefined && until > nowMs);
+    return open.length > 0 ? Math.min(...open) : null;
+  }
+
+  /**
+   * Epoch ms when the earliest open window of any harness ends, including
+   * harnesses outside the chain (null when none open). The host arms its
+   * expiry timer here so out-of-chain windows are cleared when they end.
+   */
+  earliestWindowEndMs(): number | null {
     const nowMs = this.now();
     const open = [...this.limited.values()].filter((until) => until > nowMs);
     return open.length > 0 ? Math.min(...open) : null;
@@ -375,6 +391,29 @@ export class HarnessFailover {
   /** Highest-priority entry that is neither limited nor unavailable. */
   private selectAvailable(): HarnessChainEntry | null {
     return this.entries.find((e) => !this.isLimited(e.name) && !this.isUnavailable(e.name)) ?? null;
+  }
+
+  /**
+   * Record a usage-limit window for `harness` without failing over or
+   * changing the active entry. For runs pinned to a harness outside the
+   * failover decision (an automation's `harness`), so other jobs and later
+   * pinned runs can see the limit.
+   *
+   * Windows for chain entries are persisted like {@link reportUsageLimit}'s.
+   * A harness outside the chain is tracked in memory only: {@link restore}
+   * drops windows for harnesses that are not in the chain.
+   *
+   * @param harness - Harness the limited child ran on.
+   * @param untilMs - Epoch ms when its window ends.
+   * @returns The window now stored for `harness` (the furthest reset).
+   */
+  recordWindow(harness: string, untilMs: number): number {
+    if (this.entries.some((entry) => entry.name === harness)) {
+      this.setWindow(harness, untilMs);
+    } else {
+      this.limited.set(harness, Math.max(this.limited.get(harness) ?? 0, untilMs));
+    }
+    return this.limited.get(harness) as number;
   }
 
   /** Store a window, keeping the furthest reset when one is already open. */

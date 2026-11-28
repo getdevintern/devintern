@@ -242,6 +242,86 @@ describe("runWithFailover", () => {
   });
 });
 
+describe("runWithFailover harness pin usage limits", () => {
+  afterEach(() => resetWorkerFailover());
+
+  test("records the pinned harness's reset time without re-spawning or switching", async () => {
+    const failover = await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok",
+      log: () => {},
+    });
+    const untilMs = Date.now() + 2 * 3_600_000;
+    const envs: Array<Record<string, string | undefined>> = [];
+    const result = await runWithFailover(
+      async (env) => {
+        envs.push(env);
+        writeFileSync(env[USAGE_LIMIT_FILE_ENV] as string, JSON.stringify({ untilMs }));
+        return USAGE_LIMIT_EXIT_CODE;
+      },
+      { ...process.env },
+      { harnessPin: "claude-code" },
+    );
+    expect(result).toBe("deferred");
+    expect(envs).toHaveLength(1);
+    expect(envs[0]?.AGENT_HARNESS).toBe("claude-code");
+    expect(failover.limitedUntil("claude-code")).toBe(untilMs);
+    expect(failover.activeName).toBe("codex");
+    // A window outside the chain does not make the chain look blocked.
+    expect(failover.allLimited()).toBe(false);
+    expect(harnessChainBlockedUntil(failover)).toBeUndefined();
+  });
+
+  test("escalates the unknown-reset cooldown across pinned limits", async () => {
+    const failover = await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex",
+      log: () => {},
+    });
+    const before = Date.now();
+    failover.recordLimit("claude-code", {});
+    expect(failover.limitedUntil("claude-code")).toBeGreaterThanOrEqual(before + 3_600_000);
+    failover.recordLimit("claude-code", {});
+    expect(failover.limitedUntil("claude-code")).toBeGreaterThanOrEqual(before + 2 * 3_600_000);
+    expect(failover.activeName).toBe("codex");
+  });
+
+  test("chain resume time ignores windows recorded for harnesses outside the chain", async () => {
+    const failover = await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex",
+      log: () => {},
+    });
+    const now = Date.now();
+    failover.recordLimit("claude-code", { untilMs: now + 60_000 });
+    failover.reportFromHint({ untilMs: now + 3_600_000 }, "codex");
+    expect(harnessChainBlockedUntil(failover, now)).toBe(now + 3_600_000);
+  });
+
+  test("exhausted pause reports the chain window, not an earlier out-of-chain one", async () => {
+    const pauses: { untilMs: number }[] = [];
+    const failover = await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex",
+      log: () => {},
+      onPause: (info) => pauses.push(info),
+    });
+    try {
+      const now = Date.now();
+      failover.recordLimit("claude-code", { untilMs: now + 60_000 });
+      const outcome = failover.reportFromHint({ untilMs: now + 3_600_000 }, "codex");
+      expect(outcome).toEqual({ kind: "exhausted", untilMs: now + 3_600_000 });
+      expect(pauses.map((p) => p.untilMs)).toEqual([now + 3_600_000]);
+    } finally {
+      failover.stop();
+    }
+  });
+});
+
 describe("runHarnessForRecording", () => {
   test("uses the active failover entry instead of the configured primary", async () => {
     const failover = await startWorkerFailover({
@@ -600,7 +680,13 @@ describe("startWorkerFailover restore", () => {
 
 describe("harnessChainBlockedUntil", () => {
   function fake(allLimited: boolean, windows: Record<string, number>): WorkerFailover {
-    return { allLimited: () => allLimited, windows: () => windows } as unknown as WorkerFailover;
+    // Real `earliestChainResetMs` over a fake chain whose entries are the window keys.
+    return Object.assign(Object.create(WorkerFailover.prototype), {
+      allLimited: () => allLimited,
+      now: () => 0,
+      manager: { windows: () => windows },
+      chain: { entries: Object.keys(windows).map((name) => ({ name })) },
+    }) as WorkerFailover;
   }
 
   test("returns the earliest future window only while every harness is limited", () => {

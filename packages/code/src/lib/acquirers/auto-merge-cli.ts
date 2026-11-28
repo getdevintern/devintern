@@ -200,8 +200,7 @@ function spawnOnce(
 
 /** Earliest instant a usage-limited harness in the failover chain returns. */
 function failoverRetryAt(now: number): number | undefined {
-  const windows = Object.values(getWorkerFailover()?.windows() ?? {}).filter((at) => at > now);
-  return windows.length > 0 ? Math.min(...windows) : undefined;
+  return getWorkerFailover()?.earliestChainResetMs(now);
 }
 
 function quotaDeferral(retryAt: number | undefined): AutoMergeResult {
