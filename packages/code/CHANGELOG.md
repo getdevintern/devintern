@@ -2,10 +2,58 @@
 
 ## [Unreleased]
 
+## [2.31.0] - 2026-11-28
+
+Onboarding and reliability release: `worker init` checks the host first, has one sign-in step, defaults the ready-tasks query to a `devintern` label, and ends with a sample first task; `devintern init` and `devintern doctor` lead to the worker flow; headless setup reaches a running worker with `--start`. The worker service gets memory limits, ad-hoc tasks survive a service restart, usage limits are tracked for pinned and CI-repair runs, and auto-merge can act on teammates' PRs. `AGENT_HARNESS=deepseek` now runs DeepSeek's official `dsh` harness.
+
+### Upgrade notes
+
+- **`AGENT_HARNESS=deepseek` now runs DeepSeek's official `dsh` harness** (experimental, DEV-188). The community Reasonix adapter moved to its own id: existing Reasonix configurations must switch to `AGENT_HARNESS=reasonix` (CLI `reasonix`); the CLI warns when `dsh` is missing but the Reasonix CLI is installed
+- **The worker's systemd service gets memory limits.** `devintern worker service install` now writes `MemoryHigh`, `MemoryMax`, and `MemorySwapMax` (default 50%, 65%, and 15% of host RAM) and a restart burst limit, and existing units are reported as out of date until you reinstall them. Tune them with `[workspace.execution].memory_high_percent`, `memory_max_percent`, and `memory_swap_max_percent`. See `docs/code/worker.md#memory-limits`
+- **Interactive `worker init` no longer asks "Use the recommended worker settings?"**: a new workspace gets the recommended settings; run `devintern worker init --customize` to choose them one by one
+
+### Added
+
+- **Official DeepSeek Harness (experimental, DEV-188)**: `AGENT_HARNESS=deepseek` now selects DeepSeek's official `dsh` CLI through its documented `dsh headless` task mode, with `--json` for structured output. The adapter is verified against `@deepseek-ai/dsh` 0.2.1-rc.2, labeled experimental in harness selection and setup docs, and documents installation, `DEEPSEEK_API_KEY` headless authentication (the headless profile ignores GUI-saved credentials), profile-based model/effort configuration, and known limitations. Unattended spawns map `skipPermissions` to `DSH_PERMISSION_MODE=danger-full-access` (unless the user already set that variable), because headless has no approval answerer and the profile's default `workspace-write`/`ask` pair fails closed on escalation. Missing installs, credential failures, and unsupported settings produce actionable guidance, and the sandbox grants `~/.dsh` (or `DSH_HOME`) state access
+- **One-line install script**: `curl -fsSL https://raw.githubusercontent.com/getdevintern/devintern/main/scripts/install.sh | sh` installs DevIntern Code without sudo, is safe to re-run, and probes for every supported agent CLI. See `docs/code/quick-start.md`
+- **`devintern init` and `devintern doctor` route to the worker flow**: interactive `init` first asks how tickets should run (worker or manual runs) and starts the worker wizard by default; `doctor` runs the `worker doctor` checklist in a worker repository
+- **Default ready-tasks query**: each tracker that can filter by label defaults to open tickets labeled `devintern`. Enter accepts it in the wizard, `--task-query` is optional for a new headless workspace, and on GitHub and GitLab setup can create a missing label after a yes or with `--create-label`
+- **Missing query labels are flagged**: after the dry run, `worker init` checks each `label:` term against the repository's labels; the wizard asks whether to fix the query, create the label, or continue, and headless setup warns with a `fix-query` next step
+- **Host checks first**: `worker init` reports a missing agent CLI or git before the first question, with the install command
+- **One sign-in step**: interactive `worker init` asks a single "Sign in with GitHub to start your 14-day Worker Pilot (also connects instant events)" question only when the license needs it, then pairs the relay and waits for the GitHub App install (Enter skips; `--no-relay` leaves pairing out). `worker init --non-interactive --start` installs and starts the service when checks pass, or after the `worker login` that finishes sign-in
+- **Sample first task**: once the worker is running, the wizard offers to create a sample ticket matching the saved query (a task file for Markdown, or a `devintern worker add` ad-hoc task), waits for the run to start, and prints its dashboard link; headless setup adds a `try-first-task` next step and creates nothing
+- **The GitHub CLI token is reused** when `GITHUB_TOKEN` is unset; if `gh` is missing, signed out, or declined, the wizard asks for a pasted token instead of stopping
+- **Interactive `worker init` asks for the PR base branch** when the checkout is on a non-default branch and saves it as `[[repos]].default_branch`
+- **`[[repos]].auto_merge_team_prs`** (default `false`, GitHub only): teammates' non-draft, non-fork PRs go through the same auto-merge gates and policy as the agent's own
+- **Dashboard dependency links**: each dependency of a queued task links to its current status with a Re-queue / Retry button when its latest run can be retried, and a run's page lists the queued tasks it **Blocks**
+- **Memory-aware admission**: while the host or the worker's cgroup is under memory pressure, queued jobs wait (`waitingOn: "memory"`) instead of starting; running jobs are never interrupted
+
 ### Fixed
 
 - **No-op runs the agent reports as `status=noop` succeed**: an ad-hoc task (`devintern worker add`) or a PR-opening automation whose agent made no changes and reported `status=noop` (for example, because the work had already merged) failed with `Implementation was not committed` unless `allow_no_changes` was set. It is now recorded as succeeded with a reason starting `noop:`, and no branch or PR is created. A `status=blocked` report with no changes now escalates instead of failing at commit. Runs with no marker, and tracker-ticket runs, behave as before
 - **Deferred PR runs no longer wait forever**: a CI fix, conflict resolution, or auto-merge run deferred by a usage limit stayed under "Waiting to retry" on the dashboard after its PR merged or closed, or after CI went green, because nothing would ever retry it. Those runs are now marked abandoned with the reason they were superseded, and the worker settles existing ones on startup
+- **Usage-limit reset times**: a clock-time reset such as `resets 2am (Asia/Ho_Chi_Minh)` resolves to its next occurrence in the labelled zone instead of being dropped when already past today, and automations pinned with `harness = "…"` record their limit, so later occurrences are skipped and "Run now" is refused until it resets
+- **CI repair runs through harness failover**: a usage limit retries the next harness instead of relaunching the limited one, conflict and auto-merge runs record the harness that actually ran, and a pinned `conflict_resolution_harness` waits for its limit to reset
+- **Ad-hoc tasks stay resumable when the service stops the worker**: task children that exit on SIGTERM during a drain are recorded as interrupted and resumed on startup instead of failed
+- **Base sync no longer retries forever** when runs are orphaned by worker exits; orphaned attempts count toward the retry cap and back off from the worker exit
+- **Stacked runs open their PR when their base merges**: the rebase is skipped when the base merged with a merge commit, and a conflicting rebase after a squash or rebase merge opens the PR and leaves the conflict to conflict resolution instead of escalating with no PR
+- **A resumed run's rewritten branch is published with a lease** instead of failing as diverged, so the recovery after a `stack_base` conflict can complete
+- **Server-side push rejections stop the hook-fix loop**: a push refused for a token scope (for example, missing `workflow`) fails once with the cause instead of starting 10 `hook-fix-push` agent runs
+- **@mentions on closed or merged PRs get a reply** explaining that the PR can't be changed and how to file the request instead, and no run starts
+- **Clearer GitHub token errors**: a 401 says the token is invalid, expired, or revoked and how to create one; the prompt links both token types with the required permissions; a rejected token must be re-entered; a token without access names the repository. `worker doctor` and headless `worker init` use the same text
+- **The licence error leads with the Worker Pilot**: the worker, `worker doctor`, and `worker service` say "Sign in to start your free 14-day Worker Pilot: `devintern worker login`", with `LICENSE_KEY` as the alternative for an existing licence; an invalid key reads "LICENSE_KEY is invalid or revoked."
+- **Human next steps in text output**: `worker service install` without `--json` shows the commands a person runs instead of the agent-oriented `--no-wait --json` forms
+- **Headless and interactive `worker init` write the same `workspace.toml`** for the recommended policy; headless setup can no longer report success on a rejected token, and the token source is reported correctly
+- **Wizard prompts are bounded**: required-field, menu, yes/no, and query re-prompts stop after repeated empty answers instead of hanging scripted or non-TTY callers
+- **Worker init wording**: no duplicate abort messages, a cleaner repository prompt, "GitHub" capitalized, no red error from `worker queue` before the first start, and a hint for `devintern: command not found` in non-interactive shells
+
+### Technical
+
+- One step engine runs both interactive and non-interactive `worker init`, so the two modes can no longer drift
+- Workspace paths and env loading use the shared `@devintern/workspace` package (DEV-200)
+- Agent outcome instructions confirm a pre-existing gate failure without `git stash` or `git worktree`, which the sandbox blocks
+- The tracker probe honors the Azure DevOps e2e fake base URL only under the e2e flag and for loopback URLs
+- Tests stub service-manager CLIs and clear an ambient `LICENSE_KEY`, so they can't restart the live worker or fail inside worker runs
 
 ## [2.30.0] - 2026-11-27
 
@@ -386,7 +434,6 @@ Reliability release: OpenCode v2 is supported through version probing, sandbox r
 - **Verification failures are visible on the run and on the ticket**: verification recorded no stage, so the dashboard timeline jumped from implementation to outcome, and a halted run only carried a one-line reason ("Verification failed twice: …") with no findings. Verification now records a `verify` stage with the verdict summary and blocking findings, lists those findings in the halt/repair reason the tracker comment renders, and — when no verdict parses — saves `verify-prompt.txt` and `verify-output.txt` as run artifacts. A repeat-limit halt also carries the last verification findings instead of only naming the step that gave up
 - **Run harness logs are grouped by attempt**: the dashboard run-detail page annotates each transcript with the producing run's attempt and groups logs under `Attempt 1`, `Attempt 2`, … headers with the run id and log count once more than one attempt contributes, keeping the flat list for single-attempt runs and collecting logs without a run id under `Unattributed logs`
 - **Sandbox-aware harness readiness and deferred runs**: `devintern sandbox` now probes each harness chain entry through the configured sandbox and reports `OK`/`FAIL` with a suggested fix, startup detects mise shims and classifies startup failures (permission denials, missing binaries, nono grant errors, and fast exits with no assistant output), and failover marks an unavailable harness for a short process-only cooldown, tries the next entry, and defers the task when none can start — without posting a failure comment, writing retry state, or transitioning the ticket. Deferred fleet runs also check the chain before cloning, fetching, or creating a worktree, so a fully unavailable chain no longer leaks a disposable worktree on every poll
-- **Official DeepSeek Harness (experimental, DEV-188)**: `AGENT_HARNESS=deepseek` now selects DeepSeek's official `dsh` CLI through its documented `dsh headless` task mode, with `--json` for structured output. The adapter is verified against `@deepseek-ai/dsh` 0.2.1-rc.2, labeled experimental in harness selection and setup docs, and documents installation, `DEEPSEEK_API_KEY` headless authentication (the headless profile ignores GUI-saved credentials), profile-based model/effort configuration, and known limitations. Unattended spawns map `skipPermissions` to `DSH_PERMISSION_MODE=danger-full-access` (unless the user already set that variable), because headless has no approval answerer and the profile's default `workspace-write`/`ask` pair fails closed on escalation. Missing installs, credential failures, and unsupported settings produce actionable guidance, and the sandbox grants `~/.dsh` (or `DSH_HOME`) state access.
 
 ### Fixed
 
@@ -407,10 +454,6 @@ Reliability release: OpenCode v2 is supported through version probing, sandbox r
 - **Verification accepts approvals with advisory findings**: `validateReviewFeedback` hardcoded a medium threshold, so a verdict that approved the work while listing medium notes was rejected as self-contradictory — even though verification's default blocking threshold is `high`, where those findings are advisory. Verification now validates against its configured `minSeverity`, while the auto-review loop keeps the `medium` default
 - **Verdict JSON survives unescaped quotes in pasted code**: a verification verdict whose summary quoted `["headless", prompt]` terminated its string 40 bytes early, so no balanced object was found and the run failed verification twice with "no valid JSON object containing approved". The parser now escapes unescaped quotes using bracket depth inside the value, repairing that class of verdict without loosening the source/diff safeguards
 - **Large prompts no longer fail with `E2BIG`**: review, verification, fix, and implementation prompts are handed to the CLI as a single argv entry, and Linux rejects an argument at 128 KiB with `E2BIG: argument list too long` before the CLI starts — a 44-file diff plus the review template crossed it, which failed verification twice and posted an incomplete-implementation summary instead of reviewing the change. `buildPromptArgs` now writes prompts over `MAX_PROMPT_ARG_BYTES` to a private temp file and replaces them with a short pointer the agent reads first; the limit is measured in UTF-8 bytes, not characters
-
-### Changed
-
-- **Reasonix is now its own explicit harness**: the community DeepSeek-Reasonix adapter moved from harness id `deepseek` to `reasonix` (`AGENT_HARNESS=reasonix`, CLI `reasonix`). `deepseek` intentionally points at the official experimental harness, so existing Reasonix configurations must switch to `reasonix`; the CLI warns when `dsh` is missing but the Reasonix CLI is installed.
 
 ### Technical
 
