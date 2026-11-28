@@ -356,12 +356,28 @@ export class HarnessFailover {
   }
 
   /**
-   * Epoch ms when the earliest open window ends (null when none open).
+   * Epoch ms when the earliest open window of a chain entry ends (null when
+   * none open): when the chain can run again, so the exhausted pause reports
+   * it. Windows {@link recordWindow} keeps for harnesses outside the chain are
+   * ignored; they say nothing about when the chain resumes.
    *
    * Always in the future when non-null; expired-but-uncleaned windows are
-   * ignored. The host arms its resume/failback timer at this instant.
+   * ignored.
    */
   earliestResetMs(): number | null {
+    const nowMs = this.now();
+    const open = this.entries
+      .map((entry) => this.limited.get(entry.name))
+      .filter((until): until is number => until !== undefined && until > nowMs);
+    return open.length > 0 ? Math.min(...open) : null;
+  }
+
+  /**
+   * Epoch ms when the earliest open window of any harness ends, including
+   * harnesses outside the chain (null when none open). The host arms its
+   * expiry timer here so out-of-chain windows are cleared when they end.
+   */
+  earliestWindowEndMs(): number | null {
     const nowMs = this.now();
     const open = [...this.limited.values()].filter((until) => until > nowMs);
     return open.length > 0 ? Math.min(...open) : null;

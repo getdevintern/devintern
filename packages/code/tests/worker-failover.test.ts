@@ -300,6 +300,26 @@ describe("runWithFailover harness pin usage limits", () => {
     failover.reportFromHint({ untilMs: now + 3_600_000 }, "codex");
     expect(harnessChainBlockedUntil(failover, now)).toBe(now + 3_600_000);
   });
+
+  test("exhausted pause reports the chain window, not an earlier out-of-chain one", async () => {
+    const pauses: { untilMs: number }[] = [];
+    const failover = await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex",
+      log: () => {},
+      onPause: (info) => pauses.push(info),
+    });
+    try {
+      const now = Date.now();
+      failover.recordLimit("claude-code", { untilMs: now + 60_000 });
+      const outcome = failover.reportFromHint({ untilMs: now + 3_600_000 }, "codex");
+      expect(outcome).toEqual({ kind: "exhausted", untilMs: now + 3_600_000 });
+      expect(pauses.map((p) => p.untilMs)).toEqual([now + 3_600_000]);
+    } finally {
+      failover.stop();
+    }
+  });
 });
 
 describe("runHarnessForRecording", () => {

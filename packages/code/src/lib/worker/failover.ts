@@ -366,7 +366,7 @@ export class WorkerFailover {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    const nextMs = this.manager.earliestResetMs();
+    const nextMs = this.manager.earliestWindowEndMs();
     if (nextMs === null) {
       return;
     }

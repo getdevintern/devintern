@@ -236,6 +236,18 @@ describe("HarnessFailover", () => {
     expect(h.failover.earliestResetMs()).toBe(4000);
   });
 
+  test("earliestResetMs ignores out-of-chain windows; earliestWindowEndMs keeps them", () => {
+    const h = makeFailover(["codex"]);
+    h.failover.recordWindow("claude-code", 2000);
+    h.failover.recordWindow("codex", 9000);
+    expect(h.failover.earliestResetMs()).toBe(9000);
+    expect(h.failover.earliestWindowEndMs()).toBe(2000);
+    expect(h.failover.reportUsageLimit(9000, "codex")).toEqual({
+      kind: "exhausted",
+      untilMs: 9000,
+    });
+  });
+
   test("describeChain renders the priority order", () => {
     const h = makeFailover(["claude-code", "codex"]);
     expect(h.failover.describeChain()).toBe("claude-code → codex");
