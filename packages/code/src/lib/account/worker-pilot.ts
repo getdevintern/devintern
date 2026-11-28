@@ -3,6 +3,7 @@
  * `worker doctor`, and `worker login` say the same thing.
  */
 
+import { workerPilotSignInMessage } from "@devintern/license-check";
 import { homedir } from "os";
 import { join, resolve } from "path";
 
@@ -73,11 +74,14 @@ export function signInCommand(loginCommand: string = WORKER_LOGIN_COMMAND): stri
 /** Opens the headless sign-in alternative in {@link signInHint} (text output drops it). */
 export const NO_TERMINAL_SIGN_IN = "Without a terminal:";
 
-/** Hint for the entitlement row when sign-in is the next step. */
+/**
+ * Hint for the entitlement row when sign-in is the next step: the same text
+ * the worker prints when it refuses to start, plus the headless sign-in.
+ */
 export function signInHint(loginCommand: string = WORKER_LOGIN_COMMAND): string {
   return (
-    `Run \`${signInCommand(loginCommand)}\` (or ${OTHER_LOGIN_METHODS}). ${NO_TERMINAL_SIGN_IN} ` +
-    `\`${signInCommand(loginCommand)} --no-wait\`. A paid LICENSE_KEY in the workspace .env works instead`
+    `${workerPilotSignInMessage(loginCommand)}. ${NO_TERMINAL_SIGN_IN} ` +
+    `\`${signInCommand(loginCommand)} --no-wait\``
   );
 }
 

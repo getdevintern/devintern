@@ -38,6 +38,40 @@ export {
 
 const DEFAULT_API_BASE = "https://devintern.com";
 
+/** The Worker Pilot sign-in and license docs (docs/code/worker.md). */
+export const WORKER_PILOT_DOCS_URL =
+  "https://devintern.com/docs/code/worker#worker-pilot-and-licenses";
+
+/**
+ * What a worker with no `LICENSE_KEY` and no session needs: sign in to start
+ * the Worker Pilot (the interactive form, which asks for the method), or set
+ * an existing license key instead. The worker start path, `worker doctor`,
+ * and `worker service` all show this text.
+ *
+ * @param loginCommand - Sign-in command (may include `--workspace <path>`).
+ * @returns The message, ending with the docs link.
+ */
+export function workerPilotSignInMessage(loginCommand: string = "devintern worker login"): string {
+  return (
+    `Sign in to start your free 14-day Worker Pilot: \`${loginCommand}\` (no card required). ` +
+    "Already have a Supporter, Team, or Business license? Set LICENSE_KEY in the workspace .env instead. " +
+    `See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
+/**
+ * A signed-in account with no automation license and no Worker Pilot left.
+ * Worded so {@link LicenseCheckResult} callers keep treating it as before
+ * (a retryable denial for the worker service).
+ */
+function workerPilotOverMessage(): string {
+  return (
+    "Your free Worker Pilot is over and this account has no automation license. " +
+    "Set LICENSE_KEY in the workspace .env to a Supporter, Team, or Business license key from " +
+    `https://devintern.com/account (buy one at https://devintern.com/pricing). See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
 /** How long a cached last-known-good entitlement is honored when the license server is unreachable. */
 const GRACE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -345,10 +379,9 @@ async function checkEntitlementViaWebsite(
 /** Validate an explicit `LICENSE_KEY` against the Polar customer portal. */
 async function checkExplicitLicenseKey(
   explicitKey: string,
-  productKey: string,
-  supabaseConfig: LicenseCheckOptions["supabaseConfig"],
-  requireAutomation: boolean,
+  options: LicenseCheckOptions,
 ): Promise<LicenseCheckResult> {
+  const { productKey, supabaseConfig, requireAutomation = false } = options;
   try {
     const result = await validatePolarLicenseKey(explicitKey);
     if (!result.valid) {
@@ -356,7 +389,7 @@ async function checkExplicitLicenseKey(
       return {
         valid: false,
         source: "license-key",
-        message: "License key is invalid or revoked.",
+        message: invalidKeyMessage(options),
       };
     }
 
@@ -412,6 +445,20 @@ async function checkExplicitLicenseKey(
 }
 
 /**
+ * An invalid or revoked `LICENSE_KEY`. Where the Worker Pilot is allowed, it
+ * names the Pilot sign-in as the way to run without a key.
+ */
+function invalidKeyMessage(options: LicenseCheckOptions): string {
+  const message = "LICENSE_KEY is invalid or revoked.";
+  if (!options.requireAutomation || !options.allowTrial) return message;
+  return (
+    `${message} Check the key at https://devintern.com/account, or remove LICENSE_KEY from the ` +
+    "workspace .env and sign in to start your free 14-day Worker Pilot: " +
+    `\`${options.loginCommand ?? "devintern login"}\`. See ${WORKER_PILOT_DOCS_URL}`
+  );
+}
+
+/**
  * Resolves whether the caller may use a devintern CLI product.
  *
  * Resolution order:
@@ -455,7 +502,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
   // 1. Direct license key validation via Polar public customer portal API
   const explicitKey = licenseKey || env.LICENSE_KEY;
   if (explicitKey) {
-    return checkExplicitLicenseKey(explicitKey, productKey, supabaseConfig, requireAutomation);
+    return checkExplicitLicenseKey(explicitKey, options);
   }
 
   // 2. Authenticated user → check Polar entitlements via devintern.com
@@ -540,10 +587,29 @@ function noLicenseResult(
   const { requireAutomation = false, allowTrial = false } = options;
   const messages: string[] = [];
   const loginCommand = options.loginCommand ?? "devintern login";
+  if (requireAutomation && allowTrial) {
+    // The Worker Pilot leads; an existing license key is the alternative.
+    if (!signedIn) {
+      return {
+        valid: false,
+        source: "none",
+        message: workerPilotSignInMessage(loginCommand),
+        signInRequired: true,
+      };
+    }
+    return {
+      valid: false,
+      source: "none",
+      message: entitlementCheckError
+        ? `License entitlement check failed: ${entitlementCheckError}. ` +
+          `Set LICENSE_KEY in the workspace .env to skip the account check. See ${WORKER_PILOT_DOCS_URL}`
+        : workerPilotOverMessage(),
+    };
+  }
   if (requireAutomation) {
     messages.push(
       options.setup
-        ? "No automation license or Worker Pilot was found, and the unattended worker needs one to start."
+        ? "No automation license was found, and the unattended worker needs one to start."
         : "Automated execution detected (CI / systemd / cron) but no automation license was found.",
     );
     if (entitlementCheckError) {
@@ -553,11 +619,7 @@ function noLicenseResult(
       "Set LICENSE_KEY to a Supporter, Team, or Business license key from https://devintern.com/account, or purchase one at https://devintern.com/pricing.",
     );
     if (!signedIn) {
-      messages.push(
-        allowTrial
-          ? `Alternatively, run \`${loginCommand}\` to start your 14-day free Worker Pilot (no card required).`
-          : "Alternatively, sign in if your account already holds one.",
-      );
+      messages.push("Alternatively, sign in if your account already holds one.");
     }
   } else {
     if (!signedIn) {
@@ -576,7 +638,6 @@ function noLicenseResult(
     valid: false,
     source: "none",
     message: messages.join(" "),
-    ...(!signedIn && requireAutomation && allowTrial ? { signInRequired: true } : {}),
   };
 }
 
@@ -614,7 +675,7 @@ export async function activateWorkerTrial(options: {
     return {
       valid: false,
       source: "none",
-      message: `Run \`${options.loginCommand ?? "devintern login"}\` to start your 14-day free Worker Pilot (no card required).`,
+      message: workerPilotSignInMessage(options.loginCommand ?? "devintern login"),
       signInRequired: true,
     };
   }

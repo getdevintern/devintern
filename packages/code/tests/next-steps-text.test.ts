@@ -102,8 +102,9 @@ describe("humanNextStep", () => {
   test("the sign-in hint drops its no-terminal alternative", () => {
     const hint = humanText(signInHint(workerLoginCommandFor(configPath)));
     expect(hint).toBe(
-      `Run \`devintern worker login --workspace ${configPath} github\` (or google, x, or email ` +
-        "you@company.com). A paid LICENSE_KEY in the workspace .env works instead",
+      `Sign in to start your free 14-day Worker Pilot: \`devintern worker login --workspace ${configPath}\` ` +
+        "(no card required). Already have a Supporter, Team, or Business license? Set LICENSE_KEY " +
+        "in the workspace .env instead. See https://devintern.com/docs/code/worker#worker-pilot-and-licenses.",
     );
   });
 
@@ -213,7 +214,8 @@ describe("worker doctor before sign-in", () => {
     const report = renderReadinessReport(checks);
     const text = [...report.lines, workerDoctorClosingLine(checks, report)].join("\n");
     expectNoAgentFlags(text);
-    expect(text).toContain(`devintern worker login --workspace ${configPath} github`);
+    expect(text).toContain(`\`devintern worker login --workspace ${configPath}\``);
+    expect(text).not.toContain("worker login github");
   });
 
   test("--json keeps the hint and the agent next steps", () => {
