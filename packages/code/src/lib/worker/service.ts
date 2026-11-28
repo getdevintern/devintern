@@ -34,6 +34,7 @@ import {
 import { homedir as osHomedir, userInfo } from "os";
 import { dirname, join, resolve } from "path";
 import { hostTotalMemoryBytes } from "./host-memory";
+import { DELEGATED_CGROUP_ENV } from "./job-cgroup";
 import { DEFAULT_MEMORY_BUDGET, memoryBudgetBytes, validateMemoryBudget } from "./memory-budget";
 import type { MemoryBudgetPercentages } from "./memory-budget";
 import { WORKER_CONFIG_EXIT_CODE } from "./startup";
@@ -313,6 +314,12 @@ export function commandDetail(result: RunCommandResult): string {
  * written: the same defaults fit a laptop and a 64 GB workstation. They are
  * configurable through `[workspace.execution]`; see `memory-budget.ts`.
  *
+ * `Delegate=yes` (with `DEVINTERN_DELEGATED_CGROUP=1`, which tells the daemon
+ * it may use it) hands the service cgroup to the daemon, which gives every
+ * subprocess job its own child cgroup with a per-job `memory.max` (see
+ * `job-cgroup.ts`). A runaway job is then OOM-killed inside its own cgroup
+ * while the budget above still caps all jobs together.
+ *
  * `OOMPolicy=continue` keeps a kernel OOM kill inside the cgroup scoped to
  * the process it picked (a runaway test runner or browser): systemd's default
  * `stop` would tear down the whole unit, ending every concurrent job and
@@ -354,7 +361,8 @@ export function renderSystemdUnit(options: {
     (options.environmentPath ? `Environment=${quote(`PATH=${options.environmentPath}`)}\n` : "") +
     (options.workspaceDirEnv
       ? `Environment=${quote(`DEVINTERN_WORKSPACE_DIR=${options.workspaceDirEnv}`)}\n`
-      : "");
+      : "") +
+    `Environment=${DELEGATED_CGROUP_ENV}=1\n`;
   // An invalid custom budget would make systemd reject the unit; fall back to
   // the defaults rather than writing a service that cannot start.
   const memory =
@@ -384,6 +392,7 @@ RestartSec=30
 RestartPreventExitStatus=${WORKER_CONFIG_EXIT_CODE}
 KillMode=mixed
 TimeoutStopSec=120
+Delegate=yes
 OOMPolicy=continue
 
 [Install]

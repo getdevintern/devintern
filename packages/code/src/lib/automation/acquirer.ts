@@ -22,6 +22,7 @@ import type { RunOrigin } from "../state/run-recorder";
 import { readRunOutcomeHint, RUN_OUTCOME_FILE_ENV } from "../worker/run-outcome-protocol";
 import type { RunOutcomeHint } from "../worker/run-outcome-protocol";
 import { getWorkerFailover, harnessBlockedReason } from "../worker/failover";
+import { jobMemoryLimitReason, jobMemorySpawn } from "../worker/job-cgroup";
 import {
   HARNESS_UNAVAILABLE_EXIT_CODE,
   readUsageLimitHint,
@@ -903,14 +904,18 @@ export function spawnAutomationProcess(
   const start = (env: Record<string, string | undefined>): void => {
     // A failover re-spawn must not inherit the previous attempt's status.
     rmSync(outcomePath, { force: true });
-    const spawned = spawn(executable, args, {
+    const job = jobMemorySpawn(executable, args, { ...env, [RUN_OUTCOME_FILE_ENV]: outcomePath });
+    const spawned = spawn(job.command, job.args, {
       cwd: options.cwd,
-      env: { ...env, [RUN_OUTCOME_FILE_ENV]: outcomePath },
+      env: job.env,
       stdio: "inherit",
       detached,
     });
     child = spawned;
     spawned.once("close", (code) => {
+      const memory = job.onClose();
+      if (memory.exceeded && !terminating)
+        console.warn(`⚠️  ${jobMemoryLimitReason(memory.label)}`);
       if (terminating) {
         if (!processGroupAlive()) {
           if (terminationTimer) clearTimeout(terminationTimer);
@@ -950,6 +955,7 @@ export function spawnAutomationProcess(
       settle(exitResult);
     });
     spawned.once("error", () => {
+      job.onClose();
       exitResult = false;
       if (terminationTimer) clearTimeout(terminationTimer);
       cleanupHint();

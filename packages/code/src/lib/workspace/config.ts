@@ -13,7 +13,7 @@ import { parseWorkerScheduleSection } from "../worker/schedule";
 import { parseEstimationEntries } from "../automation/estimation-config";
 import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
-import { parseMemoryBudget } from "./config-memory";
+import { parseExecutionMemory } from "./config-memory";
 import { readTeamPrFlags } from "./config-team-prs";
 import { parseTrackerSettings } from "./tracker-settings";
 import { validateManualOnlyReferences, workerWorkspaceView } from "./manual-only";
@@ -304,7 +304,7 @@ function parseWorkspaceSettings(
         message: "[workspace.execution].max_concurrency_per_repo must be a positive integer.",
       },
     ) ?? DEFAULT_MAX_CONCURRENCY_PER_REPO;
-  const memory = parseMemoryBudget(executionTable, "[workspace.execution]", errors);
+  const { memory, jobMemoryMaxPercent } = parseExecutionMemory(executionTable, errors);
   if (maxConcurrencyPerRepo > maxConcurrency) {
     errors.push(
       "[workspace.execution].max_concurrency_per_repo cannot exceed [workspace.execution].max_concurrency.",
@@ -346,7 +346,7 @@ function parseWorkspaceSettings(
   const gitAuthor = readGitAuthor(workspaceTable, "[workspace]", errors);
 
   return {
-    execution: { isolation, maxConcurrency, maxConcurrencyPerRepo, memory },
+    execution: { isolation, maxConcurrency, maxConcurrencyPerRepo, memory, jobMemoryMaxPercent },
     worktreesTtlDays,
     dashboard,
     dashboardPort,

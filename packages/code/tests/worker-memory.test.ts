@@ -170,6 +170,32 @@ tracker = "markdown"
 `),
     ).toThrow(/memory_high_percent cannot exceed memory_max_percent/);
   });
+
+  test("parses the per-job cap and rejects one above the service cap", () => {
+    const config = parseWorkspaceConfig(`
+[workspace.execution]
+job_memory_max_percent = 0
+
+[defaults]
+tracker = "markdown"
+`);
+    expect(config.workspace.execution.jobMemoryMaxPercent).toBe(0);
+    expect(
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+`).workspace.execution.jobMemoryMaxPercent,
+    ).toBeUndefined();
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace.execution]
+job_memory_max_percent = 80
+
+[defaults]
+tracker = "markdown"
+`),
+    ).toThrow(/job_memory_max_percent cannot exceed/);
+  });
 });
 
 describe("host memory readings", () => {
@@ -202,6 +228,19 @@ SwapTotal:      16777216 kB
       "/sys/fs/cgroup/user.slice/user-1000.slice/devintern-worker.service/memory.max": "1000\n",
       "/sys/fs/cgroup/user.slice/user-1000.slice/devintern-worker.service/memory.stat":
         "anon 600\nfile 200\n",
+    };
+    expect(readCgroupMemory({ readFile: (path) => files[path] ?? "" })).toEqual({
+      usedBytes: 600,
+      maxBytes: 1000,
+    });
+  });
+
+  test("reads the service cgroup when the daemon sits in its per-job leaf", () => {
+    const files: Record<string, string> = {
+      "/proc/self/cgroup": "0::/user.slice/x.service/devintern-daemon\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.current": "800\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.max": "1000\n",
+      "/sys/fs/cgroup/user.slice/x.service/memory.stat": "anon 600\n",
     };
     expect(readCgroupMemory({ readFile: (path) => files[path] ?? "" })).toEqual({
       usedBytes: 600,

@@ -719,6 +719,12 @@ describe("renderers keep self-capture semantics", () => {
     expect(unit).toContain("KillMode=mixed\nTimeoutStopSec=120\n");
   });
 
+  test("systemd unit delegates its cgroup for per-job memory limits", () => {
+    const unit = renderSystemdUnit({ execPath: "devintern", projectDir: "/srv/app" });
+    expect(unit).toContain("Delegate=yes\n");
+    expect(unit).toContain("Environment=DEVINTERN_DELEGATED_CGROUP=1\n");
+  });
+
   test("launchd agent keeps RunAtLoad and KeepAlive and logs to its own file", () => {
     const plist = renderLaunchdPlist({ execPath: "devintern", workingDir: "/srv/app" });
     expect(plist).toContain("<key>RunAtLoad</key>");

@@ -70,6 +70,7 @@ import { composeScheduledJobActions } from "../automation/scheduled-jobs";
 import { warnUninstalledHarnessPins } from "../agent/selection";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import { hostMemorySupervisorOptions } from "../worker/host-memory";
+import { startJobCgroups } from "../worker/job-cgroup";
 import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
@@ -923,6 +924,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   assertWorkerHasRepos(config, configPath);
 
   const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
+  startJobCgroups(config.workspace.execution); // before any job spawns
   const initialFleetAutomations = resolveFleetAutomations(config);
   if (initialFleetAutomations.problems.length > 0) {
     throw new Error(`Invalid ${configPath}:\n- ${initialFleetAutomations.problems.join("\n- ")}`);
@@ -950,10 +952,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   await startLoggedWorkerFailover(state.queue);
   const repoManager = new RepoManager(workspaceDir);
   const supervisor = createTaskSupervisor(
-    {
-      maxConcurrency: config.workspace.execution.maxConcurrency,
-      maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
-    },
+    config.workspace.execution,
     hostMemorySupervisorOptions(),
   );
   const orphanRecovery = await recoverOrphanedWorkspaceRuns({
