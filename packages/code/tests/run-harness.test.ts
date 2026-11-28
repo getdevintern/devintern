@@ -416,6 +416,7 @@ beforeEach(() => {
   runContext.activeTaskContext = null;
   delete process.env.AGENT_HARNESS_TIMEOUT_MINUTES;
   delete process.env[RUN_ORIGIN_ENV];
+  delete process.env.DEVINTERN_AUTOMATION_ID;
 });
 
 afterEach(() => {
@@ -423,6 +424,7 @@ afterEach(() => {
   delete process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO;
   delete process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT;
   delete process.env.DEVINTERN_WORKSPACE_REPO;
+  delete process.env.DEVINTERN_AUTOMATION_ID;
 });
 
 afterAll(() => {
@@ -768,6 +770,155 @@ describe("runAgentHarness git delivery", () => {
     await expect(
       runAgentHarness({ ...baseInput(), createPr: true, allowNoChanges: false }),
     ).rejects.toThrow("Implementation was not committed");
+  });
+
+  describe("agent-reported outcome with no changes", () => {
+    const NOOP_REPORT =
+      'Already merged.\n<!-- devintern:outcome status=noop reason="Already implemented by #283" -->\n';
+    const BLOCKED_REPORT =
+      'Could not start.\n<!-- devintern:outcome status=blocked reason="test gate failed" -->\n';
+    const IN_SCOPE_RUNS: Array<{ name: string; setup: () => void }> = [
+      { name: "an ad-hoc task", setup: () => (process.env[RUN_ORIGIN_ENV] = "local") },
+      {
+        name: "a scheduled automation run",
+        setup: () => {
+          process.env[RUN_ORIGIN_ENV] = "scheduled";
+          process.env.DEVINTERN_AUTOMATION_ID = "nightly";
+        },
+      },
+      {
+        name: "a manual automation run",
+        setup: () => {
+          process.env[RUN_ORIGIN_ENV] = "manual";
+          process.env.DEVINTERN_AUTOMATION_ID = "nightly";
+        },
+      },
+    ];
+
+    function activeContext() {
+      runContext.activeTaskContext = {
+        taskKey: "TASK-1",
+        tracker: tracker as never,
+        projectKey: "PROJ",
+        movedToInProgress: false,
+      };
+    }
+
+    for (const run of IN_SCOPE_RUNS) {
+      test(`${run.name} with status=noop is a successful no-op without publishing`, async () => {
+        run.setup();
+        activeContext();
+        scenario.stdout = NOOP_REPORT;
+        commitResult = { success: false, message: "No changes to commit" };
+
+        await runAgentHarness({ ...baseInput(), createPr: true });
+
+        expect(deliveryEvents).toEqual(["commit"]);
+        expect(hookCalls).toBe(0);
+        expect(postImplementationCommentMock).not.toHaveBeenCalled();
+        expect(tracker.transitionStatus).not.toHaveBeenCalled();
+        expect(runContext.activeTaskContext?.noopDeliveryReason).toBe(
+          "noop: Already implemented by #283",
+        );
+      });
+
+      test(`${run.name} with no marker still fails at commit`, async () => {
+        run.setup();
+        activeContext();
+        scenario.stdout = "done";
+        commitResult = { success: false, message: "No changes to commit" };
+
+        await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+          "Implementation was not committed",
+        );
+        expect(runContext.activeTaskContext?.noopDeliveryReason).toBeUndefined();
+      });
+    }
+
+    test("a noop marker without a reason records a default noop reason", async () => {
+      process.env[RUN_ORIGIN_ENV] = "local";
+      activeContext();
+      scenario.stdout = "Nothing to do.\n<!-- devintern:outcome status=noop -->\n";
+      commitResult = { success: false, message: "No changes to commit" };
+
+      await runAgentHarness({ ...baseInput(), createPr: true });
+
+      expect(runContext.activeTaskContext?.noopDeliveryReason).toBe(
+        "noop: the agent reported nothing to change",
+      );
+    });
+
+    test("status=done with no changes still fails on an ad-hoc task", async () => {
+      process.env[RUN_ORIGIN_ENV] = "local";
+      scenario.stdout = "Done.\n<!-- devintern:outcome status=done -->\n";
+      commitResult = { success: false, message: "No changes to commit" };
+
+      await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+        "Implementation was not committed",
+      );
+    });
+
+    test("status=partial with no changes still fails on an ad-hoc task", async () => {
+      process.env[RUN_ORIGIN_ENV] = "local";
+      scenario.stdout = 'Half.\n<!-- devintern:outcome status=partial reason="half" -->\n';
+      commitResult = { success: false, message: "No changes to commit" };
+
+      await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+        "Implementation was not committed",
+      );
+    });
+
+    test("status=blocked with no changes stops delivery so the run can escalate", async () => {
+      process.env[RUN_ORIGIN_ENV] = "local";
+      activeContext();
+      scenario.stdout = BLOCKED_REPORT;
+      commitResult = { success: false, message: "No changes to commit" };
+
+      await runAgentHarness({ ...baseInput(), createPr: true });
+
+      expect(deliveryEvents).toEqual(["commit"]);
+      expect(runContext.activeTaskContext?.noopDeliveryReason).toBeUndefined();
+    });
+
+    for (const origin of [undefined, "worker"]) {
+      test(`a tracker-ticket run (origin ${origin ?? "unset"}) with status=noop still fails`, async () => {
+        if (origin) process.env[RUN_ORIGIN_ENV] = origin;
+        activeContext();
+        scenario.stdout = NOOP_REPORT;
+        commitResult = { success: false, message: "No changes to commit" };
+
+        await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+          "Implementation was not committed",
+        );
+        expect(runContext.activeTaskContext?.noopDeliveryReason).toBeUndefined();
+      });
+    }
+
+    test("a tracker-ticket run with --allow-no-changes keeps its plain no-op", async () => {
+      process.env[RUN_ORIGIN_ENV] = "worker";
+      activeContext();
+      scenario.stdout = NOOP_REPORT;
+      commitResult = { success: false, message: "No changes to commit" };
+
+      await runAgentHarness({ ...baseInput(), createPr: true, allowNoChanges: true });
+
+      expect(deliveryEvents).toEqual(["commit"]);
+      expect(runContext.activeTaskContext?.noopDeliveryReason).toBeUndefined();
+    });
+
+    test("agent commits are still delivered before the noop marker is considered", async () => {
+      process.env[RUN_ORIGIN_ENV] = "local";
+      activeContext();
+      scenario.stdout = NOOP_REPORT;
+      commitResult = { success: false, message: "No changes to commit" };
+      inheritedCommitCount = 1;
+      headMovedDuringRun = true;
+
+      await runAgentHarness({ ...baseInput(), createPr: true });
+
+      expect(deliveryEvents).toEqual(["commit", "push"]);
+      expect(runContext.activeTaskContext?.noopDeliveryReason).toBeUndefined();
+    });
   });
 
   test("rejects a failed push without posting completion or transitioning the task", async () => {

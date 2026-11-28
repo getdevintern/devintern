@@ -73,7 +73,7 @@ Set `open_pr = true` for code changes that should be reviewed. Those runs use `[
 
 ## Allowing a no-op run
 
-Some jobs should do nothing when there is nothing to do: "keep main green", "release only when warranted". Without `allow_no_changes = true`, a PR-opening run that makes no commit fails with `Implementation was not committed`. With it, the run is recorded as a successful no-op and no branch or PR is created.
+Some jobs should do nothing when there is nothing to do: "keep main green", "release only when warranted". A PR-opening run that makes no commit succeeds as a no-op when its agent reports `status=noop` (see [Reporting a blocked run](#reporting-a-blocked-run)): no branch or PR is created, and the run's reason starts with `noop:`. A run that makes no commit and reports no `noop` fails with `Implementation was not committed`, unless you set `allow_no_changes = true`, which also accepts no-change runs without the marker.
 
 ```toml
 [[automations]]
@@ -164,6 +164,6 @@ These files are only run inputs and are safe to delete.
 | `occurrence skipped: repository is busy`     | Another task holds the repo lock. The next occurrence runs normally.                                   |
 | `occurrence skipped: no agent harness is available until …` | Every harness is usage-limited. Add a fallback to `AGENT_HARNESS`.                     |
 | Scheduled runs missing from the dashboard    | Filter runs by origin `scheduled`. Check the startup log for a license problem.                        |
-| A PR-opening run fails with `Implementation was not committed` | Set `allow_no_changes = true` if doing nothing is a valid result.                  |
+| A PR-opening run fails with `Implementation was not committed` | Have the prompt report `status=noop` when there is nothing to do, or set `allow_no_changes = true` to accept any run that changes nothing. |
 
 For reading worker logs and run data, see [Worker Troubleshooting](./worker-troubleshooting.md#reading-logs-and-run-data).

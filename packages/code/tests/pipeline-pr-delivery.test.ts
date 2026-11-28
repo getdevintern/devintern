@@ -257,3 +257,54 @@ describe("settleImplementationRun for a stacked run whose base closed", () => {
     expect(workerMeta("PROJ-STACK2").actioned).toBe(false);
   });
 });
+
+describe("settleImplementationRun for a no-change run accepted on a noop marker", () => {
+  test("records a succeeded run whose reason starts with noop:", async () => {
+    const doneCalls: string[] = [];
+    beginRun({ origin: "local", taskKey: "local-already-done" });
+    const runId = getActiveRunContext()!.id;
+    runContext.activeTaskContext = {
+      taskKey: "local-already-done",
+      tracker: trackerStub(),
+      projectKey: "local",
+      movedToInProgress: false,
+      noopDeliveryReason: "noop: Already implemented by #283",
+    };
+
+    await settleImplementationRun({
+      tracker: markdownTrackerStub(doneCalls),
+      task: task as never,
+      workflowKey: "local-already-done",
+      taskDir: workDir,
+      incomplete: false,
+      outcome: { status: "noop", reason: "Already implemented by #283" },
+    });
+
+    const run = readRun(runId);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.outcomeReason).toBe("noop: Already implemented by #283");
+    expect(readHint()).toEqual({
+      status: "succeeded",
+      reason: "noop: Already implemented by #283",
+    });
+    expect(doneCalls).toEqual(["local-already-done"]);
+  });
+
+  test("a noop marker without a no-change delivery keeps a plain success", async () => {
+    beginRun({ origin: "task", taskKey: "PROJ-NOOP" });
+    const runId = getActiveRunContext()!.id;
+
+    await settleImplementationRun({
+      tracker: trackerStub(),
+      task: task as never,
+      workflowKey: "PROJ-NOOP",
+      taskDir: workDir,
+      incomplete: false,
+      outcome: { status: "noop", reason: "main is green" },
+    });
+
+    const run = readRun(runId);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.outcomeReason).toBeUndefined();
+  });
+});

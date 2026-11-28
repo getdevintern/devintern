@@ -203,6 +203,17 @@ export function outcomeRunDisposition(
   return { status: "succeeded" };
 }
 
+/** Prefix of the `outcome_reason` recorded for a no-change run the agent reported as `noop`. */
+export const NOOP_OUTCOME_REASON_PREFIX = "noop: ";
+
+/**
+ * Outcome reason for a run accepted as a no-op on the agent's `noop` marker,
+ * so those runs stay visible (`outcome_reason LIKE 'noop: %'`).
+ */
+export function noopOutcomeReason(outcome: ImplementationOutcome): string {
+  return `${NOOP_OUTCOME_REASON_PREFIX}${outcome.reason ?? "the agent reported nothing to change"}`;
+}
+
 /** Prefix of the `outcome_reason` recorded for a run whose PR could not be created. */
 export const PR_DELIVERY_FAILED_REASON_PREFIX = "pushed but PR creation failed: ";
 

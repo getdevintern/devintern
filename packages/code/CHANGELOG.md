@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **No-op runs the agent reports as `status=noop` succeed**: an ad-hoc task (`devintern worker add`) or a PR-opening automation whose agent made no changes and reported `status=noop` (for example, because the work had already merged) failed with `Implementation was not committed` unless `allow_no_changes` was set. It is now recorded as succeeded with a reason starting `noop:`, and no branch or PR is created. A `status=blocked` report with no changes now escalates instead of failing at commit. Runs with no marker, and tracker-ticket runs, behave as before
 - **Deferred PR runs no longer wait forever**: a CI fix, conflict resolution, or auto-merge run deferred by a usage limit stayed under "Waiting to retry" on the dashboard after its PR merged or closed, or after CI went green, because nothing would ever retry it. Those runs are now marked abandoned with the reason they were superseded, and the worker settles existing ones on startup
 
 ## [2.30.0] - 2026-11-27

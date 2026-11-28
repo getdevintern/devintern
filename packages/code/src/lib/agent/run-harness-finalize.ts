@@ -48,6 +48,8 @@ import type { PipelineContext } from "../task/pipeline-registry";
 import { buildRepairPrompt, verifyImplementation } from "./verify";
 import type { VerifyDependencies } from "./verify";
 import { extractImplementationSummary, withImplementationSummary } from "./implementation-summary";
+import { noopOutcomeReason, parseImplementationOutcome } from "./implementation-outcome";
+import { resolveRunIdentity } from "../task/run-identity";
 import { describeMissingStackBase, ensureStackBase } from "./stack-base-guard";
 import type { RunStackDeps } from "../dependencies/stack-run";
 
@@ -62,7 +64,11 @@ export interface DeliveryState extends PipelineContext {
   pendingFeedback?: ReviewFeedback;
   failedPlugin?: boolean;
   implementationStepSeen: boolean;
-  /** Set when `--allow-no-changes` accepted a delivery with nothing to commit. */
+  /**
+   * Set when a delivery with nothing to commit was accepted: by
+   * `--allow-no-changes`, or by the agent's `noop`/`blocked` marker on an
+   * ad-hoc or automation run.
+   */
   noChanges: boolean;
   /** Set when the stacked base closed unmerged mid-run (see `stack-base-guard.ts`). */
   stackBlocked?: string;
@@ -253,6 +259,48 @@ async function commitsAheadOfTarget(ctx: FinalizeContext): Promise<number> {
   return /^\d+$/.test(value) ? Number(value) : 0;
 }
 
+/**
+ * Whether this run may take the agent's own outcome marker as the reason a
+ * delivery has nothing to commit: ad-hoc tasks (`devintern worker add`, origin
+ * `local`) and scheduled or manual automation runs. Tracker-ticket runs are
+ * deliberately excluded: a no-op there raises its own questions (ticket
+ * transition, comment), so they still need `--allow-no-changes`.
+ */
+function acceptsReportedNoChangeOutcome(): boolean {
+  const { origin } = resolveRunIdentity(process.env);
+  return origin === "local" || origin === "scheduled" || origin === "manual";
+}
+
+/**
+ * Accept a delivery with nothing to commit on the agent's outcome marker.
+ *
+ * `status=noop` is a successful no-op (recorded with a `noop: …` reason);
+ * `status=blocked` stops delivery so the run settles as escalated instead of
+ * failing at commit. No marker, `done`, and `partial` are not accepted, so an
+ * agent that silently does nothing still fails without `--allow-no-changes`.
+ *
+ * @returns True when the no-change delivery was accepted
+ */
+function acceptReportedNoChangeOutcome(state: DeliveryState): boolean {
+  if (!acceptsReportedNoChangeOutcome()) return false;
+  const reported = parseImplementationOutcome(state.output);
+  if (reported?.status === "noop") {
+    state.noChanges = true;
+    const reason = noopOutcomeReason(reported);
+    if (runContext.activeTaskContext) runContext.activeTaskContext.noopDeliveryReason = reason;
+    console.log(
+      `✅ The agent reported nothing to change; recording a successful no-op (${reason})`,
+    );
+    return true;
+  }
+  if (reported?.status === "blocked") {
+    state.noChanges = true;
+    console.log("🛑 The agent reported the goal as blocked and made no changes");
+    return true;
+  }
+  return false;
+}
+
 /** Commit the implementation, including the existing plan-only retry. */
 export async function commitImplementation(state: DeliveryState): Promise<boolean> {
   const ctx = state.context;
@@ -318,6 +366,8 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
       return true;
     }
   }
+
+  if (noChanges && acceptReportedNoChangeOutcome(state)) return true;
 
   if (outcome.result.message === "No changes to commit" && ctx.allowNoChanges) {
     // Recurring jobs can legitimately decide there is nothing to do. Record

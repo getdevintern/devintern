@@ -325,8 +325,13 @@ export async function settleImplementationRun(input: {
   // for a clean run, and a requested PR that failed after the push turns it
   // into a failure. Resolve it before any tracker transition so a blocked or
   // undelivered markdown task is not written as Done.
+  // A no-change delivery accepted on the agent's `noop` marker keeps its
+  // `noop: …` reason so those runs stay queryable.
+  const noopDeliveryReason = runContext.activeTaskContext?.noopDeliveryReason;
   const disposition = deliveryRunDisposition(
-    outcomeRunDisposition(outcome),
+    noopDeliveryReason === undefined
+      ? outcomeRunDisposition(outcome)
+      : { status: "succeeded", reason: noopDeliveryReason },
     runContext.activeTaskContext?.prDeliveryFailure?.message,
   );
   if (isMarkdownTaskTracker(tracker) && disposition.status === "succeeded") {
