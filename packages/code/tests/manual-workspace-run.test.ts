@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { WORKER_SUBPROCESS_ENV } from "../src/lib/config/config-dir";
+import { WORKER_SUBPROCESS_ENV, setManualWorkspaceStateDir } from "../src/lib/config/config-dir";
 import {
   acquireTicketLocks,
   checkoutLockFileName,
@@ -73,6 +73,8 @@ describe("manual runs in a workspace checkout", () => {
   });
 
   afterEach(() => {
+    // `applyManualWorkspaceRun` pins the runtime state dir process-wide.
+    setManualWorkspaceStateDir(null);
     for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
     Object.assign(process.env, saved);
     rmSync(root, { recursive: true, force: true });

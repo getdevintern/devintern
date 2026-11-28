@@ -10,12 +10,15 @@ import { Database } from "bun:sqlite";
 import {
   RunStore,
   beginRun,
+  beginRunStep,
+  currentRunStep,
   endRun,
   getActiveRunContext,
   hasRunStage,
   latestRunStage,
   markRunCleanStop,
   recordRunHarness,
+  recordStageForRun,
   recordRunStage,
   replaceRunStage,
 } from "../src/lib/state/run-recorder";
@@ -797,6 +800,33 @@ describe("RunStore", () => {
       }
     } finally {
       endRun("failed", "test cleanup");
+    }
+  });
+
+  test("recordStageForRun appends to a run that already ended", () => {
+    beginRun({ origin: "task", taskKey: "PROJ-DR" });
+    const runId = getActiveRunContext()!.id;
+    const exitStep = beginRunStep("implementation");
+    exitStep();
+    expect(currentRunStep()).toBe("implementation");
+    endRun("failed", "boom");
+
+    recordStageForRun(runId, "defect_report", {
+      status: "succeeded",
+      summary: "Reported a DevIntern issue",
+      detail: { reported: true, url: "https://devintern.com/reports/r-1" },
+    });
+    const reader = new RunStore();
+    try {
+      const stage = reader.listStages(runId).find((record) => record.stage === "defect_report");
+      expect(stage?.status).toBe("succeeded");
+      expect(JSON.parse(stage!.detail!)).toEqual({
+        reported: true,
+        url: "https://devintern.com/reports/r-1",
+      });
+      expect(reader.getRun(runId)?.status).toBe("failed");
+    } finally {
+      reader.close();
     }
   });
 

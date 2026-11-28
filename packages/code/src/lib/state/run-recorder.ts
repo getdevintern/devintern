@@ -81,7 +81,9 @@ export type RunStage =
   | "verify"
   | "auto_review"
   | "change_request"
-  | "outcome";
+  | "outcome"
+  // Optional automatic DevIntern defect report for a failed run.
+  | "defect_report";
 
 export type StageStatus =
   | "succeeded"
@@ -1227,22 +1229,36 @@ export function beginRunStep(step: string): () => void {
   }
 }
 
+/** Stage outcome, summary, and optional structured detail. */
+type RunStageInput = { status: StageStatus; summary?: string; detail?: unknown };
+
 /**
  * Record a pipeline stage for the current run (no-op when no run is active).
  *
  * @param stage - Pipeline stage name
  * @param data - Stage outcome, summary, and optional structured detail
  */
-export function recordRunStage(
-  stage: RunStage,
-  data: { status: StageStatus; summary?: string; detail?: unknown },
-): void {
-  if (currentStore === null || currentRunId === null) {
+export function recordRunStage(stage: RunStage, data: RunStageInput): void {
+  if (currentRunId !== null) {
+    recordStageForRun(currentRunId, stage, data);
+  }
+}
+
+/**
+ * Append a stage to a specific run, even one that ended: post-run consumers
+ * (automatic defect reports) run after {@link endRun}. No-op without a store.
+ *
+ * @param runId - Run id captured before the run ended
+ * @param stage - Pipeline stage name
+ * @param data - Stage outcome, summary, and optional structured detail
+ */
+export function recordStageForRun(runId: number, stage: RunStage, data: RunStageInput): void {
+  if (currentStore === null) {
     return;
   }
   try {
     const detail = data.detail === undefined ? undefined : JSON.stringify(data.detail);
-    currentStore.addStage(currentRunId, stage, data.status, data.summary, detail);
+    currentStore.addStage(runId, stage, data.status, data.summary, detail);
   } catch (error) {
     warnOnce(`stage:${stage}`, error);
   }
@@ -1260,10 +1276,7 @@ export function recordRunStage(
  * @param stage - Pipeline stage name
  * @param data - Corrected stage outcome, summary, and optional structured detail
  */
-export function replaceRunStage(
-  stage: RunStage,
-  data: { status: StageStatus; summary?: string; detail?: unknown },
-): void {
+export function replaceRunStage(stage: RunStage, data: RunStageInput): void {
   if (currentStore === null || currentRunId === null) {
     return;
   }

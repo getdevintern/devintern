@@ -7,6 +7,10 @@ await Bun.build({
   outdir: "dist",
   target: "bun",
   minify: true,
+  // Bun applies the adjacent map to runtime stack traces, so errors resolve to
+  // `src/...` paths. Automatic defect reports rely on that to tell DevIntern's
+  // own frames from vendored dependencies (`node_modules/...`) in the bundle.
+  sourcemap: "external",
   define: {
     __VERSION__: JSON.stringify(pkg.version),
     // True only in publish jobs: release bundles ignore DEVINTERN_SKIP_LICENSE_CHECK
@@ -25,6 +29,16 @@ const distPath = "dist/index.js";
 let content = readFileSync(distPath, "utf8");
 content = content.replace("#!/usr/bin/env node", "#!/usr/bin/env bun");
 writeFileSync(distPath, content);
+
+// The published package already ships `src/`, so the map only needs positions.
+// Drop the embedded sources to keep the artifact small; Bun still decodes the
+// map as long as `sourcesContent` has one entry per source.
+const mapPath = "dist/index.js.map";
+const sourceMap = JSON.parse(readFileSync(mapPath, "utf8")) as { sources: string[] };
+writeFileSync(
+  mapPath,
+  JSON.stringify({ ...sourceMap, sourcesContent: sourceMap.sources.map(() => null) }),
+);
 
 // Build the observability dashboard UI (sibling workspace package) and ship
 // its static assets inside this package so `devintern dashboard` works from

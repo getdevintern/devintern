@@ -20,6 +20,7 @@ import type {
   BugReporter,
   BugReporterOptions,
   PreparedReport,
+  ReportContext,
   ReportEvidence,
   ReportLogAttachment,
   RunDiagnostics,
@@ -149,8 +150,14 @@ export function createBugReporter(options: BugReporterOptions = {}): BugReporter
     const redaction = redactionFor(draft, collected, cwd);
     const contactEmail = (draft.contactEmail ?? options.contactEmail)?.trim();
     const signedIn = options.signedIn ?? false;
-    const context = collected.context ? { ...collected.context } : undefined;
     const evidence = prepareEvidence(draft.evidence, redaction);
+    // Caller evidence is kept even without diagnostics (automatic reports
+    // send environment + evidence only).
+    const context: ReportContext | undefined = collected.context
+      ? { ...collected.context }
+      : evidence
+        ? {}
+        : undefined;
     if (context && evidence) context.evidence = evidence;
     const logs: ReportLogAttachment[] | undefined = context?.logs?.map((log) => ({
       ...log,
