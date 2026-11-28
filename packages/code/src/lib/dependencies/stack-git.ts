@@ -69,7 +69,15 @@ export async function committerEnv(git: Git, head: string): Promise<NodeJS.Proce
 export type RebaseOntoResult =
   | { kind: "rebased"; headSha: string; baseSha: string }
   | { kind: "up-to-date"; baseSha: string }
-  | { kind: "conflict"; detail: string };
+  | {
+      kind: "conflict";
+      detail: string;
+      /**
+       * `false` only when uncommitted work could not be put back and sits in
+       * a stash; otherwise `HEAD` and the working tree are as they were.
+       */
+      intact: boolean;
+    };
 
 /**
  * Rebase the checked-out `HEAD` (`head`) onto `ontoSha`, dropping every commit
@@ -120,7 +128,7 @@ export async function rebaseOntoBase(
     const output = `${rebase.output}\n${rebase.error ?? ""}`;
     await git(["rebase", "--abort"]);
     if (conflicted || /CONFLICT|could not apply/i.test(output)) {
-      return { kind: "conflict", detail: tail(output) };
+      return { kind: "conflict", detail: tail(output), intact: true };
     }
     // An untracked file at a path `onto` adds stops git before it detaches
     // HEAD (the autostash leaves untracked files in place), so nothing moved;
@@ -129,6 +137,7 @@ export async function rebaseOntoBase(
       return {
         kind: "conflict",
         detail: `untracked files would be overwritten by ${onto}: ${tail(output)}`,
+        intact: true,
       };
     }
     throw new Error(`rebase failed: ${tail(output)}`);
@@ -159,6 +168,7 @@ async function restoreAfterStashConflict(
     return {
       kind: "conflict",
       detail: `re-applying uncommitted changes onto ${onto} conflicted; the branch was left on its original base`,
+      intact: true,
     };
   }
   // Should not happen (the stash was taken from `head`); leave a clean tree
@@ -169,6 +179,7 @@ async function restoreAfterStashConflict(
     detail:
       `re-applying uncommitted changes onto ${onto} conflicted and they could not be restored; ` +
       `they are in git stash ${stash ? stash.slice(0, 12) : "refs/stash"} (\`git stash list\`)`,
+    intact: false,
   };
 }
 

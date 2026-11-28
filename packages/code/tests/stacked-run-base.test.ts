@@ -480,7 +480,7 @@ describe("stacked run whose branch is already on origin (resumed run)", () => {
   });
 });
 
-describe("stacked run whose uncommitted work conflicts with the merge target", () => {
+describe("stacked run whose rebase onto the merge target conflicts", () => {
   let fx: Fixture;
   beforeEach(() => {
     fx = new Fixture();
@@ -491,7 +491,37 @@ describe("stacked run whose uncommitted work conflicts with the merge target", (
     resetStackBaseRelease();
   });
 
-  test("HEAD and the uncommitted change are restored, and nothing commits conflict markers", async () => {
+  /** Paths a merge of origin/main into HEAD would conflict on. */
+  function mergeConflicts(): string[] {
+    const result = Bun.spawnSync(
+      ["git", "merge-tree", "--write-tree", "--name-only", "origin/main", "HEAD"],
+      { cwd: fx.run, env: { ...process.env, ...GIT_ENV, HOME: fx.run }, stderr: "pipe" },
+    );
+    expect(result.exitCode).toBe(1);
+    const lines = result.stdout.toString().trim().split("\n");
+    return lines.slice(1, lines.indexOf(""));
+  }
+
+  test("a committed change that conflicts after a squash merge: the PR opens against main and keeps the branch", async () => {
+    fx.squashMergeAndDeleteA();
+    fx.commit(fx.work, "b.txt", "from main\n", "m1");
+    git(fx.work, "push", "--quiet", "origin", "main");
+    const head = git(fx.run, "rev-parse", "HEAD");
+    const state = guardState();
+
+    expect(await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)))).toBeUndefined();
+
+    expect(state.context.prTargetBranch).toBe("main");
+    expect(state.stackBlocked).toBeUndefined();
+    expect(isStackBaseReleased()).toBe(true);
+    expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
+    expect(git(fx.run, "status", "--porcelain")).toBe("M b.txt");
+    // Conflict resolution merges main in: A's original commits settle against
+    // their squash, so only the run's own file conflicts.
+    expect(mergeConflicts()).toEqual(["b.txt"]);
+  });
+
+  test("uncommitted work that conflicts: HEAD and the change are restored, and the run still moves to main", async () => {
     fx.squashMergeAndDeleteA();
     // main changes README.md; the run has an uncommitted edit to the same line.
     fx.commit(fx.work, "README.md", "hello from main\n", "m1");
@@ -500,25 +530,17 @@ describe("stacked run whose uncommitted work conflicts with the merge target", (
     const head = git(fx.run, "rev-parse", "HEAD");
     const state = guardState();
 
-    const halt = await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)));
-    expect(halt?.reason).toContain("re-applying uncommitted changes onto main conflicted");
-    expect(state.context.prTargetBranch).toBe("feature/a");
+    expect(await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)))).toBeUndefined();
+    expect(state.context.prTargetBranch).toBe("main");
     expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
     expect(git(fx.run, "diff", "--name-only", "--diff-filter=U")).toBe("");
     expect(git(fx.run, "diff", "--name-only")).toBe("README.md\nb.txt");
     expect(git(fx.run, "diff", "--cached", "--name-only")).toBe("");
     expect(git(fx.run, "show", ":README.md")).toBe("hello");
     expect(git(fx.run, "stash", "list")).toBe("");
-
-    const preserved = await preserveUnfinishedWork({
-      taskKey: "local-b",
-      cwd: fx.run,
-      git: boundGit(fx.run),
-    });
-    expect(preserved.kind).toBe("pushed");
-    expect(git(fx.remote, "show", "refs/heads/feature/b:README.md")).toBe("hello from run");
   });
-  test("an untracked file at a path the merge target adds blocks with the hand-off reason", async () => {
+
+  test("an untracked file at a path main adds stays, and the run still moves to main", async () => {
     fx.squashMergeAndDeleteA();
     fx.commit(fx.work, "c.txt", "from main\n", "m1");
     git(fx.work, "push", "--quiet", "origin", "main");
@@ -526,14 +548,35 @@ describe("stacked run whose uncommitted work conflicts with the merge target", (
     const head = git(fx.run, "rev-parse", "HEAD");
     const state = guardState();
 
-    const halt = await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)));
-    expect(halt?.reason).toContain("rebasing this run's branch onto 'main' conflicted");
-    expect(halt?.reason).toContain("untracked files would be overwritten by main");
-    expect(state.context.prTargetBranch).toBe("feature/a");
+    expect(await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)))).toBeUndefined();
+    expect(state.context.prTargetBranch).toBe("main");
     expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
     expect(readFileSync(join(fx.run, "c.txt"), "utf8")).toBe("from run\n");
     expect(git(fx.run, "diff", "--name-only")).toBe("b.txt");
     expect(git(fx.run, "stash", "list")).toBe("");
+  });
+
+  test("a conflict while the base's PR state is unknown escalates with the work preserved", async () => {
+    // The stale tracking ref says where the run was cut, but nothing says the
+    // base really merged, so the run does not open a PR on that guess.
+    fx.squashMergeAndDeleteA({ pruneTrackingRef: false });
+    fx.commit(fx.work, "b.txt", "from main\n", "m1");
+    git(fx.work, "push", "--quiet", "origin", "main");
+    const head = git(fx.run, "rev-parse", "HEAD");
+    const state = guardState();
+
+    const halt = await ensureStackBase(state, deps(fx, null));
+    expect(halt?.reason).toContain("rebasing this run's branch onto 'main' conflicted");
+    expect(state.context.prTargetBranch).toBe("feature/a");
+    expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+    });
+    expect(preserved.kind).toBe("pushed");
+    expect(git(fx.remote, "show", "refs/heads/feature/b:b.txt")).toBe("b1\nb2 (uncommitted)");
   });
 });
 
