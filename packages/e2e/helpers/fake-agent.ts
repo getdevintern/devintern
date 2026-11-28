@@ -224,6 +224,35 @@ if (agentInput.includes("E2ESANDBOXDELEGATE")) {
     JSON.stringify(report, null, 2),
   );
 }
+// E2EDELEGATEFOLLOWUP: delegate one follow-up through the built CLI's
+// `worker add` (no sandbox probes, nothing else written), then implement as
+// usual. `worker add` links the follow-up to this run via DEVINTERN_RUN_ID, so
+// the settled run raises a normal-severity `work_spawned` notification. The
+// follow-up body omits the marker so it implements instead of delegating.
+if (agentInput.includes("E2EDELEGATEFOLLOWUP")) {
+  const add = Bun.spawnSync(
+    [
+      process.execPath,
+      requiredEnv("E2E_DEVINTERN_CLI"),
+      "worker",
+      "add",
+      "--repo",
+      requiredEnv("E2E_DELEGATE_REPO"),
+      "--title",
+      "Delegated follow-up",
+      "--body",
+      "Change the greeting to Hello, world! and run bun test. E2EPROMPTMARKERDELEGATED",
+      "--json",
+    ],
+    { stdout: "pipe", stderr: "pipe", env: process.env },
+  );
+  if (add.exitCode !== 0) {
+    // Stdout marks this as agent work (see the prompt-marker failure below).
+    console.log("E2E delegate failed");
+    console.error(`E2E delegate failed: ${add.stderr.toString().slice(-2000)}`);
+    process.exit(19);
+  }
+}
 // E2ESANDBOXAUTOMATIONWRITE: an automation run writes under its own
 // `<workspace>/automations/<id>/` directory, the grant automations rely on for
 // reports and cursors.

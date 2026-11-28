@@ -14,112 +14,42 @@
  */
 
 import { expect, test } from "bun:test";
-import { createHmac, randomBytes } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { readQueueRows } from "../../helpers/dashboard";
+import { existsSync } from "node:fs";
+import {
+  HOOK_PATH,
+  NOTIFY_DASHBOARD_URL as DASHBOARD_URL,
+  deliveryRows,
+  describeRequests,
+  expectedSignature,
+  lastDeliveryTickAt,
+  leakForms,
+  notificationCredentials,
+  notificationRows,
+  notificationsToml,
+  redactSecrets,
+  writeNotificationEnv,
+} from "../../helpers/notification-delivery";
+import type { WebhookPayload } from "../../helpers/notification-delivery";
 import { NotificationReceiverFixture } from "../../helpers/notification-receiver";
-import type { NotificationRequestRecord } from "../../helpers/notification-receiver";
 import { cliPath, WorkerFixture } from "../../helpers/worker";
 
 const cliTest = test.skipIf(!existsSync(cliPath));
 
-const DASHBOARD_URL = "https://devintern-e2e.invalid/board";
-const SLACK_PATH_PREFIX = "/slack/services/";
-const HOOK_PATH = "/hook";
 /** Alphanumeric so Markdown escaping cannot hide it from the fake agent. */
 const FAIL_MARKER = "E2ENOTIFYFAILMARKER";
 /** Sends per message when every attempt fails: one try plus two retries. */
 const ATTEMPTS_PER_FAILED_SEND = 3;
 
-interface NotificationRow {
-  id: number;
-  kind: string;
-  severity: string;
-  group_key: string;
-  count: number;
-  run_id: number | null;
-  repo: string | null;
-  title: string;
-  updated_at: number;
-}
-
-interface DeliveryRow {
-  channel: string;
-  notification_id: number;
-  delivered_count: number;
-  status: string;
-}
-
-interface WebhookPayload {
-  source: string;
-  version: number;
-  type: string;
-  event: string;
-  notification: {
-    id: number;
-    kind: string;
-    severity: string;
-    repo?: string;
-    title: string;
-    groupKey: string;
-    count: number;
-  };
-  cause?: string;
-  dashboardUrl: string;
-}
-
-function notifications(worker: WorkerFixture): NotificationRow[] {
-  return readQueueRows<NotificationRow>(
-    worker.dbPath,
-    "notifications",
-    "SELECT id, kind, severity, group_key, count, run_id, repo, title, updated_at FROM notifications ORDER BY id",
-  );
-}
-
-function deliveries(worker: WorkerFixture): DeliveryRow[] {
-  return readQueueRows<DeliveryRow>(
-    worker.dbPath,
-    "notification_deliveries",
-    "SELECT channel, notification_id, delivered_count, status FROM notification_deliveries ORDER BY channel, notification_id",
-  );
-}
-
-function lastTickAt(worker: WorkerFixture): number | undefined {
-  return readQueueRows<{ last_tick_at: number }>(
-    worker.dbPath,
-    "notification_delivery_ticks",
-    "SELECT last_tick_at FROM notification_delivery_ticks WHERE id = 1",
-  )[0]?.last_tick_at;
-}
-
-/** Every form a credential could take on the wire or in a log. */
-function leakForms(value: string): string[] {
-  return [...new Set([value, encodeURIComponent(value), encodeURI(value)])];
-}
-
-/** Redacted request summary for failure messages: no bodies, no secret-bearing paths. */
-function describeRequests(requests: NotificationRequestRecord[]): string {
-  return JSON.stringify(
-    requests.map(({ method, path, status, at }) => ({
-      method,
-      path: path.startsWith(SLACK_PATH_PREFIX) ? `${SLACK_PATH_PREFIX}<redacted>` : path,
-      status,
-      at,
-    })),
-  );
-}
+const notifications = (worker: WorkerFixture) => notificationRows(worker.dbPath);
+const deliveries = (worker: WorkerFixture) => deliveryRows(worker.dbPath);
+const lastTickAt = (worker: WorkerFixture) => lastDeliveryTickAt(worker.dbPath);
 
 cliTest(
   "the worker delivers a failed run to Slack and a signed webhook, rate-limits a repeat, and isolates a failing endpoint",
   async () => {
     // Generated dummies: never a real Slack token or signing secret.
-    const slackToken = `T${randomBytes(4).toString("hex").toUpperCase()}/B${randomBytes(4)
-      .toString("hex")
-      .toUpperCase()}/${randomBytes(12).toString("hex")}`;
-    const slackPath = `${SLACK_PATH_PREFIX}${slackToken}`;
-    const signingSecret = `whsec-e2e-${randomBytes(16).toString("hex")}`;
-    const secrets = [slackToken, signingSecret];
+    const credentials = notificationCredentials();
+    const { slackPath, signingSecret, secrets } = credentials;
 
     const receiver = NotificationReceiverFixture.start();
     let worker: WorkerFixture | undefined;
@@ -127,45 +57,26 @@ cliTest(
     try {
       worker = new WorkerFixture({
         env: { E2E_FAIL_PROMPT_MARKER: FAIL_MARKER },
-        workspaceTomlExtra: [
-          "[notifications]",
-          `dashboard_url = "${DASHBOARD_URL}"`,
-          "",
-          "[notifications.slack]",
-          'url_env = "E2E_SLACK_WEBHOOK_URL"',
-          "",
-          "[notifications.webhook]",
-          'url_env = "E2E_NOTIFY_WEBHOOK_URL"',
-          'secret_env = "E2E_NOTIFY_WEBHOOK_SECRET"',
-        ].join("\n"),
+        workspaceTomlExtra: notificationsToml(),
       });
       const w = worker;
       await w.prepare();
       // Endpoints and secret only in the workspace .env, never in the process env.
-      writeFileSync(
-        join(w.workspaceDir, ".env"),
-        [
-          `E2E_SLACK_WEBHOOK_URL=${receiver.endpoint(slackPath)}`,
-          `E2E_NOTIFY_WEBHOOK_URL=${receiver.endpoint(HOOK_PATH)}`,
-          `E2E_NOTIFY_WEBHOOK_SECRET=${signingSecret}`,
-          "",
-        ].join("\n"),
-        { mode: 0o600 },
-      );
+      writeNotificationEnv(w.workspaceDir, receiver, credentials);
 
       const slackRequests = () => receiver.requestsTo(slackPath);
       const hookRequests = () => receiver.requestsTo(HOOK_PATH);
       const diagnostics = () =>
-        [
-          `notifications: ${JSON.stringify(notifications(w))}`,
-          `deliveries: ${JSON.stringify(deliveries(w))}`,
-          `runs: ${JSON.stringify(w.runRecords())}`,
-          `receiver: ${describeRequests(receiver.requests)}`,
-          w.tail(),
-        ]
-          .join("\n")
-          .replaceAll(slackToken, "<slack-token>")
-          .replaceAll(signingSecret, "<secret>");
+        redactSecrets(
+          [
+            `notifications: ${JSON.stringify(notifications(w))}`,
+            `deliveries: ${JSON.stringify(deliveries(w))}`,
+            `runs: ${JSON.stringify(w.runRecords())}`,
+            `receiver: ${describeRequests(receiver.requests)}`,
+            w.tail(),
+          ].join("\n"),
+          credentials,
+        );
 
       // An injection-only worker needs queued work to start. This task
       // succeeds; its run settles before delivery's first tick.
@@ -244,11 +155,10 @@ cliTest(
         },
       });
       expect(payload.dashboardUrl).toBe(`${DASHBOARD_URL}/#/runs/${failedRun.id}`);
-      const expectedSignature = `sha256=${createHmac("sha256", signingSecret)
-        .update(hook.body)
-        .digest("hex")}`;
       // Compare booleans so a mismatch cannot print a value derived from the secret.
-      expect(hook.headers["x-devintern-signature"] === expectedSignature).toBe(true);
+      expect(
+        hook.headers["x-devintern-signature"] === expectedSignature(signingSecret, hook.body),
+      ).toBe(true);
 
       const slack = slackRequests()[0]!;
       expect(slack.method).toBe("POST");
