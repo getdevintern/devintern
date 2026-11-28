@@ -104,8 +104,12 @@ test.skipIf(!builtCli)(
         "👉 Automation entitlement — Not started: sign in to begin your 14-day free Worker Pilot, no card required",
       );
       expect(unlicensed.stdout).toMatch(
-        /💡 Run `devintern worker login( --workspace \S+)? github`/,
+        /💡 Sign in to start your free 14-day Worker Pilot: `devintern worker login( --workspace \S+)?` \(no card required\)\./,
       );
+      // Text output is for a person: the interactive sign-in, without agent flags.
+      expect(unlicensed.stdout).not.toContain("worker login github");
+      expect(unlicensed.stdout).not.toContain("--no-wait");
+      expect(unlicensed.stdout).not.toContain("--json");
       expect(unlicensed.stdout).toContain(
         "👉 Setup is fine; one step left before the worker can start.",
       );
