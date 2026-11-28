@@ -106,9 +106,13 @@ keeps the stacked PR up to date. It checks about once a minute
 
 **If the base merges or closes while the stacked task is still running** (before
 it opened its PR), the run checks its base again before verifying, reviewing,
-pushing, and opening the PR. A merged base: the run rebases onto the branch the
-base merged into and opens its PR there, without the "Stacked on" note. A base
-closed without merging: the run is handed back (`escalated`) with the same
+pushing, and opening the PR. A merged base: the run opens its PR against the
+branch the base merged into, without the "Stacked on" note. After a squash or
+rebase merge it first rebases so only its own commits remain; after a merge
+commit the base's commits are already there, so it keeps its branch as is and
+any conflict with newer commits goes to
+[conflict resolution](./pr-follow-up.md#merge-conflicts-on-the-agents-prs) once
+the PR is open. A base closed without merging: the run is handed back (`escalated`) with the same
 choices as above, and its work is
 [saved to the task branch](./delegation-runs.md#resuming-and-interrupted-tasks---resume).
 

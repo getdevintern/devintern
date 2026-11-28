@@ -111,6 +111,15 @@ class Fixture {
     }
   }
 
+  /** Merge feature/a into main with a merge commit and delete its branch. */
+  mergeAndDeleteA(): void {
+    git(this.work, "checkout", "--quiet", "main");
+    git(this.work, "merge", "--quiet", "--no-ff", "-m", "merge feature/a", "feature/a");
+    git(this.work, "push", "--quiet", "origin", "main");
+    git(this.work, "push", "--quiet", "origin", "--delete", "feature/a");
+    git(this.run, "update-ref", "-d", "refs/remotes/origin/feature/a");
+  }
+
   closeAWithoutMerging(): void {
     git(this.work, "push", "--quiet", "origin", "--delete", "feature/a");
   }
@@ -238,6 +247,43 @@ describe("stacked run whose base moves mid-run", () => {
 
     // A later step does not re-check a base the run already left.
     expect(await ensureStackBase(state, deps(fx, null))).toBeUndefined();
+  });
+
+  test("a base merged with a merge commit is targeted without rebasing, even when main conflicts", async () => {
+    fx.mergeAndDeleteA();
+    // main gains a commit that conflicts with the run's committed b1, so a
+    // rebase would stop; the PR's own conflict resolution handles it instead.
+    fx.commit(fx.work, "b.txt", "from main\n", "m1");
+    git(fx.work, "push", "--quiet", "origin", "main");
+    const head = git(fx.run, "rev-parse", "HEAD");
+    const state = guardState();
+
+    expect(await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)))).toBeUndefined();
+
+    expect(state.context.prTargetBranch).toBe("main");
+    expect(state.prTargetBranch).toBe("main");
+    expect(isStackBaseReleased()).toBe(true);
+    // The branch and the uncommitted change are untouched, and the run's
+    // diff against main is its own work only.
+    expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
+    expect(git(fx.run, "status", "--porcelain")).toBe("M b.txt");
+    expect(git(fx.run, "rev-list", "--count", "origin/main..HEAD")).toBe("1");
+    expect(git(fx.run, "diff", "--name-only", "origin/main...HEAD")).toBe("b.txt");
+  });
+
+  test("a base merged with a merge commit after it gained commits still skips the rebase", async () => {
+    // A moved on after the run was cut; the run's branch lacks the newer commit.
+    const aFinal = fx.commit(fx.work, "a.txt", "a1\na2\na3\n", "a3");
+    git(fx.work, "push", "--quiet", "origin", "feature/a");
+    fx.mergeAndDeleteA();
+    const head = git(fx.run, "rev-parse", "HEAD");
+    const state = guardState();
+
+    expect(await ensureStackBase(state, deps(fx, basePr("merged", aFinal)))).toBeUndefined();
+
+    expect(state.context.prTargetBranch).toBe("main");
+    expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
+    expect(git(fx.run, "rev-list", "--count", "origin/main..HEAD")).toBe("1");
   });
 
   test("a vanished base with unknown PR state falls back to the default branch", async () => {
