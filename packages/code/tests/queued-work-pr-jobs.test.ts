@@ -44,6 +44,20 @@ describe("PR jobs in the queued work list", () => {
       jobKind: "conflict",
       waitingOn: "repo",
     });
+    const memoryJob = supervisorJobToQueuedItem({
+      id: "j2",
+      source: "github:ci",
+      repo: "web",
+      kind: "ci_fix",
+      label: "acme/web#13",
+      checkoutClass: "pr_worktree",
+      exclusiveKey: "acme/web#13",
+      enqueuedAt: 1_000,
+      waitingOn: "memory",
+      blockReason: "only 0.4 GB of host memory is available (need 3.2 GB)",
+    });
+    expect(memoryJob?.message).toBe("Waiting for the host to have enough free memory");
+    expect(memoryJob?.blockReason).toBe("only 0.4 GB of host memory is available (need 3.2 GB)");
     expect(
       supervisorJobToQueuedItem({
         id: "t",

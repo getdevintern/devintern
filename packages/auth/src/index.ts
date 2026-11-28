@@ -43,6 +43,7 @@ export {
   resolveLogin,
   resolveLoginProvider,
   stdinClosedError,
+  watchStdinLines,
   type ResolvedLogin,
 } from "./login-provider";
 export {
@@ -53,7 +54,7 @@ export {
   parsePastedCallback,
   type PastedCallback,
 } from "./auth-callback";
-export { isRemoteCliSession, resolveAuthCallbackPort } from "./runtime";
+export { isRemoteCliSession, openBrowser, resolveAuthCallbackPort } from "./runtime";
 export {
   PENDING_LOGIN_FILE,
   PENDING_LOGIN_TTL_MS,

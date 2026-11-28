@@ -10,6 +10,7 @@ import type { WorkerState } from "../state/worker-state";
 import type { RoutingSkipStore } from "./state";
 import { getWorkerFailover, harnessChainBlockedUntil } from "../worker/failover";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
+import { hostMemorySupervisorOptions } from "../worker/host-memory";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
@@ -457,10 +458,13 @@ export function createGatedFleetTaskExecutor(
     deps.isHarnessExhausted ?? (() => getWorkerFailover()?.allExhausted() ?? false);
   const supervisor =
     deps.supervisor ??
-    createTaskSupervisor({
-      maxConcurrency: config.workspace.execution.maxConcurrency,
-      maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
-    });
+    createTaskSupervisor(
+      {
+        maxConcurrency: config.workspace.execution.maxConcurrency,
+        maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
+      },
+      hostMemorySupervisorOptions(),
+    );
 
   return async (taskKey, routable) => {
     // Read per run: live config reloads must apply to subsequent work.

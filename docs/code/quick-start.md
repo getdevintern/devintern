@@ -21,7 +21,7 @@ Prefer to set up from a chat? Install the [devintern-setup skill](agent-skills.m
 - A Linux or macOS machine that will run the worker, with `git`
 - A clone of your project's repository on that machine
 - A task tracker account with API access, or a folder of markdown tasks
-- A token for your source-control host so the worker can push and open PRs. For GitHub, see [GitHub authentication](./configuration.md#github-authentication)
+- A token for your source-control host so the worker can push and open PRs. For GitHub, see [GitHub authentication](./configuration.md#github-authentication); a signed-in GitHub CLI (`gh`) is reused when `GITHUB_TOKEN` is unset
 
 ## 1. Install
 
@@ -72,9 +72,8 @@ In a checkout that is not set up yet, it first asks how you want to run tickets.
 1. Your tracker and its token. It links to the page where you create the token and checks the connection.
 2. The ready-tasks query: which tickets the worker picks up. Press Enter to pick up open tickets labeled `devintern` (for example `is:open label:devintern` on GitHub Issues), or type your own query; keep it narrow at first. On GitHub and GitLab it offers to create the `devintern` label if it is missing.
 3. Nothing about worker settings: a new workspace gets the recommended ones (no CI repair, automatic conflict resolution, task pickup at any hour, no Sentry project). Change them in `~/.devintern/workspace.toml`, or run `devintern worker init --customize` to choose each one and add a Sentry project.
-4. Sign-in, which starts the [14-day free Worker Pilot](./worker.md#worker-pilot-and-licenses) (no card required) when you have no license. While it waits for the browser, press Enter to skip and sign in later with `devintern worker login github`.
-5. [Relay](./relay.md) pairing when you are signed in, so PR reviews reach the worker in seconds. Without it the worker polls.
-6. Installing the background service (step 3 below).
+4. "Sign in with GitHub to start your 14-day Worker Pilot": one question that starts the [14-day free Worker Pilot](./worker.md#worker-pilot-and-licenses) (no card required) and pairs the [relay](./relay.md), so PR reviews reach the worker in seconds. For a GitHub repository it opens the DevIntern AI App install page and waits for you to approve it. Press Enter during either wait to skip; `devintern worker login github` signs you in later, and `devintern worker connect github --status` finishes an App approval you gave after skipping. To sign in with Google, X or email instead, skip the step and run `devintern worker login <method>`. You are not asked when you are already signed in or have a `LICENSE_KEY`. Add `--no-relay` to keep polling only.
+5. Installing the background service (step 3 below).
 
 Your answers are saved in `~/.devintern/`; nothing is written into your checkout. Re-run `devintern worker init` at any time: it keeps your answers as defaults and finishes a setup that stopped partway, including one you stopped with Ctrl+C.
 
@@ -94,7 +93,17 @@ From then on the worker polls your tracker every 60 seconds for tickets that mat
 
 ## 4. Watch the first task run
 
-Make a ticket match your query, for example by adding the `devintern` label to a GitHub issue. Within a minute or two the worker picks it up. Follow it in:
+When the wizard has started the worker, it ends with one more question: "Create a sample ticket so you can watch the first run? [Y/n]". The sample is a small docs-only task (add a short note to `CONTRIBUTING.md`) whose title says it is a DevIntern sample:
+
+| Tracker           | What the wizard creates                                                                                     |
+| ----------------- | ----------------------------------------------------------------------------------------------------------- |
+| GitHub, GitLab    | An issue with the labels your query selects on (`label:devintern`). On GitHub, an ad-hoc task instead when the repository you registered is not `GITHUB_REPO` |
+| Markdown          | A task file in your tasks folder with the fields your query filters on (`status=todo`)                     |
+| Any other tracker | An ad-hoc task queued with [`devintern worker add`](./delegation.md); no ticket                             |
+
+It then waits up to two minutes for the worker to start the task and prints the dashboard link to the run. Answer `n` and nothing is created. If your query selects on something setup cannot set (an assignee, a milestone), the wizard tells you to make the ticket match it yourself. `worker init --non-interactive` never creates a sample; it lists the command as the optional `try-first-task` next step.
+
+To try your own ticket, make it match your query, for example by adding the `devintern` label to a GitHub issue. Within a minute or two the worker picks it up. Follow it in:
 
 - The dashboard at `http://localhost:4400`. On a remote machine, forward it first: `ssh -L 4400:127.0.0.1:4400 you@host`
 - `devintern worker runs` for the run list, and `devintern worker logs --level warn` for problems

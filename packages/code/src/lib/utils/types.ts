@@ -1,4 +1,5 @@
 import type { fetchWithRetry as sharedFetchWithRetry } from "@devintern/utils";
+import type { RemotePushRejection } from "./git-push-rejection";
 
 /** Options accepted by {@link UtilsSurface.executeGitCommand}. */
 export type GitOptions =
@@ -119,10 +120,12 @@ export interface UtilsSurface {
     cwd?: string;
     expectedBranch?: string;
     expectedRemoteSha?: string;
+    lease?: { branch: string; sha: string };
   }): Promise<{
     success: boolean;
     message: string;
     hookError?: string;
+    remoteRejection?: RemotePushRejection;
   }>;
   hasPrePushHook(cwd?: string): Promise<boolean>;
   runPrePushHookLocally(options?: { verbose?: boolean; cwd?: string }): Promise<{

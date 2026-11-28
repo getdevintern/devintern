@@ -20,11 +20,13 @@
  * answers the card's `closed` flag and nested `list` name, is recorded in
  * `blockerStatusRequests`, and can be switched to an HTTP error.
  *
- * The server binds `127.0.0.1:0`, accepts any query `key`/`token` credentials,
- * never logs them (requests record only whether the fake credentials matched),
- * and never makes outbound requests.
+ * The server binds `127.0.0.1:0`, accepts any query `key`/`token` unless
+ * `apiToken` is set, never logs them (requests record only whether the fake
+ * credentials matched), and never makes outbound requests.
  */
 
+import { SearchRejections, textResponse } from "./fake-auth";
+import { parseTrelloSearch } from "./fake-trello-search";
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
 
 interface FakeTrelloBoard {
@@ -140,6 +142,10 @@ export const FAKE_TRELLO_STATUSES: FakeTrelloStatuses = {
 export interface FakeTrelloOptions {
   /** Override one or more board list names. */
   statuses?: Partial<FakeTrelloStatuses>;
+  /** Caller-chosen API key handed out by `environment()`. */
+  apiKey?: string;
+  /** Caller-chosen token; a request with another key/token gets Trello's 401. */
+  apiToken?: string;
 }
 
 const FAKE_API_KEY = "fake-trello-api-key";
@@ -150,39 +156,6 @@ const FAKE_MEMBER: FakeTrelloMember = {
   username: "e2e-trello-user",
   fullName: "E2E Trello User",
 };
-
-/** Parsed Trello search operators the offline scenario uses. */
-interface TrelloSearch {
-  openOnly: boolean;
-  listName?: string;
-  terms: string[];
-}
-
-/**
- * Parse the narrow search subset the product and scenario rely on.
- *
- * Supported operators: `is:open` (not archived) and `list:"<name>"` (or the
- * unquoted `list:<name>` form). Every remaining whitespace-separated term must
- * appear in the card name or description.
- */
-function parseTrelloSearch(query: string): TrelloSearch {
-  let rest = query;
-  let listName: string | undefined;
-  rest = rest.replace(/list:"([^"]+)"|list:([^\s]+)/gi, (_match, quoted, bare) => {
-    listName = String(quoted ?? bare);
-    return " ";
-  });
-
-  const openOnly = /(?:^|\s)is:open(?:\s|$)/i.test(rest);
-  rest = rest.replace(/(?:^|\s)is:open(?:\s|$)/gi, " ");
-
-  const terms = rest
-    .split(/\s+/)
-    .map((term) => term.replace(/^["']|["']$/g, ""))
-    .filter((term) => term.length > 0 && !term.toLowerCase().startsWith("is:"));
-
-  return { openOnly, listName, terms };
-}
 
 /** Trello-shaped ticket fixture backed entirely by in-memory state. */
 export class FakeTrelloTracker implements TrackerFixture {
@@ -195,6 +168,10 @@ export class FakeTrelloTracker implements TrackerFixture {
   readonly unexpectedRequests: string[] = [];
   /** Every request in arrival order, without query strings or credentials. */
   readonly requests: FakeTrelloRequest[] = [];
+  /** The `query` of every `GET /1/search`, in order. */
+  readonly searches: string[] = [];
+  private readonly searchRejections = new SearchRejections();
+  private readonly options: FakeTrelloOptions;
   /** `since`/`filter`/`limit` received by each board actions request, in order. */
   readonly boardActionRequests: FakeTrelloBoardActionsRequest[] = [];
   /**
@@ -224,6 +201,7 @@ export class FakeTrelloTracker implements TrackerFixture {
   private now = Date.parse("2026-01-01T00:00:00.000Z");
 
   constructor(options: FakeTrelloOptions = {}) {
+    this.options = options;
     this.statuses = { ...FAKE_TRELLO_STATUSES, ...options.statuses };
     this.openState = this.statuses.todo;
     this.board = {
@@ -260,8 +238,8 @@ export class FakeTrelloTracker implements TrackerFixture {
   environment(): Record<string, string> {
     return {
       TASK_TRACKER: this.type,
-      TRELLO_API_KEY: FAKE_API_KEY,
-      TRELLO_API_TOKEN: FAKE_API_TOKEN,
+      TRELLO_API_KEY: this.options.apiKey ?? FAKE_API_KEY,
+      TRELLO_API_TOKEN: this.options.apiToken ?? FAKE_API_TOKEN,
       TRELLO_API_BASE_URL: this.baseUrl,
       TRELLO_DEFAULT_BOARD_ID: this.board.id,
       TRELLO_DEFAULT_LIST_NAME: this.statuses.todo,
@@ -412,6 +390,11 @@ export class FakeTrelloTracker implements TrackerFixture {
       .length;
   }
 
+  /** Answer later searches whose `query` contains `needle` with Trello's plain-text 400. */
+  rejectSearchesContaining(needle: string, message: string): void {
+    this.searchRejections.add(needle, message);
+  }
+
   /** Stop the HTTP server and release the ephemeral port. */
   async cleanup(): Promise<void> {
     this.server.stop(true);
@@ -427,13 +410,13 @@ export class FakeTrelloTracker implements TrackerFixture {
     // The product's default base URL ends in `/1`; the fixture base does not.
     const path = decodeURIComponent(url.pathname).replace(/^\/1(?=\/|$)/, "");
     const method = request.method.toUpperCase();
-    this.requests.push({
-      method,
-      path,
-      credentialsMatched:
-        url.searchParams.get("key") === FAKE_API_KEY &&
-        url.searchParams.get("token") === FAKE_API_TOKEN,
-    });
+    const { TRELLO_API_KEY: key, TRELLO_API_TOKEN: token } = this.environment();
+    const credentialsMatched =
+      url.searchParams.get("key") === key && url.searchParams.get("token") === token;
+    this.requests.push({ method, path, credentialsMatched });
+    if (this.options.apiToken !== undefined && !credentialsMatched) {
+      return textResponse("invalid token", 401);
+    }
 
     const response = await this.route(method, path, url, request);
     if (response) return response;
@@ -520,6 +503,9 @@ export class FakeTrelloTracker implements TrackerFixture {
 
   private search(url: URL): Response {
     const query = url.searchParams.get("query") ?? "";
+    this.searches.push(query);
+    const rejection = this.searchRejections.find(query);
+    if (rejection) return textResponse(rejection, 400);
     const boardId = url.searchParams.get("idBoards") ?? undefined;
     const cards = this.matchingCards(query, boardId).map((card) => this.cardSummary(card));
     return json({ cards });

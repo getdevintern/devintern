@@ -325,8 +325,9 @@ export class GitHubClient {
   /**
    * Verify the token can see the configured repository (`GET /repos/{owner}/{repo}`).
    *
-   * GitHub answers 404 for a private repo the token cannot access, so 404 and
-   * 403 both read as "no access".
+   * GitHub answers 404 for a private repo the token cannot access, so 404 and a
+   * permission-denied 403 both read as "no access". A rate-limited 403 keeps
+   * the API-error shape (with the limit signal) because it is transient.
    *
    * @throws When the repo is not visible to the token or the request fails.
    */
@@ -338,6 +339,19 @@ export class GitHubClient {
     );
     if (response.ok) return;
     if (response.status === 404 || response.status === 403) {
+      const body = await response.text();
+      // GitHub reuses 403 for primary/secondary rate limits and abuse
+      // detection. Carry that signal (body or headers) in the API-error shape
+      // so callers do not read a transient limit as a rejected credential.
+      if (response.status === 403 && isRateLimited(response, body)) {
+        const header =
+          response.headers.get("x-ratelimit-remaining") === "0"
+            ? "x-ratelimit-remaining: 0"
+            : response.headers.get("retry-after") !== null
+              ? `retry-after: ${response.headers.get("retry-after")}`
+              : "rate limit";
+        throw new Error(`GitHub API error (403): ${body.trim() || "Forbidden"} (${header})`);
+      }
       throw new Error(
         `GitHub token cannot access ${slug} (HTTP ${response.status}): check GITHUB_REPO and that the token is granted this repository`,
       );

@@ -4,6 +4,7 @@
  * settings that replace them on a first setup.
  */
 
+import { MAX_PROMPT_ATTEMPTS, createPromptAttempts } from "@devintern/task-trackers";
 import { parseCronOrIntervalSchedule } from "../automation/config";
 import { isValidTimeZone, parseTimeWindowSpec } from "../worker/schedule";
 import { writeWorkerOperatingPolicy } from "../workspace/init";
@@ -24,12 +25,14 @@ export async function askYesNo(
   question: string,
   fallback: boolean,
 ): Promise<boolean> {
+  const reject = createPromptAttempts("yes/no answer");
   for (;;) {
     const answer = (await ctx.prompt(question)).trim().toLowerCase();
     if (!answer) return fallback;
     if (answer === "y" || answer === "yes") return true;
     if (answer === "n" || answer === "no") return false;
     ctx.log("   Enter y or n.");
+    reject(`No valid yes/no answer after ${MAX_PROMPT_ATTEMPTS} attempts; enter y or n.`);
   }
 }
 
@@ -43,6 +46,7 @@ async function promptConflictPolicy(
   conflictResolutionInterval?: string;
 }> {
   let conflictResolution = current.workspace.conflictResolution;
+  const rejectConflict = createPromptAttempts("conflict handling");
   for (;;) {
     const answer = (
       await ctx.prompt(
@@ -57,6 +61,9 @@ async function promptConflictPolicy(
       break;
     }
     ctx.log("   Choose auto, scheduled, or disabled.");
+    rejectConflict(
+      `No valid conflict handling after ${MAX_PROMPT_ATTEMPTS} attempts; choose auto, scheduled, or disabled`,
+    );
   }
 
   let conflictResolutionCron: string | undefined;
@@ -66,6 +73,7 @@ async function promptConflictPolicy(
       current.workspace.conflictSchedule?.cron ??
       current.workspace.conflictSchedule?.interval ??
       "0 3 * * *";
+    const rejectSchedule = createPromptAttempts("conflict schedule");
     for (;;) {
       const value =
         (
@@ -86,6 +94,9 @@ async function promptConflictPolicy(
         break;
       }
       ctx.log(`   ${errors.join(" ")}`);
+      rejectSchedule(
+        `No valid conflict schedule after ${MAX_PROMPT_ATTEMPTS} attempts; enter a cron expression or interval`,
+      );
     }
   }
 
@@ -100,6 +111,7 @@ async function promptActiveSchedule(
   const existingWindows =
     currentSchedule?.active.map((window) => window.spec).join(",") || "22:00-06:00";
   let activeWindows: string[] = [];
+  const rejectWindows = createPromptAttempts("active windows");
   for (;;) {
     activeWindows = (
       (await ctx.prompt(`Active windows, comma-separated [${existingWindows}]: `)).trim() ||
@@ -113,18 +125,25 @@ async function promptActiveSchedule(
       break;
     } catch (error) {
       ctx.log(`   ${(error as Error).message}`);
+      rejectWindows(
+        `No valid active windows after ${MAX_PROMPT_ATTEMPTS} attempts; use HH:MM-HH:MM windows`,
+      );
     }
   }
 
   const blockedWindows = currentSchedule?.blocked.map((window) => window.spec) ?? [];
   const existingTimezone = currentSchedule?.timezone ?? "";
   let timezone = "";
+  const rejectTimezone = createPromptAttempts("timezone");
   for (;;) {
     timezone =
       (await ctx.prompt(`Timezone [${existingTimezone || "worker machine local"}]: `)).trim() ||
       existingTimezone;
     if (!timezone || isValidTimeZone(timezone)) break;
     ctx.log(`   "${timezone}" is not a valid IANA timezone.`);
+    rejectTimezone(
+      `No valid timezone after ${MAX_PROMPT_ATTEMPTS} attempts; enter an IANA timezone such as Europe/Berlin`,
+    );
   }
 
   return { activeWindows, blockedWindows, timezone };

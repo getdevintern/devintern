@@ -12,10 +12,12 @@
  * {@link FakeLinearTracker.unexpectedOperations} so a test can assert the
  * collection is empty even if the product ignores the error response.
  *
- * The server binds `127.0.0.1:0`, accepts any `Authorization` header (never
- * reading or logging it), and never makes outbound requests.
+ * The server binds `127.0.0.1:0`, accepts any `Authorization` header unless
+ * `apiKey` is set (never logging it), and never makes outbound requests.
  */
 
+import { SearchRejections, linearAuthenticationError, linearValidationError } from "./fake-auth";
+import { compileDateCondition, compileEqualityCondition } from "./fake-linear-filter";
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
 
 interface FakeLinearLabel {
@@ -119,6 +121,8 @@ export interface FakeLinearOptions {
    * stamps would never be detected as changed.
    */
   clock?: "fixed" | "wall";
+  /** Caller-chosen API key; any other `Authorization` value gets Linear's 401. */
+  apiKey?: string;
 }
 
 /** One `SearchIssues` request the fake received, recorded for assertions. */
@@ -182,8 +186,13 @@ export class FakeLinearTracker implements TrackerFixture {
   private readonly clock: "fixed" | "wall";
   private readonly extraStates: string[];
   private readonly canceledStates: string[];
+  private readonly apiKey: string | undefined;
+  private readonly searchRejections = new SearchRejections();
+  /** Requests answered with Linear's authentication error. */
+  unauthorizedRequests = 0;
 
   constructor(options: FakeLinearOptions = {}) {
+    this.apiKey = options.apiKey;
     this.teamKeyValue = options.teamKey ?? "ENG";
     this.statuses = { ...FAKE_LINEAR_STATUSES, ...options.statuses };
     this.openState = this.statuses.todo;
@@ -209,7 +218,7 @@ export class FakeLinearTracker implements TrackerFixture {
   environment(): Record<string, string> {
     return {
       TASK_TRACKER: this.type,
-      LINEAR_API_KEY: "fake-linear-api-key",
+      LINEAR_API_KEY: this.apiKey ?? "fake-linear-api-key",
       LINEAR_API_URL: this.url,
     };
   }
@@ -406,6 +415,11 @@ export class FakeLinearTracker implements TrackerFixture {
       .map((issue) => ({ key: issue.identifier, url: issue.url }));
   }
 
+  /** Answer later `SearchIssues` whose filter JSON contains `needle` with Linear's 400. */
+  rejectSearchFiltersContaining(needle: string, message: string): void {
+    this.searchRejections.add(needle, message);
+  }
+
   /** Stop the HTTP server and release the ephemeral port. */
   async cleanup(): Promise<void> {
     this.server.stop(true);
@@ -422,6 +436,10 @@ export class FakeLinearTracker implements TrackerFixture {
 
     if (method !== "POST" || url.pathname !== "/graphql") {
       return this.unexpected(`Unmatched fake Linear request: ${method} ${url.pathname}`, 404);
+    }
+    if (this.apiKey !== undefined && request.headers.get("authorization") !== this.apiKey) {
+      this.unauthorizedRequests += 1;
+      return linearAuthenticationError();
     }
 
     let payload: unknown;
@@ -462,6 +480,8 @@ export class FakeLinearTracker implements TrackerFixture {
         return this.issueUpdate(variables);
       case "SearchIssues":
         return this.searchIssues(variables);
+      case "Teams": // the credential probe (`LinearClient.getTeams`)
+        return json({ data: { teams: { nodes: [{ id: this.teamId, key: this.teamKeyValue }] } } });
       default:
         return this.unexpected(`Unsupported GraphQL operation: ${operation ?? "<anonymous>"}`);
     }
@@ -722,6 +742,8 @@ export class FakeLinearTracker implements TrackerFixture {
       matched: [],
     };
     this.searchRequests.push(request);
+    const rejection = this.searchRejections.find(JSON.stringify(variables.filter) ?? "");
+    if (rejection) return linearValidationError(rejection);
     const matcher = compileIssueFilter(variables.filter, this.filterContext());
     if (!matcher) {
       return this.unexpected(
@@ -932,55 +954,6 @@ function compileStringCondition(
     }
   }
 
-  return (issue) => matchers.every((matcher) => matcher(issue));
-}
-
-/** Compile a `{gt|gte|lt|lte: ISO}` DateComparator on `updatedAt`. */
-function compileDateCondition(condition: unknown): IssueMatcher | undefined {
-  const operations = asRecord(condition);
-  if (!operations || Object.keys(operations).length === 0) return undefined;
-
-  const matchers: IssueMatcher[] = [];
-  for (const [operation, rawValue] of Object.entries(operations)) {
-    if (typeof rawValue !== "string") return undefined;
-    const bound = Date.parse(rawValue);
-    if (!Number.isFinite(bound)) return undefined;
-    const stamp = (issue: FakeLinearIssue) => Date.parse(issue.updatedAt);
-    switch (operation) {
-      case "gt":
-        matchers.push((issue) => stamp(issue) > bound);
-        break;
-      case "gte":
-        matchers.push((issue) => stamp(issue) >= bound);
-        break;
-      case "lt":
-        matchers.push((issue) => stamp(issue) < bound);
-        break;
-      case "lte":
-        matchers.push((issue) => stamp(issue) <= bound);
-        break;
-      default:
-        return undefined;
-    }
-  }
-  return (issue) => matchers.every((matcher) => matcher(issue));
-}
-
-/** Compile an `{eq|neq}` comparator over a derived string value. */
-function compileEqualityCondition(
-  condition: unknown,
-  read: (issue: FakeLinearIssue) => string,
-): IssueMatcher | undefined {
-  const operations = asRecord(condition);
-  if (!operations || Object.keys(operations).length === 0) return undefined;
-
-  const matchers: IssueMatcher[] = [];
-  for (const [operation, rawValue] of Object.entries(operations)) {
-    if (typeof rawValue !== "string") return undefined;
-    if (operation === "eq") matchers.push((issue) => read(issue) === rawValue);
-    else if (operation === "neq") matchers.push((issue) => read(issue) !== rawValue);
-    else return undefined;
-  }
   return (issue) => matchers.every((matcher) => matcher(issue));
 }
 

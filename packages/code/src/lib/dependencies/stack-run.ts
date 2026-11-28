@@ -11,12 +11,22 @@
  * - **Base open, branch present**: nothing to do.
  * - **Base merged** (or its branch is gone and the code host cannot say why):
  *   switch the run's target to the branch the base merged into (normally the
- *   default branch) and rebase the run's branch onto it, dropping the base's
- *   original commits, as the maintainer does for an open stacked PR. After a
- *   squash merge those commits are not on the target, so without the rebase
- *   the PR would show the base's changes again. When the run's branch is
- *   already on origin (a resumed run), the rebase is pushed right away with a
- *   lease on that commit; a remote branch with commits the run lacks blocks.
+ *   default branch). When the base's commits landed on the target as they
+ *   are (a merge commit), the branch already sits on the target's history
+ *   and is left alone: the PR diff is the run's own work, and a conflict
+ *   with newer target commits is an ordinary PR conflict for the worker's
+ *   conflict resolution. Otherwise (a squash or rebase merge) rebase the
+ *   run's branch onto the target, dropping the base's original commits, as
+ *   the maintainer does for an open stacked PR; without the rebase the PR
+ *   would show the base's changes again. When the run's branch is already
+ *   on origin (a resumed run), the rebase is pushed right away with a lease
+ *   on that commit; a remote branch with commits the run lacks blocks. When
+ *   that rebase conflicts and the base is known to have merged, the run
+ *   keeps its branch and still targets the merge target, as the maintainer
+ *   does for a stacked PR: the open PR conflicts, and the worker's conflict
+ *   resolution merges the target in (with the agent when needed). Merging
+ *   the target also settles the base's original commits against their
+ *   squash, so the PR diff ends up as the run's own work.
  * - **Base closed without merging**: blocked. The caller preserves the work
  *   and escalates with {@link stackBaseRecoveryHint}'s actions.
  */
@@ -142,6 +152,22 @@ async function oldBaseCandidates(
 }
 
 /**
+ * Whether the run's branch was cut from a commit the target already contains,
+ * i.e. the base merged with its commits intact. Without a recorded cut point
+ * the answer is no: the merge-base fallback is on the target by definition
+ * and says nothing about how the base merged.
+ */
+async function cutPointOnTarget(
+  git: Git,
+  candidates: readonly string[],
+  ontoSha: string,
+): Promise<boolean> {
+  const cut = candidates[0];
+  if (!cut) return false;
+  return (await git(["merge-base", "--is-ancestor", cut, ontoSha])).success;
+}
+
+/**
  * Re-resolve a stacked run's base right before a step that uses it.
  *
  * @param base - The stack base the run started on (its current target)
@@ -202,6 +228,16 @@ export async function reconcileRunStackBase(
   }
   const head = await revParse(git, "HEAD");
   if (!head) throw new Error("the run's checkout has no HEAD");
+  const candidates = await oldBaseCandidates(git, base, basePr);
+
+  // A merge commit put the base's commits on the target unchanged: nothing to
+  // drop, so rebasing would only replay the run's work over newer target
+  // commits, and any conflict there would end the run without a PR.
+  if (await cutPointOnTarget(git, candidates, ontoSha)) {
+    const summary = `${why}; its commits are already on ${target}, so this run targets it without rebasing`;
+    log(`🧱 ${summary}`);
+    return { kind: "switched", target, summary };
+  }
 
   // A resumed run's branch is usually already on origin. Rebasing rewrites
   // that history, which publish's plain push rejects as divergence, so the
@@ -218,9 +254,16 @@ export async function reconcileRunStackBase(
     head,
     ontoSha,
     onto: target,
-    oldBaseCandidates: await oldBaseCandidates(git, base, basePr),
+    oldBaseCandidates: candidates,
     autostash: true,
   });
+  if (rebase.kind === "conflict" && rebase.intact && basePr?.state === "merged") {
+    const summary =
+      `${why}; rebasing onto ${target} conflicted (${rebase.detail}), so this run keeps its ` +
+      `branch, targets ${target}, and leaves the conflict to the PR's conflict resolution`;
+    warn(`⚠️  ${summary}`);
+    return { kind: "switched", target, summary };
+  }
   if (rebase.kind === "conflict") {
     return {
       kind: "blocked",

@@ -437,8 +437,7 @@ async function commitWithHookRetry(params: {
         params.harness,
         params.executablePath,
         params.maxTurns,
-        params.workDir,
-        params.prBranch,
+        { cwd: params.workDir, expectedBranch: params.prBranch },
       );
       if (fixed) {
         if (await isCommitAlreadyComplete(params.workDir)) {
@@ -470,7 +469,8 @@ async function commitWithHookRetry(params: {
 }
 
 /** Push the branch, retrying through fixable pre-push hook failures. */
-async function pushWithHookRetry(params: {
+/** Push the review fix, letting the agent repair a failing pre-push hook. Exported for tests. */
+export async function pushWithHookRetry(params: {
   workDir: string;
   verbose: boolean;
   hookRetries: number;
@@ -505,8 +505,7 @@ async function pushWithHookRetry(params: {
         params.harness,
         params.executablePath,
         params.maxTurns,
-        params.workDir,
-        params.prBranch,
+        { cwd: params.workDir, expectedBranch: params.prBranch },
       );
       if (fixed) {
         console.log(
@@ -523,6 +522,10 @@ async function pushWithHookRetry(params: {
     }
     console.error(`\n❌ Failed to push changes: ${pushResult.message}`);
     const error = new Error(`Push failed: ${pushResult.message}`);
+    // A server-side refusal (token scope, branch protection) is the setup.
+    if (pushResult.remoteRejection) {
+      throw tagOutcomeClass(error, "environment", { definite: true });
+    }
     // `hookError` is set for every push failure but divergence; only a repo
     // with a pre-push hook can have had the hook (the agent's work) reject it.
     if (pushResult.hookError && (await Utils.hasPrePushHook(params.workDir))) {

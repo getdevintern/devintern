@@ -25,7 +25,10 @@ import {
   toReportCheck,
 } from "../observability/readiness-json";
 import type { NextStep, ReportCheck } from "../observability/readiness-json";
+import { renderNextSteps } from "../observability/next-steps-text";
 import { parseEnvFile } from "../workspace/env";
+import { DEFAULT_MEMORY_BUDGET } from "./memory-budget";
+import type { MemoryBudgetPercentages } from "./memory-budget";
 import {
   resolveWorkspaceDir,
   workspaceConfigPath,
@@ -51,6 +54,7 @@ import {
 } from "./service-control";
 import type { ServiceActionResult, StartCheck, WorkerServiceStatus } from "./service-control";
 import { renderServiceStatus, renderStartCheck } from "./service-report";
+import { clearWorkerStartIntent } from "./start-intent";
 
 export const WORKER_SERVICE_JSON_SCHEMA = "devintern.worker-service";
 export const WORKER_SERVICE_JSON_VERSION = 1;
@@ -256,6 +260,20 @@ function nextStepsForStart(start: StartCheck | undefined): ServiceNextStep[] {
   ];
 }
 
+/**
+ * The memory budget configured for this workspace, or the defaults when the
+ * config cannot be read (a `worker service install --force` must still be able
+ * to write a unit while the readiness checks report the config problem).
+ */
+async function workspaceMemoryBudget(workspaceDir: string): Promise<MemoryBudgetPercentages> {
+  try {
+    const { loadWorkerWorkspaceConfig } = await import("../workspace/config");
+    return loadWorkerWorkspaceConfig(workspaceConfigPath(workspaceDir)).workspace.execution.memory;
+  } catch {
+    return DEFAULT_MEMORY_BUDGET;
+  }
+}
+
 async function runInstall(
   args: ServiceCommandArgs,
   deps: ServiceCommandDeps,
@@ -333,6 +351,7 @@ async function runInstall(
     execPath: deps.execPath ?? (process.argv[1] ? resolve(process.argv[1]) : "devintern"),
     runtimePath: deps.runtimePath ?? process.execPath,
     environmentPath: deps.environmentPath ?? process.env.PATH ?? "",
+    memory: await workspaceMemoryBudget(workspaceDir),
   };
   // Idempotent: the same definition and a running worker means there is
   // nothing to do, and restarting would interrupt the worker's tasks.
@@ -459,6 +478,8 @@ export async function runServiceAction(
     case "uninstall": {
       const outcome = await uninstallWorkerService(deps.service);
       if (!outcome.ok) return { ...base, result: "error", error: outcome.error };
+      // No pending `worker init --start` may reinstall it at the next sign-in.
+      clearWorkerStartIntent(workspaceDir);
       return { ...base, result: outcome.unchanged ? "not_installed" : "uninstalled" };
     }
     case "status": {
@@ -540,11 +561,7 @@ export function renderServiceReport(
   }
   for (const warning of report.warnings) lines.push(`⚠️  ${warning}`);
   if (report.nextSteps.length > 0 && !report.start) {
-    lines.push("", "Next steps:");
-    report.nextSteps.forEach((step, index) => {
-      lines.push(`   ${index + 1}. ${step.message}`);
-      lines.push(`      ${step.command}`);
-    });
+    lines.push("", "Next steps:", ...renderNextSteps(report.nextSteps, { indent: "   " }));
   }
   return lines;
 }
@@ -599,7 +616,7 @@ async function printServiceLogs(
 }
 
 /** Default readiness preflight: the same checks and environment as `worker doctor`. */
-async function defaultCollectReadiness(workspaceDir: string): Promise<ReadinessCheck[]> {
+export async function collectServiceReadiness(workspaceDir: string): Promise<ReadinessCheck[]> {
   const [{ collectWorkerDoctorChecks }, { applyWorkspaceProcessEnv }, { checkLicense }, bootstrap] =
     await Promise.all([
       import("../observability/worker-readiness"),
@@ -668,7 +685,7 @@ export async function runWorkerServiceCommand(
   const report = await runServiceAction(args, {
     ...deps,
     workspaceDir,
-    collectReadiness: deps.collectReadiness ?? defaultCollectReadiness,
+    collectReadiness: deps.collectReadiness ?? collectServiceReadiness,
   });
   if (report.result === "error" && !report.code) report.code = "service_command_failed";
   if (args.json) {

@@ -122,3 +122,55 @@ describe("TrelloClient.resolveBoardId / searchCards", () => {
     await expect(trello.resolveBoardId("AbCd1234")).resolves.toBe(LONG);
   });
 });
+
+describe("defaultProbe azure-devops base URL", () => {
+  const AZURE_ENV = {
+    AZURE_DEVOPS_ORG: "myorg",
+    AZURE_DEVOPS_PAT: "pat",
+    AZURE_DEVOPS_PROJECT: "MyProject",
+  };
+
+  test("calls production when the e2e fake is not opted in, even with a loopback base URL", async () => {
+    const urls = mockFetch(() => ({ json: { value: [] } }));
+    await defaultProbe(
+      "azure-devops",
+      { ...AZURE_ENV, AZURE_DEVOPS_BASE_URL: "http://127.0.0.1:9/fakeorg" },
+      { allowAzureDevOpsFake: false },
+    );
+    expect(urls.map((u) => u.origin + u.pathname)).toEqual([
+      "https://dev.azure.com/myorg/_apis/projects",
+    ]);
+  });
+
+  test("calls production when opted in without a base URL", async () => {
+    const urls = mockFetch(() => ({ json: { value: [] } }));
+    await defaultProbe("azure-devops", AZURE_ENV, { allowAzureDevOpsFake: true });
+    expect(urls.map((u) => u.origin + u.pathname)).toEqual([
+      "https://dev.azure.com/myorg/_apis/projects",
+    ]);
+  });
+
+  test("calls the loopback fake when opted in", async () => {
+    const urls = mockFetch(() => ({ json: { value: [] } }));
+    await defaultProbe(
+      "azure-devops",
+      { ...AZURE_ENV, AZURE_DEVOPS_BASE_URL: "http://127.0.0.1:9/fakeorg/" },
+      { allowAzureDevOpsFake: true },
+    );
+    expect(urls.map((u) => u.origin + u.pathname)).toEqual([
+      "http://127.0.0.1:9/fakeorg/_apis/projects",
+    ]);
+  });
+
+  test("refuses a non-loopback base URL when opted in, without any request", async () => {
+    const urls = mockFetch(() => ({ json: { value: [] } }));
+    await expect(
+      defaultProbe(
+        "azure-devops",
+        { ...AZURE_ENV, AZURE_DEVOPS_BASE_URL: "https://attacker.example/collect" },
+        { allowAzureDevOpsFake: true },
+      ),
+    ).rejects.toThrow("AZURE_DEVOPS_BASE_URL must be an absolute loopback http(s) URL");
+    expect(urls).toEqual([]);
+  });
+});

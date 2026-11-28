@@ -11,6 +11,7 @@ import { copyFileSync, existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
 
 import { resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
+import { resolveBaseSyncExhausted as resolveBaseSyncExhaustedRow } from "../notifications/base-sync";
 import { configureSqliteConnection } from "./sqlite";
 import {
   RowParseError,
@@ -683,12 +684,25 @@ export class WebhookQueue {
   /** Mark a success/safe skip terminal and publish the canonical dedupe key. */
   completeBaseSyncEvent(source: string, externalId: string): void {
     this.db.transaction(() => {
+      const event = this.getBaseSyncEvent(externalId);
       this.db.run(
         `UPDATE base_sync_events SET status = 'completed', updated_at = ? WHERE external_id = ?`,
         [Date.now(), externalId],
       );
       this.markProcessed(source, externalId);
+      // Completing the event proves the conflict is gone, so an earlier
+      // restart-exhaustion row for the same PR is stale.
+      if (event) resolveBaseSyncExhaustedRow(this.db, event.repo, event.prNumber);
     })();
+  }
+
+  /**
+   * Clear a worker-restart exhaustion row once the PR no longer needs a base
+   * sync: GitHub reports it clean, a human fixed it, or it left the open-PR
+   * watch list.
+   */
+  resolveBaseSyncExhausted(repo: string, prNumber: number): void {
+    resolveBaseSyncExhaustedRow(this.db, repo, prNumber);
   }
 
   /** Mark an exhausted event processed so restarts cannot revive it. */

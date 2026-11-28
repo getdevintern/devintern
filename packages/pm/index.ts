@@ -233,7 +233,7 @@ async function handleUtilityCommand(args: string[], parsedArgs: ParsedArgs): Pro
   // scaffold with `--yes` / `--no-interactive` / piped stdin.
   if (parsedArgs === "init") {
     if (isInteractive(process.argv, process.stdin)) {
-      await runPmInitWizard();
+      process.exitCode = await runPmInitWizard();
     } else {
       await initializeProject();
     }

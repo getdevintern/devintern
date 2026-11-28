@@ -6,6 +6,8 @@ Use these fallbacks only when the installed CLI's `--help` lacks a flag or comma
 | --- | --- |
 | `worker init --non-interactive` | `devintern worker scaffold`, then `devintern worker add-repo` in the checkout. Set `[defaults].tracker` and `task_query` in `workspace.toml`, put credentials in the workspace `.env` (mode `0600`), and verify with `worker doctor` |
 | `worker login --no-wait` | Ask the user to run `devintern worker login <method>` in a terminal on the worker host |
+| `worker init --start` | Leave `--start` out and run `devintern worker service install --json` after sign-in (step 5) |
+| `relay` in the `worker login --complete --json` document | That CLI does not pair after signing in: run step 6 from 6.1 |
 | `worker connect --json` or `--no-wait` | Ask the user to run `devintern worker connect <target>` in a terminal on the worker host |
 | `worker doctor --json` | Run `devintern worker doctor` without it and read the ❌, ⚠️, and 👉 rows; the exit codes are the same (0 ready, 2 only sign-in left, 1 failed) |
 | `worker doctor` | Validate `workspace.toml` by hand against the [workspace guide](https://devintern.com/docs/code/workspaces). There is no `worker validate` command |

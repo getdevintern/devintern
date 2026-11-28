@@ -74,6 +74,12 @@ export interface CiFailureWatcherAcquirerOptions {
     feedbackPath: string,
     expectedHeadSha: string,
   ) => Promise<CiFixResult>;
+  /**
+   * Settle the `in_progress` CI-fix run after a failed `fixPr`. The child that
+   * owns the run may have been killed before it could close it; failing it
+   * here keeps the restart reaper from counting the same attempt twice.
+   */
+  settleCiFixRun?: (repo: string, prNumber: number) => void;
   /** Max consecutive failed autofix attempts per PR (default 3). */
   maxAttempts?: number;
   /** Live workspace switch; false suppresses all GitHub polling and fixes. */
@@ -104,6 +110,9 @@ export interface CiFailureWatcherAcquirerOptions {
 
 /** Dedupe source for CI failures (keyed by head SHA + workflow run/status id). */
 const SOURCE = "github:ci";
+
+/** Reason recorded on a CI-fix run whose child never closed it. */
+export const CI_FIX_INCOMPLETE_REASON = "CI fix attempt did not complete";
 
 /** Default consecutive-attempt cap per PR (`CI_FIX_MAX_ATTEMPTS` override). */
 export const DEFAULT_CI_FIX_MAX_ATTEMPTS = 3;
@@ -662,6 +671,17 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       if (ok) {
         for (const failure of fresh) {
           this.options.queue.markProcessed(this.source, failure.externalId);
+        }
+      } else {
+        // The child may have been killed before closing its run. Settle it now
+        // so a later restart reap does not count this attempt again.
+        try {
+          this.options.settleCiFixRun?.(repo, prNumber);
+        } catch (error) {
+          console.warn(
+            `⚠️  [${this.name}] could not settle the failed CI fix run for ${repo}#${prNumber}: ` +
+              `${(error as Error).message}`,
+          );
         }
       }
       if (!ok && state.consecutiveFailures >= this.maxAttempts && !state.escalatedSha) {

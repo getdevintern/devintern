@@ -5,6 +5,12 @@
 
 import { renderPendingSignIn } from "../account/cli";
 import { WORKER_PILOT_OFFER, signInCommand } from "../account/worker-pilot";
+import {
+  humanNextStep,
+  humanNextSteps,
+  humanText,
+  renderNextSteps,
+} from "../observability/next-steps-text";
 import type {
   CheckStatus,
   InitCheck,
@@ -19,6 +25,11 @@ const STATUS_ICON: Record<CheckStatus, string> = {
   skipped: "⏭️ ",
 };
 
+const TOKEN_SOURCE_LABEL = {
+  env: "the environment (GITHUB_TOKEN)",
+  "env-file": "an env file",
+  gh: "the GitHub CLI (`gh auth token`)",
+} as const;
 /** Checks about this machine rather than the input: the agent CLI and its sandbox. */
 const HOST_CHECKS = new Set(["harness", "sandbox"]);
 /** Next steps that fix a host check. */
@@ -34,20 +45,34 @@ function hostProblemsFirst<T>(items: readonly T[], isHostProblem: (item: T) => b
 
 /** Last line of the text report: ready, only sign-in left, or failed checks to fix. */
 function closingLine(report: NonInteractiveInitReport, failed: InitCheck[]): string {
+  const started = report.start?.result === "installed";
+  const running = report.service?.result === "running";
+  const serviceNote = started
+    ? running
+      ? " The worker is running as a background service."
+      : " The background service is installed; the worker is still starting."
+    : " Nothing was started or installed.";
   if (report.result === "success") {
-    return "✅ Worker setup complete. Nothing was started or installed.";
+    return `✅ Worker setup complete.${serviceNote}`;
   }
   if (report.result === "unchanged") {
-    return "✅ Worker setup unchanged: the workspace already had this setup and every check passed.";
+    return (
+      "✅ Worker setup unchanged: the workspace already had this setup and every check passed." +
+      (started ? serviceNote : "")
+    );
   }
   if (report.result === "action_required") {
     const signIn = report.nextSteps.find((step) => step.id === "sign-in");
     const how = report.signIn
       ? `open the address above, then run \`${report.signIn.complete}\` on this host`
-      : `run \`${signIn?.command ?? signInCommand()}\``;
+      : `run \`${signIn ? humanNextStep(signIn).command : signInCommand()}\``;
+    const then =
+      report.start?.result === "after_sign_in"
+        ? "; that also installs and starts the worker service"
+        : ", then `devintern worker doctor`";
     return (
       `👉 Configuration saved. One step left: sign in to begin your ${WORKER_PILOT_OFFER}: ` +
-      `${how}, then \`devintern worker doctor\`.`
+      `${how}${then}.`
     );
   }
   return `❌ Worker setup incomplete: ${failed.length} check(s) failed${report.persisted ? "" : "; nothing was saved"}. Follow the next steps above, then re-run the same command.`;
@@ -58,7 +83,9 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
   const lines: string[] = [];
   if (report.error) {
     lines.push(`❌ ${report.error}`);
-    for (const step of report.nextSteps) lines.push(`   ${step.message}: ${step.command}`);
+    for (const step of humanNextSteps(report.nextSteps)) {
+      lines.push(`   ${step.message}: ${step.command}`);
+    }
     return lines;
   }
   lines.push("", "Checks:");
@@ -68,19 +95,23 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
   );
   for (const check of checks) {
     lines.push(`  ${STATUS_ICON[check.status]} ${check.name}: ${check.message}`);
-    if (check.hint) lines.push(`     → ${check.hint}`);
+    if (check.hint) lines.push(`     → ${humanText(check.hint)}`);
+  }
+  if (report.tokenSource) {
+    lines.push("", `🔑 GitHub token from ${TOKEN_SOURCE_LABEL[report.tokenSource]}.`);
   }
   if (report.signIn) {
     lines.push("", `🔑 Sign in to begin your ${WORKER_PILOT_OFFER}:`);
     for (const line of renderPendingSignIn(report.signIn)) lines.push(`   ${line}`);
   }
   if (report.nextSteps.length > 0) {
-    lines.push("", "Next steps:");
-    hostProblemsFirst(report.nextSteps, (step) => HOST_STEPS.has(step.id)).forEach(
-      (step, index) => {
-        lines.push(`  ${index + 1}. ${step.message}:`);
-        lines.push(`     ${step.command}`);
-      },
+    lines.push(
+      "",
+      "Next steps:",
+      ...renderNextSteps(
+        hostProblemsFirst(report.nextSteps, (step) => HOST_STEPS.has(step.id)),
+        { indent: "  " },
+      ),
     );
   }
   for (const warning of report.warnings) lines.push("", `⚠️  ${warning}`);

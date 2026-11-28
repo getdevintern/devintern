@@ -137,6 +137,15 @@ export class FakeGitlabForge {
     this.ciStatus = status;
   }
 
+  /**
+   * Serve the `ci` pipeline for `sha` from now on, after a test moved the MR
+   * head, so only the new head has a failed pipeline.
+   */
+  setCiSha(sha: string): void {
+    if (!this.options.ci) throw new Error("setCiSha needs the forge's `ci` option");
+    this.options.ci = { ...this.options.ci, sha };
+  }
+
   stop(): void {
     this.server.stop(true);
   }

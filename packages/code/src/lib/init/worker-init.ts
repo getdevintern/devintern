@@ -29,6 +29,7 @@ import { GITHUB_APP_INSTALL_URL } from "../code-host/github/app-setup";
 import { trackWorkerInitCompleted, trackWorkerInitStarted } from "../observability/analytics";
 import { SERVICE_RESTART_COMMAND, dashboardUrlFor } from "../worker/service-report";
 import { workspaceConfigPath } from "../workspace/paths";
+import { offerFirstTask, sampleTaskAddCommand } from "./worker-init-first-task";
 import { emptyOutcome } from "./worker-init-run";
 import type { PromptRun, WorkerInitDeps, WorkerInitResult } from "./worker-init-run";
 import { runWorkerInitSteps } from "./worker-init-steps";
@@ -49,7 +50,8 @@ export {
   describeCustomWorkerSettings,
 } from "./worker-init-policy";
 export type { WorkerInitDeps, WorkerInitResult } from "./worker-init-run";
-export { WORKER_INIT_STEPS, defaultEnsureTracker, describeQueryFailure } from "./worker-init-steps";
+export { WORKER_INIT_STEPS, defaultEnsureTracker } from "./worker-init-steps";
+export { describeQueryFailure } from "./worker-init-query-failure";
 
 /**
  * Insert or update KEY=value lines in an env file's content. Existing keys
@@ -131,17 +133,32 @@ function logWorkerNextSteps(ctx: PromptRun): void {
       `   2. Open ${dashboardUrlFor(ctx.workspaceDir) ?? "the dashboard"} to see worker status and runs.`,
     );
     ctx.log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
+    if (!serviceRunning) {
+      ctx.log(
+        `   4. Once it runs, try a sample task: ${sampleTaskAddCommand(ctx.workspaceDir, ctx.repoName)}`,
+      );
+    }
   }
   if (githubApp !== "skipped") return;
 
   if (relayConnected) {
     ctx.log("\n⚠️  Central GitHub App events are not enabled:");
-    ctx.log(
-      `   @mentions on PRs this worker did not create will not fire. Install ${GITHUB_APP_INSTALL_URL}`,
-    );
-    ctx.log(
-      "   on your repositories, then re-run `devintern worker init` (or `devintern worker connect`).",
-    );
+    ctx.log("   @mentions on PRs this worker did not create will not fire.");
+    if (ctx.githubAppMissing && ctx.githubAppMissing.length > 0) {
+      ctx.log(`   The App installation did not grant: ${ctx.githubAppMissing.join(", ")}.`);
+      ctx.log(
+        "   Add them to the App installation, then run `devintern worker connect github` again.",
+      );
+    } else if (ctx.githubAppUrl && ctx.githubAppWait === "skipped") {
+      ctx.log(
+        `   Approve the App at ${ctx.githubAppUrl}, then run \`devintern worker connect github --status\`.`,
+      );
+    } else {
+      ctx.log(
+        `   Run \`devintern worker connect github\` to print the App install address and wait for it, ` +
+          `or install ${GITHUB_APP_INSTALL_URL} on your repositories.`,
+      );
+    }
   } else {
     ctx.log("\nℹ️  Running without relay or a custom GitHub App:");
     ctx.log("   GITHUB_TOKEN polling still handles the worker's own PRs.");
@@ -182,6 +199,18 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
 
     logWorkerNextSteps(run);
     const { outcome } = run;
+    if (deps.firstTask && outcome.service.serviceRunning && outcome.blockers.length === 0) {
+      await offerFirstTask({
+        trackerType: run.trackerType,
+        trackerName: run.trackerName,
+        workspaceDir: run.workspaceDir,
+        ...(run.repoName ? { repoName: run.repoName } : {}),
+        log,
+        prompt: run.prompt,
+        env: process.env,
+        deps: deps.firstTask,
+      });
+    }
     trackWorkerInitCompleted({
       tracker: run.trackerType,
       relayConnect: outcome.relayConnect,

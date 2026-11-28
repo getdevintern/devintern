@@ -83,9 +83,9 @@ export interface Scenario {
   forge: FakeGitlabForge;
   server: WebhookServerFixture;
   codeHostToken: string;
-  /** Standard Webhooks signing token (`whsec_…`), set in signature mode. */
+  /** Standard Webhooks signing token (`whsec_…`), set in signature and both modes. */
   signingToken?: string;
-  /** `X-Gitlab-Token` shared secret, set in token mode. */
+  /** `X-Gitlab-Token` shared secret, set in token and both modes. */
   sharedToken?: string;
   invocationsPath: string;
 }
@@ -103,8 +103,12 @@ export interface ScenarioOptions {
    * the agent branch's line, `behind` adds an unrelated file (clean merge).
    */
   baseChange?: "conflict" | "behind";
-  /** `signature` (default): `GITLAB_WEBHOOK_SIGNING_TOKEN`. `token`: `GITLAB_WEBHOOK_SECRET`. */
-  auth?: "signature" | "token";
+  /**
+   * `signature` (default): `GITLAB_WEBHOOK_SIGNING_TOKEN`. `token`:
+   * `GITLAB_WEBHOOK_SECRET`. `both`: both secrets at once; default deliveries
+   * are then signed.
+   */
+  auth?: "signature" | "token" | "both";
 }
 
 /** Everything a test created, torn down by {@link cleanupScenario} even after a failure. */
@@ -244,6 +248,35 @@ export function isAncestor(
   return result.status === 0;
 }
 
+/**
+ * Push one commit adding `path` on top of the agent branch, through a
+ * throwaway clone of the bare remote, so the MR head the fake forge reports
+ * moves on. Leaves `src/greeting.ts` alone, so conflict and CI-repair runs
+ * still apply to the new head. Returns the new head SHA.
+ */
+export async function advanceAgentBranch(
+  scenario: Pick<Scenario, "root" | "remote" | "gitBin">,
+  path: string,
+): Promise<string> {
+  const env = isolatedEnvironment(scenario.root);
+  const clone = mkdtempSync(join(scenario.root, "advance-"));
+  try {
+    await checkedCommand(
+      [scenario.gitBin, "clone", "--quiet", "--branch", AGENT_BRANCH, scenario.remote, clone],
+      scenario.root,
+      env,
+    );
+    writeFileSync(join(clone, path), `Advanced head: ${path}\n`);
+    const git = (...args: string[]) => checkedCommand([scenario.gitBin, ...args], clone, env);
+    await git("add", path);
+    await git("-c", "commit.gpgsign=false", "commit", "--quiet", "-m", `Advance ${path}`);
+    await git("push", "--quiet", "origin", AGENT_BRANCH);
+  } finally {
+    rmSync(clone, { recursive: true, force: true });
+  }
+  return revParse(scenario.gitBin, scenario.remote, AGENT_BRANCH);
+}
+
 /** `true` when `head` merges into `base` without conflicts. */
 export function mergesCleanly(gitBin: string, gitDir: string, base: string, head: string): boolean {
   const result = spawnSync(
@@ -377,10 +410,9 @@ export async function openScenario(
   options: ScenarioOptions = {},
 ): Promise<Scenario> {
   const auth = options.auth ?? "signature";
-  const signingToken =
-    auth === "signature" ? `whsec_${randomBytes(32).toString("base64")}` : undefined;
+  const signingToken = auth === "token" ? undefined : `whsec_${randomBytes(32).toString("base64")}`;
   const sharedToken =
-    auth === "token" ? `e2e-gitlab-token-${randomBytes(16).toString("hex")}` : undefined;
+    auth === "signature" ? undefined : `e2e-gitlab-token-${randomBytes(16).toString("hex")}`;
   const { env, ...prepared } = await prepareForge(owned, options, "devintern-e2e-webhook-gitlab-");
   const server = await WebhookServerFixture.start({
     root: prepared.root,
@@ -437,14 +469,36 @@ export function expectNoTokenInCliOutput(
 }
 
 /**
- * How a delivery authenticates. Default: Standard Webhooks signature in
- * signature mode, the configured `X-Gitlab-Token` in token mode. `token`
- * sends an explicit header value; `none` sends neither header.
+ * How a delivery authenticates. Default: a Standard Webhooks signature when a
+ * signing token is configured (signature and both modes), otherwise the
+ * configured `X-Gitlab-Token`. `token` sends an explicit header value and no
+ * signature headers; `none` sends neither. `forgedSignature` sends well-formed
+ * Standard Webhooks headers signed with a random secret the server does not
+ * know, plus `X-Gitlab-Token: token` when given.
  */
 export type DeliveryAuth =
   | { kind: "default" }
   | { kind: "token"; value: string }
-  | { kind: "none" };
+  | { kind: "none" }
+  | { kind: "forgedSignature"; token?: string };
+
+/** `v1,<base64>` Standard Webhooks signature of `id.timestamp.body` with a `whsec_` token. */
+function standardWebhookHeaders(
+  signingToken: string,
+  webhookId: string,
+  body: string,
+): Record<string, string> {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const secret = Buffer.from(signingToken.slice("whsec_".length), "base64");
+  const signature = createHmac("sha256", secret)
+    .update(`${webhookId}.${timestamp}.${body}`)
+    .digest("base64");
+  return {
+    "webhook-id": webhookId,
+    "webhook-timestamp": timestamp,
+    "webhook-signature": `v1,${signature}`,
+  };
+}
 
 export interface Delivery {
   status: number;
@@ -471,18 +525,15 @@ export async function deliver(
     headers["idempotency-key"] = webhookId;
   } else if (auth.kind === "none") {
     headers["idempotency-key"] = webhookId;
+  } else if (auth.kind === "forgedSignature") {
+    const forgedToken = `whsec_${randomBytes(32).toString("base64")}`;
+    Object.assign(headers, standardWebhookHeaders(forgedToken, webhookId, body));
+    if (auth.token !== undefined) headers["x-gitlab-token"] = auth.token;
+  } else if (scenario.signingToken) {
+    Object.assign(headers, standardWebhookHeaders(scenario.signingToken, webhookId, body));
   } else if (scenario.sharedToken) {
     headers["x-gitlab-token"] = scenario.sharedToken;
     headers["idempotency-key"] = webhookId;
-  } else if (scenario.signingToken) {
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const secret = Buffer.from(scenario.signingToken.slice("whsec_".length), "base64");
-    const signature = createHmac("sha256", secret)
-      .update(`${webhookId}.${timestamp}.${body}`)
-      .digest("base64");
-    headers["webhook-id"] = webhookId;
-    headers["webhook-timestamp"] = timestamp;
-    headers["webhook-signature"] = `v1,${signature}`;
   }
   const response = await fetch(`${scenario.server.baseUrl}/webhooks/gitlab`, {
     method: "POST",
@@ -557,12 +608,16 @@ export function mergeRequestHook(
 /**
  * `Merge Request Hook` for an open MR whose mergeability changed (an `update`
  * action with `detailed_merge_status`), as GitLab sends after the target moves.
+ * `legacyOnly` omits `detailed_merge_status` and sends only the legacy
+ * `merge_status` (`cannot_be_merged` / `can_be_merged`), as older GitLab
+ * Self-Managed versions do.
  */
 export function mergeabilityHook(
   baseUrl: string,
   iid: number,
   headSha: string,
   detailedMergeStatus: "conflict" | "need_rebase" | "mergeable",
+  options: { legacyOnly?: boolean } = {},
 ): Record<string, unknown> {
   return {
     object_kind: "merge_request",
@@ -577,7 +632,7 @@ export function mergeabilityHook(
       target_branch: BASE_BRANCH,
       source_project_id: PROJECT_ID,
       target_project_id: PROJECT_ID,
-      detailed_merge_status: detailedMergeStatus,
+      ...(options.legacyOnly ? {} : { detailed_merge_status: detailedMergeStatus }),
       merge_status: detailedMergeStatus === "mergeable" ? "can_be_merged" : "cannot_be_merged",
       last_commit: { id: headSha },
       url: `${baseUrl}/${PROJECT_PATH}/-/merge_requests/${iid}`,
@@ -792,9 +847,9 @@ export async function expectUnregisteredNoteIgnored(scenario: Scenario): Promise
   expect(unmatched.status, diagnostics(scenario)).toBe(200);
   expect(unmatched.body.message).toBe("No registered GitLab MR matched");
   expect(unmatched.body.matchedMergeRequests).toBeUndefined();
-  const settled = scenario.sharedToken
-    ? tokenDeliverySettled(scenario.server.queueDbPath, unmatched.webhookId)
-    : deliverySettled(scenario.server.queueDbPath, unmatched.webhookId);
+  const settled = scenario.signingToken
+    ? deliverySettled(scenario.server.queueDbPath, unmatched.webhookId)
+    : tokenDeliverySettled(scenario.server.queueDbPath, unmatched.webhookId);
   expect(settled).toBe(true);
   expect(scenario.forge.requests.length).toBe(forgeBefore);
   expect(agentInvocations(scenario.invocationsPath)).toEqual([]);

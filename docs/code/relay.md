@@ -21,7 +21,7 @@ devintern worker connect   # pair every GitHub and GitLab repository in the work
 devintern worker service install   # (re)start the worker; it connects to the relay alongside polling
 ```
 
-`devintern worker init` offers the same pairing during setup. Authorize any GitHub App URL the CLI prints. GitLab hooks are created and tested automatically when the token has Maintainer or Owner access. Run `worker connect` again after adding repositories, or to repair or rotate a registration.
+`devintern worker init` pairs automatically once you are signed in (add `--no-relay` to skip), and `devintern worker login` pairs right after every sign-in, so `worker connect` is mainly for repositories you add later. Authorize any GitHub App URL the CLI prints. GitLab hooks are created and tested automatically when the token has Maintainer or Owner access. Run `worker connect` again after adding repositories, or to repair or rotate a registration.
 
 If you gave the DevIntern AI App access to **All repositories**, GitHub repositories you add to `workspace.toml` later, including newly created ones, are verified automatically when the worker starts or reloads its config, and `devintern worker connect github` finishes without opening the browser. A repository under a different GitHub account or organization still needs one more `devintern worker connect github` to authorize the App there.
 
@@ -46,7 +46,7 @@ For trackers, set the tracker credentials (see the table below), then run `devin
 
 ## Pairing GitHub without a terminal
 
-`devintern worker connect github` prints the GitHub App install URL and waits up to 10 minutes for you to approve it. A coding agent or SSH session that cannot wait splits this in two, after signing in with `devintern worker login <method> --no-wait` (see [Signing in without a terminal](./worker.md#signing-in-without-a-terminal)):
+`devintern worker connect github` prints the GitHub App install URL and waits up to 10 minutes for you to approve it. A coding agent or SSH session that cannot wait splits this in two. `devintern worker login --complete` already runs the first half after signing in (its `relay` field; see [Signing in without a terminal](./worker.md#signing-in-without-a-terminal)); to run it yourself:
 
 ```bash
 devintern worker connect github --no-wait --json   # prints the install URL and exits 0

@@ -11,7 +11,7 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { basename, join } from "path";
-import { BUNDLED_TRELLO_API_KEY } from "@devintern/task-trackers";
+import { BUNDLED_TRELLO_API_KEY, PromptAttemptsExceededError } from "@devintern/task-trackers";
 import {
   ENV_HARNESS_DOCS,
   TRACKER_SETUP,
@@ -70,6 +70,7 @@ function testDeps(overrides: Record<string, unknown> = {}) {
   return {
     getUser: () => Promise.resolve(null),
     listInstalledAgents: () => [{ name: "claude-code", displayName: "Claude Code" }],
+    githubCliToken: () => null,
     ...overrides,
   };
 }
@@ -851,6 +852,7 @@ describe("runInitUpgrade", () => {
     let probed: Record<string, string> | undefined;
     await runInitUpgrade({
       envPath: upgradeEnvPath(),
+      githubCliToken: () => null,
       prompt,
       probe: (_, env) => {
         probed = env;
@@ -879,6 +881,7 @@ describe("runInitUpgrade", () => {
     ]);
     await runInitUpgrade({
       envPath: upgradeEnvPath(),
+      githubCliToken: () => null,
       prompt,
       probe: () => Promise.resolve(),
       cwd: tempDir,
@@ -902,6 +905,7 @@ describe("runInitUpgrade", () => {
     ]);
     await runInitUpgrade({
       envPath: upgradeEnvPath(),
+      githubCliToken: () => null,
       prompt,
       probe: () => Promise.resolve(),
       cwd: tempDir,
@@ -915,6 +919,73 @@ describe("runInitUpgrade", () => {
     expect(env).toContain("LINEAR_API_KEY=lin_old_key");
   });
 
+  test("update credentials: offers a signed-in GitHub CLI token for PRs", async () => {
+    seedExistingConfig();
+    const savedToken = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    try {
+      const { prompt, asked } = promptQueue([
+        "1", // update
+        "", // keep LINEAR_API_KEY
+        "ENG", // set team key
+        "", // accept the GitHub CLI token
+      ]);
+      await runInitUpgrade({
+        envPath: upgradeEnvPath(),
+        githubCliToken: () => ({ token: "gho_cli_pr", account: "octocat", scopes: "repo" }),
+        prompt,
+        probe: () => Promise.resolve(),
+        cwd: tempDir,
+        log: silentLog,
+      });
+      const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+      expect(env).toContain("GITHUB_TOKEN=gho_cli_pr");
+      expect(asked.some((question) => question.startsWith("Use your GitHub CLI token"))).toBe(true);
+      expect(asked.some((question) => question.startsWith("GitHub token for creating"))).toBe(
+        false,
+      );
+    } finally {
+      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedToken;
+    }
+  });
+
+  test("switch tracker: offers the GitHub CLI token for the GitHub tracker", async () => {
+    seedExistingConfig();
+    const savedToken = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    try {
+      const { prompt, asked } = promptQueue([
+        "2", // switch
+        "github", // target tracker
+        "", // accept the GitHub CLI token
+        "acme/app", // GITHUB_REPO
+        "", // skip status labels
+      ]);
+      await runInitUpgrade({
+        envPath: upgradeEnvPath(),
+        githubCliToken: () => ({ token: "gho_cli_tracker", account: "octocat", scopes: "repo" }),
+        prompt,
+        probe: () => Promise.resolve(),
+        cwd: tempDir,
+        log: silentLog,
+      });
+      const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+      expect(env).toContain("TASK_TRACKER=github");
+      expect(env).toContain("GITHUB_TOKEN=gho_cli_tracker");
+      expect(env).toContain("GITHUB_REPO=acme/app");
+      expect(asked.some((question) => question.startsWith("Use your GitHub CLI token"))).toBe(true);
+      expect(
+        asked.some((question) =>
+          question.startsWith("GitHub personal access token ('repo' scope)"),
+        ),
+      ).toBe(false);
+    } finally {
+      if (savedToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedToken;
+    }
+  });
+
   test.skipIf(process.platform === "win32")(
     "update credentials: a group/world-readable env file ends up owner-only",
     async () => {
@@ -923,6 +994,7 @@ describe("runInitUpgrade", () => {
       const { prompt } = promptQueue(["1", "lin_rotated", "", "ghp_rotated"]);
       await runInitUpgrade({
         envPath: upgradeEnvPath(),
+        githubCliToken: () => null,
         prompt,
         probe: () => Promise.resolve(),
         cwd: tempDir,
@@ -948,6 +1020,7 @@ describe("runInitUpgrade", () => {
       ]);
       await runInitUpgrade({
         envPath: upgradeEnvPath(),
+        githubCliToken: () => null,
         prompt,
         probe: () => Promise.resolve(),
         cwd: tempDir,
@@ -958,12 +1031,34 @@ describe("runInitUpgrade", () => {
     },
   );
 
+  test("three invalid init-action choices stop without touching the file", async () => {
+    seedExistingConfig();
+    const before = readFileSync(upgradeEnvPath(), "utf8");
+    const { prompt, asked } = promptQueue(["maybe", "maybe", "maybe"]);
+    const run = runInitUpgrade({
+      envPath: upgradeEnvPath(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PromptAttemptsExceededError);
+    expect((error as Error).message).toContain("No valid choice after 3 attempts");
+    expect(asked.filter((question) => question.startsWith("Enter a number (1-3)"))).toHaveLength(3);
+    expect(readFileSync(upgradeEnvPath(), "utf8")).toBe(before);
+  });
+
   test("exit option leaves the file untouched", async () => {
     seedExistingConfig();
     const before = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
     const { prompt } = promptQueue(["3"]);
     await runInitUpgrade({
       envPath: upgradeEnvPath(),
+      githubCliToken: () => null,
       prompt,
       probe: () => Promise.resolve(),
       cwd: tempDir,
@@ -977,6 +1072,7 @@ describe("runInitUpgrade", () => {
     const { prompt, asked } = promptQueue([]);
     await runInitUpgrade({
       envPath: upgradeEnvPath(),
+      githubCliToken: () => null,
       prompt,
       probe: () => Promise.resolve(),
       cwd: tempDir,

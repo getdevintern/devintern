@@ -114,6 +114,26 @@ describe("runInit: run-mode choice", () => {
     expect(logs.join("\n")).toContain("`devintern worker init`");
   });
 
+  test("stops after three invalid run-mode answers and returns 1", async () => {
+    const { prompt, asked } = scriptedPrompt(["3", "markdown", "maybe"]);
+    let workerRuns = 0;
+
+    const code = await runInit({
+      ...baseDeps(),
+      prompt,
+      runWorkerSetup: () => {
+        workerRuns++;
+        return Promise.resolve(0);
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(workerRuns).toBe(0);
+    expect(asked).toHaveLength(3);
+    expect(logs.join("\n")).toContain("No valid run mode after 3 attempts");
+    expect(logs.join("\n")).toContain("setup stopped. Re-run `devintern init`.");
+  });
+
   test("non-interactive init writes the templates without asking", async () => {
     const code = await runInit({
       ...baseDeps(),

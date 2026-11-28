@@ -7,6 +7,7 @@ import {
   setAnalyticsCaptureForTests,
 } from "../src/lib/observability/analytics";
 import { stdinClosedError } from "@devintern/auth";
+import { PromptAttemptsExceededError } from "@devintern/task-trackers";
 import { ensureTrackerEnvConfigured, missingTrackerEnv } from "../src/lib/init/first-run";
 
 // Snapshot the real wizard exports BEFORE any mock.module override so tests
@@ -158,6 +159,28 @@ describe("ensureTrackerEnvConfigured", () => {
       },
     });
     expect(outcome).toBe("ready");
+  });
+
+  test("a prompt that keeps giving unusable input stops setup without throwing", async () => {
+    const logs: string[] = [];
+    let reloaded = false;
+    const outcome = await ensureTrackerEnvConfigured({
+      env: { TASK_TRACKER: "jira" },
+      stdinIsTTY: true,
+      log: (msg) => logs.push(String(msg)),
+      prompt: async () => "y",
+      runWizard: async () => {
+        throw new PromptAttemptsExceededError("GITHUB_TOKEN");
+      },
+      reloadEnv: () => {
+        reloaded = true;
+      },
+    });
+    expect(outcome).toBe("failed");
+    expect(reloaded).toBe(true);
+    const output = logs.join("\n");
+    expect(output).toContain("GITHUB_TOKEN is required");
+    expect(output).toContain("setup stopped. Run `devintern init` to finish.");
   });
 
   test("non-abort wizard errors still propagate", async () => {

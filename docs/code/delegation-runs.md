@@ -96,7 +96,11 @@ and exits `3`, so scripts can tell a withdrawn task from a failed run (`1`).
   finish delivery: a branch that was pushed without a PR (for example because
   PR creation failed on credentials) is checked out again and the PR is opened
   from it, and a branch whose PR is still open keeps working on that PR. The
-  agent is told to verify the inherited work and not redo it. A fresh
+  agent is told to verify the inherited work and not redo it. If the agent
+  amends or rebases a branch that was already published, publishing replaces
+  `origin`'s copy with a force push only while it still points at the commit
+  the run started from; a commit pushed meanwhile still makes the run report
+  divergence instead of overwriting it. A fresh
   `-attempt-N` branch is used only when the prior branch is gone, has no
   commits, or its PR was merged or closed. Checking whether a PR is still open
   works on GitHub; on other code hosts, or when the check fails (for example an

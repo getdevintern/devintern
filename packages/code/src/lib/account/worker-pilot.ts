@@ -50,6 +50,10 @@ export function workspaceEnvPrefixFor(workspaceDir: string, home: string = homed
 /** What signing in gets you. */
 export const WORKER_PILOT_OFFER = "14-day free Worker Pilot, no card required";
 
+/** The wizard's one sign-in step (Worker Pilot, relay pairing, and the GitHub App). */
+export const WORKER_SIGN_IN_STEP =
+  "Sign in with GitHub to start your 14-day Worker Pilot (also connects instant events)";
+
 /** Entitlement row and next-step text when nobody is signed in yet. */
 export const WORKER_PILOT_NOT_STARTED = `Not started: sign in to begin your ${WORKER_PILOT_OFFER}`;
 
@@ -66,10 +70,13 @@ export function signInCommand(loginCommand: string = WORKER_LOGIN_COMMAND): stri
   return `${loginCommand} github`;
 }
 
+/** Opens the headless sign-in alternative in {@link signInHint} (text output drops it). */
+export const NO_TERMINAL_SIGN_IN = "Without a terminal:";
+
 /** Hint for the entitlement row when sign-in is the next step. */
 export function signInHint(loginCommand: string = WORKER_LOGIN_COMMAND): string {
   return (
-    `Run \`${signInCommand(loginCommand)}\` (or ${OTHER_LOGIN_METHODS}). Without a terminal: ` +
+    `Run \`${signInCommand(loginCommand)}\` (or ${OTHER_LOGIN_METHODS}). ${NO_TERMINAL_SIGN_IN} ` +
     `\`${signInCommand(loginCommand)} --no-wait\`. A paid LICENSE_KEY in the workspace .env works instead`
   );
 }

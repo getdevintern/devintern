@@ -36,6 +36,7 @@ import type {
 import { parseEnvFile } from "../workspace/env";
 import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 import type { WorkerScheduleConfig } from "../worker/schedule";
+import type { MemoryBudgetPercentages } from "../worker/memory-budget";
 import type { ApiResponse, DashboardData } from "./dashboard-api";
 import { resolveWorkerStatus } from "./dashboard-api";
 
@@ -178,6 +179,8 @@ export interface WorkspaceConfigView {
       isolation?: WorkspaceExecutionIsolation;
       maxConcurrency: number;
       maxConcurrencyPerRepo: number;
+      /** Host-memory percentages written into the generated systemd unit. */
+      memory: MemoryBudgetPercentages;
     };
     worktreesTtlDays: number;
     dashboard: boolean;

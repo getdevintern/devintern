@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { dirname, resolve } from "path";
 import { activateWorkerTrial, checkLicense, requireLicense } from "@devintern/license-check";
+import { PromptAttemptsExceededError } from "@devintern/task-trackers";
 import {
   VERSION,
   enforceLicenseOrExit,
@@ -71,10 +72,25 @@ async function runWorkerLoginSubcommand(args: string[]): Promise<never> {
     process.exit(1);
   }
   ensureWorkspaceCodeState(workspaceDir);
+  const stateDir = workspaceCodeStateDir(workspaceDir);
   return runLoginCommand(
     ["devintern", "login", ...loginArgs],
-    workspaceCodeStateDir(workspaceDir),
+    stateDir,
     workerLoginCommandFor(configPath),
+    {
+      // Signed in: pair the relay, and start a service `worker init --start` deferred.
+      afterSignIn: async (ctx) => {
+        const { runWorkerSignInFollowUp } = await import("../init/worker-sign-in-followup");
+        return { ...(await runWorkerSignInFollowUp({ ...ctx, workspaceDir, configPath })) };
+      },
+      currentUser: async () => {
+        const [{ getAuthenticatedUser }, { loadSupabaseConfig }] = await Promise.all([
+          import("@devintern/auth"),
+          import("../cli/bootstrap"),
+        ]);
+        return getAuthenticatedUser(loadSupabaseConfig(stateDir));
+      },
+    },
   );
 }
 
@@ -251,10 +267,11 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
 }
 
 const WORKER_INIT_USAGE = [
-  "Usage: devintern worker init [--customize] [--no-service]",
+  "Usage: devintern worker init [--customize] [--no-service] [--no-relay]",
   "       devintern worker init --non-interactive --tracker <id> [--task-query <query>]",
   "                             [--repo-from-cwd] [--env-file <path>] [--yes]",
-  "                             [--sign-in <method>] [--remove-env-file] [--create-label] [--json]",
+  "                             [--sign-in <method>] [--start] [--no-relay]",
+  "                             [--remove-env-file] [--create-label] [--json]",
   "",
   "Interactively configure unattended automation and a native user service.",
   "",
@@ -265,9 +282,11 @@ const WORKER_INIT_USAGE = [
   "  --customize         Ask each worker setting (CI repair, conflicts, active hours)",
   "                      and offer Sentry auto-fixes instead of the recommended settings",
   "  --no-service        Skip the install-and-launch offer for the systemd/launchd service",
+  "  --no-relay          Do not pair the DevIntern relay after signing in (polling only)",
   "",
   "Non-interactive mode (coding agents, scripts, SSH without a TTY):",
-  "  --non-interactive   Set up from flags; never prompts, pairs, or installs (signs in only with --sign-in)",
+  "  --non-interactive   Set up from flags; never prompts (signs in only with --sign-in,",
+  "                      installs the service only with --start)",
   "  --tracker <id>      Tracker the worker polls (jira, linear, github, ...)",
   "  --task-query <q>    Ready-tasks query, written to [defaults].task_query; a new",
   "                      workspace defaults to open tickets labeled devintern (every",
@@ -280,6 +299,9 @@ const WORKER_INIT_USAGE = [
   "                      not needed to re-run with the same flags (reports unchanged)",
   "  --sign-in <method>  If sign-in is needed, start it without waiting (github, google,",
   "                      x, or your email address) and print the address to open",
+  "  --start             When the checks pass, install and start the background service;",
+  "                      when only signing in is left, `worker login` does it after signing in",
+  "  --no-relay          Leave relay pairing out (the completing `worker login` skips it too)",
   "  --remove-env-file   Delete the --env-file once its values are saved (otherwise",
   "                      it is left in place and the output says it can be deleted)",
   "  --json              Print one JSON document with checks, files, and next steps",
@@ -348,7 +370,12 @@ async function runWorkerInitNonInteractive(args: string[]): Promise<never> {
     trackWorkerInitCompleted({
       tracker: report.tracker ?? "unknown",
       relayConnect: "skipped",
-      serviceInstall: "skipped",
+      serviceInstall:
+        report.start?.result === "installed"
+          ? "installed"
+          : report.start?.result === "failed"
+            ? "failed"
+            : "skipped",
       githubApp: "skipped",
       source: "non_interactive",
       outcome:
@@ -386,6 +413,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       "--sign-in",
       "--remove-env-file",
       "--create-label",
+      "--start",
     ].includes(arg.split("=")[0]),
   );
   if (nonInteractiveOnly) {
@@ -411,6 +439,7 @@ export async function runInteractiveWorkerInit(args: string[]): Promise<number> 
   const { checkWorkerEntitlement, reportWorkerInitAbort, runWorkerInit } =
     await import("../init/worker-init");
   const { defaultDevinternLabelOps } = await import("../init/worker-init-label");
+  const { defaultSampleTicketOps } = await import("../init/worker-init-first-task");
   const { isInteractive } = await import("../init/wizard");
   if (!isInteractive(args, process.stdin)) {
     console.log("❌ 'devintern worker init' needs a terminal for its prompts.");
@@ -427,12 +456,14 @@ export async function runInteractiveWorkerInit(args: string[]): Promise<number> 
     const noService = args.some((arg) => arg === "--no-service");
     const result = await runWorkerInit({
       noService,
+      noRelay: args.some((arg) => arg === "--no-relay"),
       customize: args.includes("--customize"),
       checkHost: async () => {
         const { defaultCheckHost } = await import("../init/worker-init-host");
         return defaultCheckHost({ noService });
       },
       devinternLabelOps: defaultDevinternLabelOps,
+      firstTask: { sampleTicketOps: defaultSampleTicketOps },
       dryRunQuery: async (query) => {
         const result = await trackerManager.getClient().searchTasks(query);
         return result.tasks.length;
@@ -460,9 +491,15 @@ export async function runInteractiveWorkerInit(args: string[]): Promise<number> 
     // is left, 1 a blocking check failed (or setup did not finish).
     exitCode = !result.ok ? 1 : result.ready ? 0 : result.signInOnly ? 2 : 1;
   } catch (error) {
-    if (!isPromptAbort(error)) throw error;
-    // The wizard already said setup paused and where the answers were saved.
-    exitCode = reportWorkerInitAbort(error, console.log);
+    if (isPromptAbort(error)) {
+      // The wizard already said setup paused and where the answers were saved.
+      exitCode = reportWorkerInitAbort(error, console.log);
+    } else if (error instanceof PromptAttemptsExceededError) {
+      console.error(`\n❌ ${error.message}; setup stopped. Re-run \`devintern worker init\`.`);
+      exitCode = 1;
+    } else {
+      throw error;
+    }
   }
   return exitCode;
 }
