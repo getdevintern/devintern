@@ -90,3 +90,30 @@ export function rejectWrongPat(
   onReject();
   return new Response(null, { status: 401, headers: { "www-authenticate": "Basic" } });
 }
+
+/**
+ * Asana's answer to a missing or unknown personal access token (HTTP 401 with
+ * an `errors` array), or undefined when no token is enforced or the request
+ * carries `Bearer <token>`. `onReject` runs before each 401.
+ */
+export function rejectWrongAsanaToken(
+  request: Request,
+  token: string | undefined,
+  onReject: () => void,
+): Response | undefined {
+  if (token === undefined || request.headers.get("authorization") === `Bearer ${token}`) {
+    return undefined;
+  }
+  onReject();
+  return jsonResponse(
+    {
+      errors: [
+        {
+          message: "Not Authorized",
+          help: "For more information on API status codes and how to handle them, read the docs on errors: https://developers.asana.com/docs/errors",
+        },
+      ],
+    },
+    401,
+  );
+}

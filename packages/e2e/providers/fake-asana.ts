@@ -16,8 +16,9 @@
  * whose body names the method and path, and the request is recorded so a test
  * can fail loudly even if the product ignores the error response.
  *
- * The server binds `127.0.0.1:0`, accepts any Bearer token, never logs or
- * echoes it, and never makes outbound requests.
+ * The server binds `127.0.0.1:0` and never makes outbound requests. It accepts
+ * any Bearer token unless started with `apiToken`, then answers every other
+ * token with Asana's 401; it never logs or echoes the token.
  */
 
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
@@ -25,6 +26,7 @@ import { FakeAsanaDependencies } from "./fake-asana-dependencies";
 import type { FakeAsanaDependencyRequest } from "./fake-asana-dependencies";
 import { parseOptFields, projectTaskPayload } from "./fake-asana-fields";
 import { asRecord, json, readJson } from "./fake-asana-http";
+import { rejectWrongAsanaToken } from "./fake-auth";
 
 /** Task statuses are project sections in Asana. */
 export interface FakeAsanaStatuses {
@@ -49,6 +51,8 @@ export interface FakeAsanaOptions {
   projectName?: string;
   /** Override one or more section names. */
   statuses?: Partial<FakeAsanaStatuses>;
+  /** Personal access token to require; any other Bearer token gets Asana's 401. */
+  apiToken?: string;
 }
 
 /** Filters the product applies after listing a project's tasks. */
@@ -249,7 +253,13 @@ export class FakeAsanaTracker implements TrackerFixture {
   /** Every request served, so a test can prove traffic never reached the fake. */
   readonly requests: string[] = [];
 
-  private readonly apiToken = crypto.randomUUID();
+  private readonly apiToken: string;
+  /** Set when the caller chose the token: then every other token gets a 401. */
+  private readonly enforcedToken: string | undefined;
+  /** Requests answered 401 because of a wrong or missing token. */
+  unauthorizedRequests = 0;
+  /** Number of `GET /projects` requests (the credential probe). */
+  projectListRequests = 0;
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
   /** Every `GET /events` call, oldest first. */
@@ -275,11 +285,13 @@ export class FakeAsanaTracker implements TrackerFixture {
     this.projectName = options.projectName ?? "E2E Asana Project";
     this.statuses = { ...FAKE_ASANA_STATUSES, ...options.statuses };
     this.openState = this.statuses.todo;
+    this.enforcedToken = options.apiToken;
+    this.apiToken = options.apiToken ?? crypto.randomUUID();
 
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch: (request) => this.handle(request),
+      fetch: (request) => this.serve(request),
     });
     this.baseUrl = `http://127.0.0.1:${this.server.port}`;
   }
@@ -520,11 +532,21 @@ export class FakeAsanaTracker implements TrackerFixture {
     this.server.stop(true);
   }
 
-  private async handle(request: Request): Promise<Response> {
+  /** Record the request, enforce the chosen token (if any), then route it. */
+  private async serve(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    this.requests.push(
+      `${request.method.toUpperCase()} ${decodeURIComponent(url.pathname)}${url.search}`,
+    );
+    const unauthorized = rejectWrongAsanaToken(request, this.enforcedToken, () => {
+      this.unauthorizedRequests++;
+    });
+    return unauthorized ?? this.handle(request, url);
+  }
+
+  private async handle(request: Request, url: URL): Promise<Response> {
     const path = decodeURIComponent(url.pathname);
     const method = request.method.toUpperCase();
-    this.requests.push(`${method} ${path}${url.search}`);
 
     const collection = method === "GET" ? this.handleCollection(path, url, request) : undefined;
     if (collection) return collection;
@@ -582,6 +604,10 @@ export class FakeAsanaTracker implements TrackerFixture {
 
   /** Top-level GET collections: the Events API feed and task attachments. */
   private handleCollection(path: string, url: URL, request: Request): Response | undefined {
+    if (path === `${API_PREFIX}/projects`) {
+      this.projectListRequests++;
+      return json({ data: [{ gid: this.projectGidValue, name: this.projectName }] });
+    }
     if (path === `${API_PREFIX}/events`) {
       return this.getEvents(url.searchParams, request.headers.get("authorization"));
     }

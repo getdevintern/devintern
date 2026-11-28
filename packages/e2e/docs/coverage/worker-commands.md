@@ -147,8 +147,8 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: `devintern worker` surface
 - Status: `default`
 - Evidence: `tests/local/worker-doctor-trackers.test.ts` against `providers/fake-jira.ts`. `[defaults]` (Jira, credentials in the workspace `.env`): **Tracker credentials** passes and **Task query** reports `2 tasks match`, the fake records exactly the configured JQL once, exit 0. A query the fake rejects with 400 and Jira-style `errorMessages` exits 1 with the Jira error and the `Fix [defaults].task_query in workspace.toml` hint, after exactly one search. With `JIRA_API_TOKEN` absent, the credential row names the variable and the `.env` path, the dry run is `not run (missing tracker credentials)`, and no request reaches the fake. `[[teams]]`: two Jira teams on separate fakes (one via `env_file`, one via `[teams.env]`) both pass with their own JQL. A missing token or a rejected query fails only that team, labelled `jira (team "<name>")`, with the team hint (naming `env/alpha.env` when set). `--offline` still runs the local credential check (a missing token still exits 1) and turns each dry run into a `skipped (--offline)` warning with no fake request. Tokens never appear raw or URL-encoded in output; no state database or lock is created; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
-- Missing: Asana, GitHub, GitLab, and Markdown trackers (Linear, Trello, and Azure DevOps have their own rows below); a dry-run timeout; namespaced team values in the workspace `.env` (`JIRA_<TEAM>_*`); live Jira `/search/jql` drift. Observed (unconfirmed intent): the **Work sources** detail pluralizes as `2 tracker querys` (not asserted).
-- Last reviewed: 2026-11-25
+- Missing: GitHub Issues: blocked offline, because `packages/task-trackers/src/clients/github*.ts` hardcode `https://api.github.com`, so no loopback fake can stand in; Markdown (Linear, Trello, Azure DevOps, Asana, and GitLab Issues have their own rows below); a dry-run timeout; namespaced team values in the workspace `.env` (`JIRA_<TEAM>_*`); live Jira `/search/jql` drift. Observed (unconfirmed intent): the **Work sources** detail pluralizes as `2 tracker querys` (not asserted).
+- Last reviewed: 2026-11-28
 
 ### worker doctor: Linear tracker credentials and task-query dry run
 
@@ -169,10 +169,26 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 ### worker doctor: Azure DevOps tracker credentials and task-query dry run
 
 - Surface: `devintern worker` surface (external dependency: the tracker's search API)
-- Status: `partial`
-- Evidence: `tests/local/worker-doctor-trackers-more.test.ts` ("… missing Azure DevOps PAT …") against `providers/fake-azure-devops.ts` started with a random `pat` (any `Authorization` other than `Basic base64(":PAT")` gets a bare HTTP 401). `[defaults]` with a WIQL `task_query`, `AZURE_DEVOPS_ORG`/`AZURE_DEVOPS_PAT`/`AZURE_DEVOPS_PROJECT`/`AZURE_DEVOPS_BASE_URL` in the workspace `.env`, and `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1` in the child environment. `--offline`, exit 0: `✅ Tracker credentials — azure-devops ([defaults])`, `⚠️  Task query — azure-devops ([defaults]): skipped (--offline)`. `AZURE_DEVOPS_PAT` absent, exit 1: `❌ Tracker credentials — azure-devops ([defaults]): missing AZURE_DEVOPS_PAT`, `💡 Add the missing variables to <workspace>/.env`, `❌ Task query — azure-devops ([defaults]): not run (missing tracker credentials)`, `❌ Not ready — …`; the fake records no WIQL request and nothing unexpected. The PAT appears neither raw, URL-encoded, nor as the base64 `:PAT` Basic-auth value in stdout or stderr; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
-- Missing: blocked: the online pass, rejected-WIQL, and wrong-PAT cases. Prerequisite: the doctor credential probe (`defaultProbe` in `packages/task-trackers/src/init/wizard-core.ts`) builds `AzureDevOpsClient` without `baseUrl`, so it must honor `AZURE_DEVOPS_BASE_URL` under `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1` the way `createTrackerClient` does; until then the dry run never runs offline. Observed (unconfirmed intent): with full credentials and the fake opt-in, doctor's credential probe sends `CONNECT dev.azure.com` (refused by the recording proxy) and reports `❌ Tracker credentials — azure-devops ([defaults]): Proxy refused to open a tunnel: 403 Forbidden` with the `Add the missing variables` hint, then skips the dry run (not asserted). Also missing: `[[teams]]` sources and a dry-run timeout.
-- Last reviewed: 2026-11-27
+- Status: `default`
+- Evidence: `tests/local/worker-doctor-trackers-more.test.ts` ("… Azure DevOps [defaults].task_query …") against `providers/fake-azure-devops.ts` started with a random `pat` (any `Authorization` other than `Basic base64(":PAT")` gets a bare HTTP 401). `[defaults]` with a WIQL `task_query`, `AZURE_DEVOPS_ORG`/`AZURE_DEVOPS_PAT`/`AZURE_DEVOPS_PROJECT`/`AZURE_DEVOPS_BASE_URL` in the workspace `.env`, and `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1` in the child environment. Pass, exit 0: `✅ Tracker credentials — azure-devops ([defaults])` (one `GET /_apis/projects` probe), `✅ Task query — azure-devops ([defaults]): 2 tasks match`, `✅ Everything looks good — …`; the fake records exactly the configured WIQL once. `--offline`, exit 0: the credential row passes, `⚠️  Task query — azure-devops ([defaults]): skipped (--offline)`, and no request. Rejected WIQL (`rejectWiqlContaining`: HTTP 400 with a `TF51005` `VssServiceException` body), exit 1: `❌ Task query — azure-devops ([defaults]): Azure DevOps API error (400): ` with the message, the `Fix [defaults].task_query` hint, `❌ Not ready — …`. Wrong PAT, exit 1: `❌ Tracker credentials — azure-devops ([defaults]): Azure DevOps API error (401)`, `❌ Task query — azure-devops ([defaults]): not run`; exactly one 401 and no WIQL. `AZURE_DEVOPS_PAT` absent, exit 1: `❌ Tracker credentials — azure-devops ([defaults]): missing AZURE_DEVOPS_PAT`, `💡 Add the missing variables to <workspace>/.env`, `❌ Task query — azure-devops ([defaults]): not run (missing tracker credentials)`; no request, nothing unexpected. The PAT appears neither raw, URL-encoded, nor as the base64 `:PAT` Basic-auth value in stdout or stderr; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: `[[teams]]` sources; a dry-run timeout; live Azure DevOps WIQL drift. The earlier observation that the credential probe sent `CONNECT dev.azure.com` no longer reproduces: since PR #682 the probe honors `AZURE_DEVOPS_BASE_URL` under the fake opt-in, and the refusing proxy sees zero requests. Observed (unconfirmed intent): as for Linear, a 401 from the credential probe is followed by `not run (missing tracker credentials)` and the `Add the missing variables` hint (not asserted).
+- Last reviewed: 2026-11-28
+
+### worker doctor: Asana tracker credentials and task-query dry run
+
+- Surface: `devintern worker` surface (external dependency: the tracker's search API)
+- Status: `default`
+- Evidence: `tests/local/worker-doctor-trackers-asana-gitlab.test.ts` ("… Asana project [defaults].task_query …") against `providers/fake-asana.ts` started with a random `apiToken` (any other Bearer token gets Asana's HTTP 401 `{"errors":[{"message":"Not Authorized",…}]}`). `[defaults]` with `tracker = "asana"`, `task_query = "project:<gid> <marker>"`, `ASANA_API_TOKEN`/`ASANA_DEFAULT_PROJECT_GID` in the workspace `.env`, and `DEVINTERN_E2E_FAKE_ASANA=1`/`ASANA_API_BASE_URL` in the child environment (the client reads them at import, before the `.env` loads). Pass, exit 0: `✅ Tracker credentials — asana ([defaults])` (one `GET /projects` probe), `✅ Task query — asana ([defaults]): 2 tasks match` (one project task listing; a decoy without the marker is not counted), `✅ Everything looks good — …`. Wrong token, exit 1: `❌ Tracker credentials — asana ([defaults]): Asana API error (401): ` with `Not Authorized`, `❌ Task query — asana ([defaults]): not run`, `❌ Not ready — …`; exactly one 401, no further probe and no listing. `ASANA_API_TOKEN` absent, exit 1: `❌ Tracker credentials — asana ([defaults]): missing ASANA_API_TOKEN`, `💡 Add the missing variables to <workspace>/.env`, `❌ Task query — asana ([defaults]): not run (missing tracker credentials)`; zero requests reach the fake, and nothing unexpected. Neither token appears raw or URL-encoded in stdout or stderr; no state database or lock is created; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: a query the provider rejects (the product lists the project's tasks and filters locally, so Asana has no query text to reject; an unknown project GID is the closest case); `[[teams]]` sources; `--offline`; a dry-run timeout; live Asana API drift. Observed (unconfirmed intent): as for Linear, a 401 from the credential probe is followed by `not run (missing tracker credentials)` and the `Add the missing variables` hint (not asserted).
+- Last reviewed: 2026-11-28
+
+### worker doctor: GitLab Issues tracker credentials and task-query dry run
+
+- Surface: `devintern worker` surface (external dependency: the tracker's search API)
+- Status: `default`
+- Evidence: `tests/local/worker-doctor-trackers-asana-gitlab.test.ts` ("… GitLab Issues label [defaults].task_query …") against `providers/fake-gitlab-issues.ts` (a random per-run `PRIVATE-TOKEN`; any other token gets GitLab's HTTP 401 `{"message":"401 Unauthorized"}`). `[defaults]` with `tracker = "gitlab"`, `task_query = "is:open label:<marker>"`, and `GITLAB_TOKEN`/`GITLAB_PROJECT`/`GITLAB_BASE_URL` in the workspace `.env`. Pass, exit 0: `✅ Tracker credentials — gitlab ([defaults])` (one `GET /api/v4/user`), `✅ Task query — gitlab ([defaults]): 2 tasks match` (a closed labelled issue and an unlabelled decoy are not counted), `✅ Everything looks good — …`; one issue search. Wrong token, exit 1: `❌ Tracker credentials — gitlab ([defaults]): GitLab API error (401): ` with `401 Unauthorized`, `❌ Task query — gitlab ([defaults]): not run`, `❌ Not ready — …`; the `/user` probe is answered 401 and no search runs. Nonexistent `GITLAB_PROJECT`, exit 1: `✅ Tracker credentials — gitlab ([defaults])` (the probe checks only the token), `❌ Task query — gitlab ([defaults]): GitLab API error (404): ` with `404 Project Not Found`, `❌ Not ready — …`; the only unrouted request is that project's `GET …/issues` (404). Neither token appears raw or URL-encoded in stdout or stderr; no state database or lock is created; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: a missing `GITLAB_TOKEN`; `[[teams]]` sources; `--offline`; a dry-run timeout; live GitLab REST drift. Observed (unconfirmed intent): as for Linear, a 401 from the credential probe is followed by `not run (missing tracker credentials)` and the `Add the missing variables` hint; a nonexistent `GITLAB_PROJECT` (set in `.env`) gets the `Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)` hint, and the credential row passes because the probe does not read the project (neither asserted).
+- Last reviewed: 2026-11-28
 
 ## Backlog
 
@@ -391,10 +407,42 @@ passing check proves doctor sent the configured secret. Shared helpers
 - Trello: the same matrix for `[defaults]` through `rejectSearchesContaining`
   (HTTP 400, plain text), plus a `[[teams]]` source with `[teams.env]`
   credentials that asserts the `trello (team "ops")` label and both team hints.
-- Azure DevOps: only `--offline` and a missing `AZURE_DEVOPS_PAT` (no request),
-  with the PAT checked raw, URL-encoded, and as base64 `:PAT`. The online dry
-  run is blocked on the credential probe ignoring `AZURE_DEVOPS_BASE_URL` (see
-  the row).
+- Azure DevOps: pass with the match count and one recorded WIQL, `--offline`,
+  WIQL rejected through `rejectWiqlContaining` (HTTP 400, `TF51005`), a wrong
+  PAT (one 401, no WIQL), and a missing `AZURE_DEVOPS_PAT` (no request), with
+  the PAT checked raw, URL-encoded, and as base64 `:PAT`.
+
+Prerequisites: the built CLI only (no real tracker, network, or credentials).
+Each test owns one temporary root and removes it in `finally` with the
+recording proxy and the fake tracker.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Worker doctor tracker checks: Asana, GitLab Issues
+
+`tests/local/worker-doctor-trackers-asana-gitlab.test.ts` runs `devintern
+worker doctor` the same way, with the shared `withDoctorWorker` wrapper in
+`helpers/worker-doctor.ts` (recording proxy, prepared but never started
+`WorkerFixture`, and cleanup of the worker, fake, and proxy in `finally`). It
+proves the credential probe and the dry run reach a fake that only accepts
+the configured secret.
+
+- Asana: `FakeAsanaTracker` started with a random `apiToken`, which it
+  enforces on every route with Asana's 401 body. The fake opt-in and
+  `ASANA_API_BASE_URL` are set in the child environment because the client
+  reads them at import. Cases: pass (`GET /projects` probe, project-GID query
+  with 2 matches), a wrong token (one 401, no listing), and a missing
+  `ASANA_API_TOKEN` (no request).
+- GitLab Issues: `FakeGitLabIssues` with its random `PRIVATE-TOKEN` and
+  `GITLAB_BASE_URL` in the `.env`. Cases: pass (`/user` probe, label query
+  with 2 matches), a wrong token (401, no search), and a nonexistent
+  `GITLAB_PROJECT` (the fake answers GitLab's `404 Project Not Found`, so the
+  dry run fails while the credential row passes).
+
+GitHub Issues is not covered: its client hardcodes `https://api.github.com`.
 
 Prerequisites: the built CLI only (no real tracker, network, or credentials).
 Each test owns one temporary root and removes it in `finally` with the

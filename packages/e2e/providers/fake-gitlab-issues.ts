@@ -21,7 +21,8 @@
  * It shares no code with the product client, so a regression in a path,
  * payload, or header fails instead of being mirrored. Routing is strict: any
  * other route, or another project, answers 404 and is recorded in
- * {@link FakeGitLabIssues.unexpectedRequests}. Requests without the per-run
+ * {@link FakeGitLabIssues.unexpectedRequests}; another project's body is
+ * GitLab's `404 Project Not Found`. Requests without the per-run
  * `PRIVATE-TOKEN` answer 401. The request log keeps method, path, and status
  * only; headers and the token are never stored or echoed.
  *
@@ -299,7 +300,15 @@ export class FakeGitLabIssues {
 
   private notFound(entry: FakeGitLabRequest): Response {
     this.unexpected.push(entry);
+    // Another project gets GitLab's own body, as for a project the token cannot see.
+    if (entry.path.startsWith("/api/v4/projects/") && !entry.path.startsWith(this.projectPrefix)) {
+      return json({ message: "404 Project Not Found" }, 404);
+    }
     return json({ message: `404 Not Found: ${entry.method} ${entry.path}` }, 404);
+  }
+
+  private get projectPrefix(): string {
+    return `/api/v4/projects/${encodeURIComponent(this.projectPath)}/`;
   }
 
   private async route(request: Request, url: URL): Promise<Response | undefined> {
